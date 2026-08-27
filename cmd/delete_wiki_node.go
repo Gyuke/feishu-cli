@@ -242,11 +242,19 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 
 		// 危险操作确认
 		if !force {
-			prompt := fmt.Sprintf("确定要删除知识库节点 %s 吗？此操作不可恢复", nodeToken)
+			target := nodeToken
 			if nodeTitle != "" {
-				prompt = fmt.Sprintf("确定要删除知识库节点 \"%s\" (%s) 吗？此操作不可恢复", nodeTitle, nodeToken)
+				target = fmt.Sprintf("%q (%s)", nodeTitle, nodeToken)
 			}
-			if !confirmAction(prompt) {
+			// 必须点明级联范围：--include-children 默认 true，
+			// 用户以为只删一个节点，实际会连带销毁整棵子树。
+			scope := "此操作不可恢复"
+			if includeChildren {
+				scope = "将级联删除该节点及其**全部子节点**，此操作不可恢复"
+			} else {
+				scope = "仅删除该节点本身（--include-children=false），此操作不可恢复"
+			}
+			if !confirmAction(fmt.Sprintf("确定要删除知识库节点 %s 吗？%s", target, scope)) {
 				fmt.Println("操作已取消")
 				return nil
 			}
@@ -292,9 +300,15 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 		if err != nil {
 			return err
 		}
-		result["ready"] = true
+		// 用 status.Ready() 判定而非硬置 true：轮询虽在失败态提前返回 error，
+		// 但若服务端出现非 success 的终态（或未来新增状态），ready 必须如实反映，
+		// 不能让 JSON 消费方把未完成的删除当成已完成。
+		result["ready"] = status.Ready()
+		result["failed"] = !status.Ready()
 		result["status"] = status.Status
-		result["status_msg"] = status.StatusMsg
+		if status.StatusMsg != "" {
+			result["status_msg"] = status.StatusMsg
+		}
 		return printDeleteWikiNodeResult(result, output)
 	},
 }
