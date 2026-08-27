@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -132,7 +133,7 @@ func GetMailMessage(mailboxID, messageID, format, userAccessToken string) (json.
 	return callMailAPI(http.MethodGet, apiPath, nil, userAccessToken)
 }
 
-// BatchGetMailMessages 批量获取邮件（单批最多 20 条，自动分块，严格按请求顺序保序，并在缺漏时返回 unavailable_message_ids）
+// BatchGetMailMessages 批量获取邮件（单批最多 20 条，自动分块，严格按请求顺序保序，输出包含 total 与 unavailable_message_ids）
 // API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/messages/batch_get
 func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -142,7 +143,10 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 		format = "full"
 	}
 	if len(messageIDs) == 0 {
-		return json.Marshal(map[string]any{"messages": []any{}})
+		return json.Marshal(map[string]any{
+			"messages": []any{},
+			"total":    0,
+		})
 	}
 
 	const batchSize = 20
@@ -196,6 +200,7 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 
 	out := map[string]any{
 		"messages": ordered,
+		"total":    len(ordered),
 	}
 	if len(unavailableIDs) > 0 {
 		out["unavailable_message_ids"] = unavailableIDs
@@ -204,7 +209,7 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 	return json.Marshal(out)
 }
 
-// GetMailThread 获取线程并按时间升序实际排序（保留 thread 及其内部全部未知字段）
+// GetMailThread 获取线程并按时间升序实际排序（保留 thread 及其内部全部未知字段，使用 UseNumber 保持大整数精度）
 // API: GET /open-apis/mail/v1/user_mailboxes/{mailbox_id}/threads/{thread_id}
 func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -222,9 +227,11 @@ func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.Ra
 }
 
 func sortThreadMessages(data json.RawMessage) (json.RawMessage, error) {
-	// 使用 map[string]any 解析，以完整保留顶层和 thread 内部的所有未知字段（如 subject、participants、metadata 等）
+	// 使用 json.NewDecoder + UseNumber 解析，以完整保留顶层和 thread 内部的所有未知字段与 >2^53 大整数精度
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var topMap map[string]any
-	if err := json.Unmarshal(data, &topMap); err != nil {
+	if err := dec.Decode(&topMap); err != nil {
 		return data, nil
 	}
 	threadRaw, ok := topMap["thread"]
@@ -256,10 +263,10 @@ func sortThreadMessages(data json.RawMessage) (json.RawMessage, error) {
 				switch v := d.(type) {
 				case string:
 					dateVal, _ = strconv.ParseInt(v, 10, 64)
-				case float64:
-					dateVal = int64(v)
 				case json.Number:
 					dateVal, _ = v.Int64()
+				case float64:
+					dateVal = int64(v)
 				}
 			}
 		}
@@ -422,10 +429,102 @@ func extractMailDraftID(data json.RawMessage) string {
 
 // ==================== 文件夹和标签 ====================
 
+var systemMailFolderNames = map[string]string{
+	"inbox":     "inbox",
+	"sent":      "sent",
+	"draft":     "draft",
+	"drafts":    "draft",
+	"trash":     "trash",
+	"spam":      "spam",
+	"archive":   "archive",
+	"archived":  "archive",
+	"priority":  "priority",
+	"important": "priority",
+	"flagged":   "flagged",
+	"other":     "other",
+	"scheduled": "scheduled",
+}
+
+var systemMailLabelNames = map[string]string{
+	"important": "priority",
+	"priority":  "priority",
+	"flagged":   "flagged",
+	"other":     "other",
+	"scheduled": "scheduled",
+}
+
+func mapSearchFolderName(mailboxID, folder string, userAccessToken string) string {
+	folder = strings.TrimSpace(folder)
+	if folder == "" {
+		return ""
+	}
+	lower := strings.ToLower(folder)
+	if mapped, ok := systemMailFolderNames[lower]; ok {
+		return mapped
+	}
+	// 尝试作为自定义 folder_id 查询解析
+	raw, err := ListMailFolders(mailboxID, userAccessToken)
+	if err == nil {
+		var resp struct {
+			Items []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"items"`
+			Folders []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"folders"`
+		}
+		if err := json.Unmarshal(raw, &resp); err == nil {
+			all := append(resp.Items, resp.Folders...)
+			for _, item := range all {
+				if item.ID == folder && item.Name != "" {
+					return item.Name
+				}
+			}
+		}
+	}
+	return folder
+}
+
+func mapSearchLabelName(mailboxID, label string, userAccessToken string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	lower := strings.ToLower(label)
+	if mapped, ok := systemMailLabelNames[lower]; ok {
+		return mapped
+	}
+	// 尝试作为自定义 label_id 查询解析
+	raw, err := ListMailLabels(mailboxID, userAccessToken)
+	if err == nil {
+		var resp struct {
+			Items []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"items"`
+			Labels []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"labels"`
+		}
+		if err := json.Unmarshal(raw, &resp); err == nil {
+			all := append(resp.Items, resp.Labels...)
+			for _, item := range all {
+				if item.ID == label && item.Name != "" {
+					return item.Name
+				}
+			}
+		}
+	}
+	return label
+}
+
 // SearchMailMessages 通过专用 search 端点搜索邮件
 // API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/search?page_size=xx&page_token=yy
-// body: {"query": "关键词", "filter": {"folder": ["INBOX"], "label": ["xxx"], "is_unread": true}}
-// 用于 mail triage --query 的真实搜索（不同于 ListMailMessages 的列表过滤）
+// body: {"query": "关键词", "filter": {"folder": ["inbox"], "label": ["xxx"], "is_unread": true}}
+// 用于 mail triage --query 的真实搜索（支持系统别名及自定义 ID→名称 解析）
 func SearchMailMessages(mailboxID, query string, filter map[string]any, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
 		mailboxID = "me"
@@ -444,14 +543,18 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 			switch val := v.(type) {
 			case string:
 				if val != "" {
-					normalizedFilter["folder"] = []string{val}
+					normalizedFilter["folder"] = []string{mapSearchFolderName(mailboxID, val, userAccessToken)}
 				}
 			case []string:
-				normalizedFilter["folder"] = val
+				mapped := make([]string, 0, len(val))
+				for _, item := range val {
+					mapped = append(mapped, mapSearchFolderName(mailboxID, item, userAccessToken))
+				}
+				normalizedFilter["folder"] = mapped
 			case []any:
 				var arr []string
 				for _, item := range val {
-					arr = append(arr, fmt.Sprintf("%v", item))
+					arr = append(arr, mapSearchFolderName(mailboxID, fmt.Sprintf("%v", item), userAccessToken))
 				}
 				normalizedFilter["folder"] = arr
 			default:
@@ -461,14 +564,18 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 			switch val := v.(type) {
 			case string:
 				if val != "" {
-					normalizedFilter["label"] = []string{val}
+					normalizedFilter["label"] = []string{mapSearchLabelName(mailboxID, val, userAccessToken)}
 				}
 			case []string:
-				normalizedFilter["label"] = val
+				mapped := make([]string, 0, len(val))
+				for _, item := range val {
+					mapped = append(mapped, mapSearchLabelName(mailboxID, item, userAccessToken))
+				}
+				normalizedFilter["label"] = mapped
 			case []any:
 				var arr []string
 				for _, item := range val {
-					arr = append(arr, fmt.Sprintf("%v", item))
+					arr = append(arr, mapSearchLabelName(mailboxID, fmt.Sprintf("%v", item), userAccessToken))
 				}
 				normalizedFilter["label"] = arr
 			default:

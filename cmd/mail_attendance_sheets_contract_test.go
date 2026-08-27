@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -277,4 +278,103 @@ func TestAttendanceUserTask_AsBotAndUser(t *testing.T) {
 		t.Fatal("corrupt / missing user token under --as user must return error (fail-closed)")
 	}
 	os.Unsetenv("FEISHU_PROFILE")
+}
+
+// TestMailMessagesCmd_51PlusAndDuplicates 验证 mail messages 支持 51+ 条 ID 自动 20 分块且严格保留重复与顺序
+func TestMailMessagesCmd_51PlusAndDuplicates(t *testing.T) {
+	callCount := 0
+	var requestedBatches [][]string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			MessageIDs []string `json:"message_ids"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		requestedBatches = append(requestedBatches, body.MessageIDs)
+
+		var msgs []map[string]any
+		for _, id := range body.MessageIDs {
+			msgs = append(msgs, map[string]any{
+				"message_id": id,
+				"subject":    "Subject of " + id,
+			})
+		}
+		respData := map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]any{
+				"messages": msgs,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(respData)
+	}))
+	defer srv.Close()
+	setupCmdTestConfig(t, srv.URL)
+
+	// 构造 55 个 ID，包含重复项
+	var ids []string
+	for i := 1; i <= 53; i++ {
+		ids = append(ids, fmt.Sprintf("msg_%02d", i))
+	}
+	ids = append(ids, "msg_01", "msg_02") // 54, 55 (重复 msg_01, msg_02)
+	rawCSV := strings.Join(ids, ",")
+
+	_ = mailMessagesCmd.Flags().Set("as", "user")
+	_ = mailMessagesCmd.Flags().Set("mailbox", "me")
+	_ = mailMessagesCmd.Flags().Set("message-ids", rawCSV)
+	_ = mailMessagesCmd.Flags().Set("user-access-token", "u-test-token")
+
+	err := mailMessagesCmd.RunE(mailMessagesCmd, []string{})
+	if err != nil {
+		t.Fatalf("mail messages 55 items error: %v", err)
+	}
+
+	// 验证网络发出了 3 批（20, 20, 15）
+	if callCount != 3 {
+		t.Errorf("55 条 ID 应分 3 批网络请求，实际 %d 批", callCount)
+	}
+	if len(requestedBatches) != 3 || len(requestedBatches[0]) != 20 || len(requestedBatches[1]) != 20 || len(requestedBatches[2]) != 15 {
+		t.Errorf("网络分块大小异常: %v", requestedBatches)
+	}
+}
+
+// TestMailMessagesCmd_EmptySegmentsRejected 验证空 segment（如 "m1,,m2"）在发起网络请求前被拒绝报错
+func TestMailMessagesCmd_EmptySegmentsRejected(t *testing.T) {
+	networkCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		networkCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
+	}))
+	defer srv.Close()
+	setupCmdTestConfig(t, srv.URL)
+
+	invalidCSVs := []string{
+		"m1,,m2",
+		",m1",
+		"m1,",
+		"m1, ,m2",
+		"m1,   ",
+		"",
+		"   ",
+	}
+
+	for _, csv := range invalidCSVs {
+		networkCalled = false
+		_ = mailMessagesCmd.Flags().Set("as", "user")
+		_ = mailMessagesCmd.Flags().Set("mailbox", "me")
+		_ = mailMessagesCmd.Flags().Set("message-ids", csv)
+		_ = mailMessagesCmd.Flags().Set("user-access-token", "u-test-token")
+
+		err := mailMessagesCmd.RunE(mailMessagesCmd, []string{})
+		if err == nil {
+			t.Errorf("输入 %q 应报错，但通过了", csv)
+		}
+		if networkCalled {
+			t.Errorf("输入 %q 时不应触发网络调用", csv)
+		}
+	}
 }

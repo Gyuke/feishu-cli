@@ -3,23 +3,47 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
+// parseMailMessageIDs 解析 --message-ids 列表（逗号分隔）。
+// 规则：
+// 1. 保留请求顺序和重复 ID（不去重）；
+// 2. 不设 50 条上限（由底层 client 自动按 20 条切片分块请求）；
+// 3. 空串、全空白串、或包含空 segment（如 "m1,,m2"、",m1"、"m1,"、"m1, ,m2"）时返回明确错误。
+func parseMailMessageIDs(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("--message-ids 至少需要一个 ID")
+	}
+	parts := strings.Split(trimmed, ",")
+	res := make([]string, 0, len(parts))
+	for i, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			return nil, fmt.Errorf("--message-ids 包含空的邮件 ID（第 %d 项为空）", i+1)
+		}
+		res = append(res, item)
+	}
+	return res, nil
+}
+
 var mailMessagesCmd = &cobra.Command{
 	Use:   "messages",
 	Short: "批量获取多封邮件",
-	Long: `批量获取多封邮件（最多 50 条）。
+	Long: `批量获取多封邮件（客户端自动按每批 20 条分块请求，严格保序并支持重复 ID）。
 
 必填:
   --message-ids  邮件 ID 列表（逗号分隔）
 
 可选:
-  --mailbox    默认 me
+  --mailbox    默认 me（Bot 身份需显式指定具体邮箱地址）
   --format     full / plain_text_full（默认 full）
+  --as         身份选择: bot | user | auto（默认 auto）
   -o json      JSON 格式
 
 示例:
@@ -37,12 +61,9 @@ var mailMessagesCmd = &cobra.Command{
 		format, _ := cmd.Flags().GetString("format")
 		output, _ := cmd.Flags().GetString("output")
 
-		ids, err := parseCSVIDs(raw, "message-ids")
+		ids, err := parseMailMessageIDs(raw)
 		if err != nil {
 			return err
-		}
-		if len(ids) == 0 {
-			return fmt.Errorf("--message-ids 至少需要一个 ID")
 		}
 
 		data, err := client.BatchGetMailMessages(mailbox, ids, format, token)

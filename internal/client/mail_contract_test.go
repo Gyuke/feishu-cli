@@ -68,10 +68,10 @@ func TestMailSearch_QueryAndFilterContract(t *testing.T) {
 		t.Fatalf("body.filter 缺失或格式不正确: %v", gotBody)
 	}
 
-	// folder 应为 []any{"INBOX"}
+	// folder 应映射为官方系统名 []any{"inbox"}
 	folders, ok := bodyFilter["folder"].([]any)
-	if !ok || len(folders) != 1 || folders[0] != "INBOX" {
-		t.Errorf("filter.folder = %v, want ['INBOX']", bodyFilter["folder"])
+	if !ok || len(folders) != 1 || folders[0] != "inbox" {
+		t.Errorf("filter.folder = %v, want ['inbox']", bodyFilter["folder"])
 	}
 	// label 应为 []any{"LBL_WORK"}
 	labels, ok := bodyFilter["label"].([]any)
@@ -296,6 +296,134 @@ func TestMailThread_PreserveFullJSONFields(t *testing.T) {
 	}
 	if m2["message_id"] != "m2" || m2["custom_msg_payload"] != "payload_2" {
 		t.Errorf("m2 顺序或内部字段异常: %v", m2)
+	}
+}
+
+// TestMailThread_PreserveBigIntGreaterThan2Pow53 验证 thread 排序时使用 UseNumber 保持 >2^53 大整数精度
+func TestMailThread_PreserveBigIntGreaterThan2Pow53(t *testing.T) {
+	const bigInt1 = `9007199254740993` // 2^53 + 1, float64 会丢失精度变为 9007199254740992
+	const bigInt2 = `17300000000000001`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respJSON := fmt.Sprintf(`{
+			"code": 0,
+			"msg": "ok",
+			"data": {
+				"custom_big_int": %s,
+				"thread": {
+					"id": "th_big",
+					"thread_snowflake_id": %s,
+					"messages": [
+						{"message_id": "m2", "internal_date": "1682378000000", "msg_big_id": %s},
+						{"message_id": "m1", "internal_date": "1682377000000", "msg_big_id": %s}
+					]
+				}
+			}
+		}`, bigInt1, bigInt2, bigInt1, bigInt2)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, respJSON)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	data, err := GetMailThread("me", "th_big", "full", "u-test-token")
+	if err != nil {
+		t.Fatalf("GetMailThread 失败: %v", err)
+	}
+
+	rawStr := string(data)
+	// 验证字符串输出中依然精确包含原始大整数字面量，未被转成浮点或科学计数法
+	if !strings.Contains(rawStr, bigInt1) {
+		t.Errorf("大整数 %s 在输出中丢失/精度损坏: %s", bigInt1, rawStr)
+	}
+	if !strings.Contains(rawStr, bigInt2) {
+		t.Errorf("大整数 %s 在输出中丢失/精度损坏: %s", bigInt2, rawStr)
+	}
+}
+
+// TestMailSearch_FolderNameAndLabelNameMapping 验证 SearchMailMessages 对系统别名和自定义 ID 的映射
+func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
+	var gotSearchBody map[string]any
+	var gotSearchQuery string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/mail/v1/user_mailboxes/me/folders":
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_custom_001","name":"自定义工作文件夹"}]}}`)
+		case "/open-apis/mail/v1/user_mailboxes/me/labels":
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"lbl_custom_001","name":"紧急项目"}]}}`)
+		case "/open-apis/mail/v1/user_mailboxes/me/search":
+			gotSearchQuery = r.URL.RawQuery
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &gotSearchBody)
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	// 1. 系统别名映射测试：INBOX → inbox, IMPORTANT → priority
+	filter1 := map[string]any{
+		"folder":    "INBOX",
+		"label":     "IMPORTANT",
+		"page_size": 10,
+	}
+	_, err := SearchMailMessages("me", "test", filter1, "u-test-token")
+	if err != nil {
+		t.Fatalf("SearchMailMessages error: %v", err)
+	}
+	if !strings.Contains(gotSearchQuery, "page_size=10") {
+		t.Errorf("query 应包含 page_size=10, got: %s", gotSearchQuery)
+	}
+	f1, _ := gotSearchBody["filter"].(map[string]any)
+	if folders, ok := f1["folder"].([]any); !ok || len(folders) != 1 || folders[0] != "inbox" {
+		t.Errorf("INBOX 映射 = %v, want ['inbox']", f1["folder"])
+	}
+	if labels, ok := f1["label"].([]any); !ok || len(labels) != 1 || labels[0] != "priority" {
+		t.Errorf("IMPORTANT 映射 = %v, want ['priority']", f1["label"])
+	}
+
+	// 2. 自定义 ID 解析测试：fld_custom_001 → 自定义工作文件夹, lbl_custom_001 → 紧急项目
+	gotSearchBody = nil
+	filter2 := map[string]any{
+		"folder_id": "fld_custom_001",
+		"label_id":  "lbl_custom_001",
+	}
+	_, err = SearchMailMessages("me", "test2", filter2, "u-test-token")
+	if err != nil {
+		t.Fatalf("SearchMailMessages error: %v", err)
+	}
+	f2, _ := gotSearchBody["filter"].(map[string]any)
+	if folders, ok := f2["folder"].([]any); !ok || len(folders) != 1 || folders[0] != "自定义工作文件夹" {
+		t.Errorf("fld_custom_001 映射 = %v, want ['自定义工作文件夹']", f2["folder"])
+	}
+	if labels, ok := f2["label"].([]any); !ok || len(labels) != 1 || labels[0] != "紧急项目" {
+		t.Errorf("lbl_custom_001 映射 = %v, want ['紧急项目']", f2["label"])
+	}
+}
+
+// TestMailBatchGet_ZeroItems 验证 0 项请求返回 total=0
+func TestMailBatchGet_ZeroItems(t *testing.T) {
+	setupTestConfig(t, "http://127.0.0.1:9999")
+
+	data, err := BatchGetMailMessages("me", []string{}, "full", "u-test-token")
+	if err != nil {
+		t.Fatalf("BatchGetMailMessages error: %v", err)
+	}
+
+	var res struct {
+		Messages []any `json:"messages"`
+		Total    int   `json:"total"`
+	}
+	if err := json.Unmarshal(data, &res); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+	if len(res.Messages) != 0 || res.Total != 0 {
+		t.Errorf("got messages=%d, total=%d, want 0, 0", len(res.Messages), res.Total)
 	}
 }
 
