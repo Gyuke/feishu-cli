@@ -13,8 +13,8 @@ import (
 	"github.com/riba2534/feishu-cli/internal/config"
 )
 
-// setupCmdTestConfig 辅助函数：初始化测试配置并将 base_url 指向 mock 服务器
-func setupCmdTestConfig(t *testing.T, baseURL string) {
+// setupMailAttendanceCmdTestConfig 初始化 Mail/Attendance/Sheets 契约测试配置，将 base_url 指向 mock 服务器。
+func setupMailAttendanceCmdTestConfig(t *testing.T, baseURL string) {
 	t.Helper()
 	os.Unsetenv("FEISHU_APP_ID")
 	os.Unsetenv("FEISHU_APP_SECRET")
@@ -91,7 +91,7 @@ func TestMailRead_AsBotRejectsMailboxMeBeforeNetwork(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	// 1. mail triage: --as bot, default mailbox=me
 	_ = mailTriageCmd.Flags().Set("as", "bot")
@@ -173,7 +173,7 @@ func TestMailRead_AsBotWithExplicitMailbox(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[],"has_more":false}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	_ = mailTriageCmd.Flags().Set("as", "bot")
 	_ = mailTriageCmd.Flags().Set("mailbox", "shared@example.com")
@@ -203,7 +203,7 @@ func TestMailRead_AsUserWithMailboxMe(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[],"has_more":false}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	_ = mailTriageCmd.Flags().Set("as", "user")
 	_ = mailTriageCmd.Flags().Set("mailbox", "me")
@@ -236,7 +236,7 @@ func TestAttendanceUserTask_AsBotAndUser(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"user_task_results":[]}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	// 1. --as bot + 指定工号
 	_ = attendanceUserTaskQueryCmd.Flags().Set("as", "bot")
@@ -312,7 +312,7 @@ func TestMailMessagesCmd_51PlusAndDuplicates(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(respData)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	// 构造 55 个 ID，包含重复项
 	var ids []string
@@ -350,7 +350,7 @@ func TestMailMessagesCmd_EmptySegmentsRejected(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	invalidCSVs := []string{
 		"m1,,m2",
@@ -389,7 +389,7 @@ func TestMailMessagesCmd_PreflightValidationZeroNetworkAndTokenRefresh(t *testin
 		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
 	}))
 	defer srv.Close()
-	setupCmdTestConfig(t, srv.URL)
+	setupMailAttendanceCmdTestConfig(t, srv.URL)
 
 	// 配置 corrupt profile 模拟损坏或过期 token
 	os.Setenv("FEISHU_PROFILE", "corrupt_profile_stale")

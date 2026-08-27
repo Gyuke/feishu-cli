@@ -1,7 +1,6 @@
 package event
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -25,7 +24,7 @@ func TestLooksLikeWSConnected(t *testing.T) {
 }
 
 func TestReadyNotEmittedBeforeHandshake(t *testing.T) {
-	var ready bytes.Buffer
+	var ready concurrentBuffer
 	started := make(chan struct{})
 	r := NewRuntime(ConsumeOptions{
 		AppID:     "cli_test",
@@ -70,7 +69,7 @@ func TestReadyNotEmittedBeforeHandshake(t *testing.T) {
 }
 
 func TestReadyEmittedAfterHandshake(t *testing.T) {
-	var ready bytes.Buffer
+	var ready concurrentBuffer
 	r := NewRuntime(ConsumeOptions{
 		AppID:     "cli_test",
 		AppSecret: "secret",
@@ -105,7 +104,7 @@ func TestReadyEmittedAfterHandshake(t *testing.T) {
 }
 
 func TestReadyNotEmittedIfPreConsumeFails(t *testing.T) {
-	var ready bytes.Buffer
+	var ready concurrentBuffer
 	var startWSCalled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -140,7 +139,7 @@ func TestReadyNotEmittedIfPreConsumeFails(t *testing.T) {
 }
 
 func TestReadyAfterPreConsumeAndHandshake(t *testing.T) {
-	var ready bytes.Buffer
+	var ready concurrentBuffer
 	var subscribed atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/open-apis/vc/v1/meetings/subscription" && r.URL.Path != "/open-apis/vc/v1/meetings/unsubscription" {

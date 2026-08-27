@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riba2534/feishu-cli/internal/config"
+	"github.com/riba2534/feishu-cli/internal/profile"
 	"github.com/spf13/viper"
 )
 
@@ -20,7 +21,15 @@ func initWikiNodeDeleteTestConfig(t *testing.T, baseURL string) {
 	t.Helper()
 	viper.Reset()
 	t.Cleanup(viper.Reset)
+	tempHome := t.TempDir()
+	restoreHome := profile.SetHomeFunc(func() (string, error) {
+		return tempHome, nil
+	})
+	t.Cleanup(restoreHome)
+	t.Setenv("FEISHU_APP_ID", "cli_test")
+	t.Setenv("FEISHU_APP_SECRET", "test_secret")
 	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+	t.Setenv("FEISHU_PROFILE", "")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	content := fmt.Sprintf("app_id: cli_test\napp_secret: test_secret\nbase_url: %q\n", baseURL)
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {

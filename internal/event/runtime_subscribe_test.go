@@ -1,7 +1,6 @@
 package event
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -117,7 +116,7 @@ func TestRegisterSubscriptionsCtxCancel(t *testing.T) {
 	}
 }
 
-func waitRuntimeReady(t *testing.T, ready *bytes.Buffer, key string) {
+func waitRuntimeReady(t *testing.T, ready *concurrentBuffer, key string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -129,7 +128,7 @@ func waitRuntimeReady(t *testing.T, ready *bytes.Buffer, key string) {
 	t.Fatalf("等待 ready 超时，实际: %q", ready.String())
 }
 
-func startVCConsumer(t *testing.T, srvURL string, bus *Bus, pid int, ready *bytes.Buffer) (context.CancelFunc, <-chan error) {
+func startVCConsumer(t *testing.T, srvURL string, bus *Bus, pid int, ready *concurrentBuffer) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	r := NewRuntime(ConsumeOptions{
 		AppID:           "cli_test",
@@ -170,7 +169,7 @@ func TestSequentialConsumersSubscribeEachUnsubscribeOnLast(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var ready1, ready2 bytes.Buffer
+	var ready1, ready2 concurrentBuffer
 	cancel1, done1 := startVCConsumer(t, srv.URL, bus, 501, &ready1)
 	waitRuntimeReady(t, &ready1, "vc.meeting.participant_meeting_started_v1")
 
@@ -231,7 +230,7 @@ func TestConcurrentConsumersSubscribeEachUnsubscribeOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var ready1, ready2 bytes.Buffer
+	var ready1, ready2 concurrentBuffer
 	start := make(chan struct{})
 	errCh := make(chan error, 2)
 	cancels := make([]context.CancelFunc, 2)
@@ -292,7 +291,7 @@ func TestConcurrentConsumersSubscribeEachUnsubscribeOnce(t *testing.T) {
 	}
 }
 
-func assertNeverReady(t *testing.T, ready *bytes.Buffer, when string) {
+func assertNeverReady(t *testing.T, ready *concurrentBuffer, when string) {
 	t.Helper()
 	if strings.Contains(ready.String(), "[event] ready") {
 		t.Fatalf("%s 时不得 ready，实际: %q", when, ready.String())
@@ -329,7 +328,7 @@ func TestFirstSubscribeBlocksSecondStillSubscribesBeforeReady(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var ready1, ready2 bytes.Buffer
+	var ready1, ready2 concurrentBuffer
 	cancel1, done1 := startVCConsumerWithStartWS(t, srv.URL, bus, 701, &ready1, func() {
 		mu.Lock()
 		firstStartWS = true
@@ -428,7 +427,7 @@ func TestFirstSubscribeFailsSecondStillSubscribesBeforeReady(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	var ready1, ready2 bytes.Buffer
+	var ready1, ready2 concurrentBuffer
 	_, done1 := startVCConsumerWithStartWS(t, srv.URL, bus, 801, &ready1, func() {
 		mu.Lock()
 		firstStartWS = true
@@ -483,7 +482,7 @@ func TestFirstSubscribeFailsSecondStillSubscribesBeforeReady(t *testing.T) {
 	}
 }
 
-func startVCConsumerWithStartWS(t *testing.T, srvURL string, bus *Bus, pid int, ready *bytes.Buffer, onStartWS func()) (context.CancelFunc, <-chan error) {
+func startVCConsumerWithStartWS(t *testing.T, srvURL string, bus *Bus, pid int, ready *concurrentBuffer, onStartWS func()) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	r := NewRuntime(ConsumeOptions{
 		AppID:           "cli_test",
