@@ -187,7 +187,7 @@ feishu-cli api POST /open-apis/im/v1/chats \
 - 自动补 `/open-apis/` 前缀
 - 自动拆 URL 里内嵌的 `?query=string` 到 query 参数
 - fragment 先于 query 剥离，`?a=1#frag?b=2` 只会留下 `a=1`
-- 完整 URL 只接受官方 OpenAPI host；短 path 仍自动补 `/open-apis/`
+- 完整 URL 只接受官方 OpenAPI host 的 **https**；短 path 仍自动补 `/open-apis/`
 
 ```bash
 # 下面三种等价：

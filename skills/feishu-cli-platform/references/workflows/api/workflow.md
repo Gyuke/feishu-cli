@@ -13,9 +13,9 @@ feishu-cli api <METHOD> <path> [flags]
 ```
 
 - `METHOD`：`GET` | `POST` | `PUT` | `DELETE` | `PATCH`（大小写不敏感）
-- `path`：API 路径，如 `/open-apis/im/v1/messages`（前导斜杠可省略）。完整 URL 只支持
-  `open.feishu.cn`、`open.larksuite.com`、`open.larkoffice.com` 三类 OpenAPI host；租户文档 URL
-  （如 `https://tenant.feishu.cn/...`）不会被正确规范化，必须手动提取 `/open-apis/...`。
+- `path`：API 路径，如 `/open-apis/im/v1/messages`（前导斜杠可省略）。完整 URL 必须是 `https`，且只支持
+  `open.feishu.cn`、`open.larksuite.com`、`open.larkoffice.com` 三类 OpenAPI host；`http://` 或租户文档 URL
+  （如 `https://tenant.feishu.cn/...`）会被拒绝，必须手动提取 `/open-apis/...`。
 
 URL 中可以内嵌 query。fragment（`#` 之后）会被丢弃且**不会**进入 query。完整 URL 只接受官方
 OpenAPI host：`open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`；租户文档 URL

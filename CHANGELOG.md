@@ -9,21 +9,29 @@
 ### 新增 — 官方 OpenAPI catalog overlay（可回退、可缓存、无凭证）
 
 - 编译期 `meta_data.json` 永远是离线 baseline；运行时可从官方 public `api_definition?protocol=meta` 拉 overlay。
-- 5s 超时、10MB 硬限制、24h TTL；cache 原子写入（`~/.feishu-cli/cache/remote_meta.json` + metadata）；版本/品牌隔离；损坏 cache fail-closed 回退 embedded。
+- 5s 超时、10MB 硬限制、24h TTL；cache 原子写入（`~/.feishu-cli/cache/remote_meta.json` + metadata）；损坏 cache fail-closed 回退 embedded。
+- 有 embedded baseline 时首次/TTL 到期走后台刷新，不阻塞启动；仅无 embedded 或品牌切换才同步拉取。
+- overlay 要求 metadata 可解析、品牌匹配、version 非空且与 JSON `version` 完全一致、并新于 embedded；残缺 pair 不信任。
+- 品牌切换删除旧 cache 文件并以 embedded 为 baseline 拉取；unchanged/失败不得把旧品牌数据改标后继续信任。
+- `FEISHU_CLI_META_URL` 仅允许 loopback；正式请求/重定向仅当前品牌官方 HTTPS host，拒绝跨 origin 与 HTTPS→HTTP。profile root 失败时禁用 cache，不回退共享 `/tmp`。
 - 远端 4xx/超时/超限/坏 JSON 不得让正常命令失败。请求不携带 App/User 凭证。
-- 明确 opt-out：`FEISHU_CLI_REMOTE_META=off`；测试注入：`FEISHU_CLI_META_URL` / `FEISHU_CLI_CONFIG_DIR`。
+- 明确 opt-out：`FEISHU_CLI_REMOTE_META=off`；测试注入：`FEISHU_CLI_META_URL`（loopback）/ `FEISHU_CLI_CONFIG_DIR`。
 - `schema status`、`doctor --only catalog`、`auth status` 报告 source（embedded/cache/runtime）、版本、service/method 数。
 - scope 收集递归 nested resources。
 
 ### 新增 — 通用 `api --page-all/--page-limit`
 
 - 仅识别 `data.has_more` + `page_token`/`next_page_token`；空/重复 cursor 停止并报错，不静默重复。
+- `--page-limit` 截断时保留续翻 cursor，并输出 `truncated`/`page_count`；耗尽才删除 cursor。
+- 多页必须有唯一可识别列表数组；未知字段仅在恰好一个数组时可用。初始 `page_token` 计入 seen。
+- `--page-limit>=0`、`--page-delay>=0`、`--timeout>0` 在 token/网络前校验。
 - 多页聚合保留 `json.Number` 大整数。业务 code != 0 非零退出。
 
 ### 修复 — `api` URL fragment / 官方 host
 
 - 先剥 fragment 再解析 query，fragment 绝不能进入 query。
-- 完整 URL 只接受 `open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`；短 path 仍兼容。
+- 完整 URL 必须 https，且只接受 `open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`；短 path 仍兼容。
+- `--params` 用 `UseNumber` 解析，大整数 ID 不四舍五入。
 
 ### 修复 — 认证 / Token / SDK 传输安全
 
