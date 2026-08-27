@@ -7,14 +7,11 @@ import (
 )
 
 func TestBuildCancelApprovalInstanceBody(t *testing.T) {
-	body, userIDType, err := buildCancelApprovalInstanceBody(CancelApprovalInstanceOptions{
+	body, err := buildCancelApprovalInstanceBody(CancelApprovalInstanceOptions{
 		InstanceCode: "instance_1",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if userIDType != "" {
-		t.Fatalf("userIDType = %q, want empty", userIDType)
 	}
 	assertApprovalBodyField(t, body, "instance_code", "instance_1")
 }
@@ -41,7 +38,7 @@ func TestBuildCCApprovalInstanceBody(t *testing.T) {
 }
 
 func TestBuildApprovalTaskActionBody(t *testing.T) {
-	body, userIDType, err := buildApprovalTaskActionBody(ApprovalTaskActionOptions{
+	body, err := buildApprovalTaskActionBody(ApprovalTaskActionOptions{
 		InstanceCode: "instance_1",
 		TaskID:       "task_1",
 		Comment:      "同意",
@@ -50,9 +47,6 @@ func TestBuildApprovalTaskActionBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if userIDType != "" {
-		t.Fatalf("userIDType = %q, want empty", userIDType)
-	}
 	assertApprovalBodyField(t, body, "instance_code", "instance_1")
 	assertApprovalBodyField(t, body, "task_id", "task_1")
 	assertApprovalBodyField(t, body, "comment", "同意")
@@ -60,7 +54,7 @@ func TestBuildApprovalTaskActionBody(t *testing.T) {
 }
 
 func TestBuildApprovalTaskActionBodyRejectOmitsForm(t *testing.T) {
-	body, _, err := buildApprovalTaskActionBody(ApprovalTaskActionOptions{
+	body, err := buildApprovalTaskActionBody(ApprovalTaskActionOptions{
 		InstanceCode: "instance_1",
 		TaskID:       "task_1",
 		Comment:      "拒绝",
@@ -94,7 +88,7 @@ func TestBuildTransferApprovalTaskBody(t *testing.T) {
 	assertApprovalBodyField(t, body, "comment", "请代审")
 }
 
-func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
+func TestApprovalWriteUsesCurrentOfficialPathsAndUserToken(t *testing.T) {
 	const userToken = "u-test"
 	tests := []struct {
 		name     string
@@ -108,7 +102,7 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 					InstanceCode: "instance_1",
 				}, userToken)
 			},
-			wantPath: "/open-apis/approval/v4/instances/uat_cancel",
+			wantPath: "/open-apis/approval/v4/instances/recall",
 		},
 		{
 			name: "cc",
@@ -118,7 +112,7 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 					CCUserIDs:    []string{"ou_a"},
 				}, userToken)
 			},
-			wantPath: "/open-apis/approval/v4/instances/uat_cc",
+			wantPath: "/open-apis/approval/v4/instances/add_cc",
 		},
 		{
 			name: "approve",
@@ -128,7 +122,7 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 					TaskID:       "task_1",
 				}, userToken)
 			},
-			wantPath: "/open-apis/approval/v4/tasks/uat_approval",
+			wantPath: "/open-apis/approval/v4/tasks/pass",
 		},
 		{
 			name: "reject",
@@ -138,15 +132,16 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 					TaskID:       "task_1",
 				}, userToken)
 			},
-			wantPath: "/open-apis/approval/v4/tasks/uat_reject",
+			wantPath: "/open-apis/approval/v4/tasks/refuse",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var gotPath, gotAuth, gotUserIDType string
+			var gotPath, gotAuth, gotUserIDType, gotMethod string
 			var gotBody map[string]any
 			_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
 				gotPath = r.URL.Path
 				gotAuth = r.Header.Get("Authorization")
 				gotUserIDType = r.URL.Query().Get("user_id_type")
@@ -160,6 +155,9 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 
 			if err := tt.call(); err != nil {
 				t.Fatalf("call error: %v", err)
+			}
+			if gotMethod != http.MethodPost {
+				t.Fatalf("method = %q, want POST", gotMethod)
 			}
 			if gotPath != tt.wantPath {
 				t.Fatalf("path = %q, want %q", gotPath, tt.wantPath)
@@ -178,11 +176,12 @@ func TestApprovalWriteUsesOfficialUATPathsAndUserToken(t *testing.T) {
 	}
 }
 
-func TestTransferApprovalTaskUsesOfficialUATTransferAndUserToken(t *testing.T) {
+func TestTransferApprovalTaskUsesCurrentForwardPathAndUserToken(t *testing.T) {
 	const userToken = "u-test"
-	var gotPath, gotAuth, gotUserIDType string
+	var gotPath, gotAuth, gotUserIDType, gotMethod string
 	var gotBody map[string]any
 	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotUserIDType = r.URL.Query().Get("user_id_type")
@@ -203,8 +202,11 @@ func TestTransferApprovalTaskUsesOfficialUATTransferAndUserToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransferApprovalTask() error = %v", err)
 	}
-	if gotPath != "/open-apis/approval/v4/tasks/uat_transfer" {
-		t.Fatalf("path = %q, want uat_transfer", gotPath)
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/open-apis/approval/v4/tasks/forward" {
+		t.Fatalf("path = %q, want tasks/forward", gotPath)
 	}
 	if gotAuth != "Bearer "+userToken {
 		t.Fatalf("Authorization = %q, want user token", gotAuth)

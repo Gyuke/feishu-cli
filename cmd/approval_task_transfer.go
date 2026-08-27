@@ -14,7 +14,7 @@ var approvalTaskTransferCmd = &cobra.Command{
 	Long: `将审批任务转交给另一位审批人，对齐官方 approval.tasks.transfer。
 
 底层接口:
-  POST /open-apis/approval/v4/tasks/uat_transfer
+  POST /open-apis/approval/v4/tasks/forward
 
 权限:
   User Token，scope: approval:task:write

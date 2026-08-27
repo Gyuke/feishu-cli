@@ -14,7 +14,7 @@ var approvalTaskRejectCmd = &cobra.Command{
 	Long: `拒绝指定的审批任务，对齐官方 approval.tasks.reject。
 
 底层接口:
-  POST /open-apis/approval/v4/tasks/uat_reject
+  POST /open-apis/approval/v4/tasks/refuse
 
 权限:
   User Token，scope: approval:task:write

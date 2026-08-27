@@ -3,7 +3,9 @@ package client
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -51,26 +53,10 @@ func TestApprovalTaskStringUnmarshal(t *testing.T) {
 		input string
 		want  string
 	}{
-		{
-			name:  "string",
-			input: `"RUNNING"`,
-			want:  "RUNNING",
-		},
-		{
-			name:  "number",
-			input: `42`,
-			want:  "42",
-		},
-		{
-			name:  "boolean",
-			input: `true`,
-			want:  "true",
-		},
-		{
-			name:  "null",
-			input: `null`,
-			want:  "",
-		},
+		{name: "string", input: `"RUNNING"`, want: "RUNNING"},
+		{name: "number", input: `42`, want: "42"},
+		{name: "boolean", input: `true`, want: "true"},
+		{name: "null", input: `null`, want: ""},
 	}
 
 	for _, tt := range tests {
@@ -92,8 +78,7 @@ func TestParseApprovalDefinitionResponse(t *testing.T) {
 		"msg": "success",
 		"data": {
 			"approval_name": "请假",
-			"status": "ACTIVE",
-			"form": "{\"widgets\":[{\"id\":\"widget_1\"}]}",
+			"form": "[{\"id\":\"widget_1\"}]",
 			"node_list": [
 				{
 					"name": "直属上级",
@@ -104,16 +89,7 @@ func TestParseApprovalDefinitionResponse(t *testing.T) {
 					"approver_chosen_multi": false,
 					"require_signature": true
 				}
-			],
-			"viewers": [
-				{
-					"type": "USER",
-					"id": "ou_viewer",
-					"user_id": "ou_viewer"
-				}
-			],
-			"approval_admin_ids": ["ou_admin"],
-			"form_widget_relation": "{\"widget_1\":[\"widget_2\"]}"
+			]
 		}
 	}`)
 
@@ -121,81 +97,55 @@ func TestParseApprovalDefinitionResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseApprovalDefinitionResponse() error = %v", err)
 	}
-
 	if result.ApprovalCode != "approval_123" {
 		t.Fatalf("ApprovalCode = %q, want %q", result.ApprovalCode, "approval_123")
 	}
 	if result.ApprovalName != "请假" {
 		t.Fatalf("ApprovalName = %q, want %q", result.ApprovalName, "请假")
 	}
-	if result.Status != "ACTIVE" {
-		t.Fatalf("Status = %q, want %q", result.Status, "ACTIVE")
-	}
-
-	wantForm := map[string]any{
-		"widgets": []any{
-			map[string]any{"id": "widget_1"},
-		},
-	}
+	wantForm := []any{map[string]any{"id": "widget_1"}}
 	if !reflect.DeepEqual(result.Form, wantForm) {
 		t.Fatalf("Form = %#v, want %#v", result.Form, wantForm)
 	}
-
-	if len(result.NodeList) != 1 || result.NodeList[0].NodeID != "node_1" || !result.NodeList[0].NeedApprover || !result.NodeList[0].RequireSignature {
+	if len(result.NodeList) != 1 || result.NodeList[0].NodeID != "node_1" || !result.NodeList[0].NeedApprover {
 		t.Fatalf("NodeList = %#v, want one populated node", result.NodeList)
-	}
-	if len(result.Viewers) != 1 || result.Viewers[0].UserID != "ou_viewer" {
-		t.Fatalf("Viewers = %#v, want one viewer", result.Viewers)
-	}
-	if !reflect.DeepEqual(result.ApprovalAdminIDs, []string{"ou_admin"}) {
-		t.Fatalf("ApprovalAdminIDs = %#v, want %#v", result.ApprovalAdminIDs, []string{"ou_admin"})
-	}
-
-	wantRelation := map[string]any{
-		"widget_1": []any{"widget_2"},
-	}
-	if !reflect.DeepEqual(result.FormWidgetRelation, wantRelation) {
-		t.Fatalf("FormWidgetRelation = %#v, want %#v", result.FormWidgetRelation, wantRelation)
 	}
 }
 
 func TestParseApprovalDefinitionResponseError(t *testing.T) {
 	body := []byte(`{"code": 99991663, "msg": "invalid approval code"}`)
-
 	_, err := parseApprovalDefinitionResponse(body, "approval_123")
 	if err == nil {
 		t.Fatal("parseApprovalDefinitionResponse() error = nil, want non-nil")
 	}
 	if got := err.Error(); got != "获取审批定义失败: code=99991663, msg=invalid approval code" {
-		t.Fatalf("parseApprovalDefinitionResponse() error = %q, want %q", got, "获取审批定义失败: code=99991663, msg=invalid approval code")
+		t.Fatalf("parseApprovalDefinitionResponse() error = %q", got)
 	}
 }
 
-func TestParseApprovalTaskQueryResponseHandlesNumericProcessStatus(t *testing.T) {
+func TestParseApprovalTaskQueryResponseCurrentContract(t *testing.T) {
 	body := []byte(`{
 		"code": 0,
 		"msg": "success",
 		"data": {
 			"page_token": "next_page",
 			"has_more": true,
-			"count": {
-				"total": 1,
-				"has_more": false
-			},
+			"count": 10,
 			"tasks": [
 				{
 					"topic": 1,
 					"user_id": "ou_user",
 					"title": "审批标题",
-					"status": "PENDING",
-					"process_status": 12,
+					"status": "1",
+					"instance_code": "instance_1",
+					"instance_status": "1",
+					"definition_code": "def_1",
 					"definition_name": "文档权限申请",
 					"task_id": "task_id",
-					"process_id": "process_id",
-					"initiator_names": ["A"],
-					"urls": {
-						"pc": "https://pc"
-					}
+					"initiator": "ou_init",
+					"initiator_name": "A",
+					"summaries": [{"key":"reason","value":"出差"}],
+					"support_api_operate": true
 				}
 			]
 		}
@@ -205,72 +155,91 @@ func TestParseApprovalTaskQueryResponseHandlesNumericProcessStatus(t *testing.T)
 	if err != nil {
 		t.Fatalf("parseApprovalTaskQueryResponse() error = %v", err)
 	}
-
-	if !result.HasMore {
-		t.Fatalf("HasMore = %v, want true", result.HasMore)
+	if !result.HasMore || result.PageToken != "next_page" {
+		t.Fatalf("pagination = %#v", result)
 	}
-	if result.PageToken != "next_page" {
-		t.Fatalf("PageToken = %q, want %q", result.PageToken, "next_page")
-	}
-	if result.Count == nil || result.Count.Total != 1 {
-		t.Fatalf("Count = %#v, want total 1", result.Count)
+	if result.Count == nil || *result.Count != 10 {
+		t.Fatalf("Count = %#v, want 10", result.Count)
 	}
 	if len(result.Tasks) != 1 {
 		t.Fatalf("len(Tasks) = %d, want 1", len(result.Tasks))
 	}
-	if result.Tasks[0].Topic != "1" {
-		t.Fatalf("Topic = %q, want %q", result.Tasks[0].Topic, "1")
+	task := result.Tasks[0]
+	if task.Topic != "1" {
+		t.Fatalf("Topic = %q, want 1", task.Topic)
 	}
-	if result.Tasks[0].ProcessStatus != "12" {
-		t.Fatalf("ProcessStatus = %q, want %q", result.Tasks[0].ProcessStatus, "12")
+	if task.InstanceCode != "instance_1" {
+		t.Fatalf("InstanceCode = %q", task.InstanceCode)
 	}
-	if result.Tasks[0].PCURL != "https://pc" {
-		t.Fatalf("PCURL = %q, want %q", result.Tasks[0].PCURL, "https://pc")
+	if task.InstanceStatus != "1" {
+		t.Fatalf("InstanceStatus = %q", task.InstanceStatus)
+	}
+	if task.Initiator != "ou_init" || task.InitiatorName != "A" {
+		t.Fatalf("initiator = %q/%q", task.Initiator, task.InitiatorName)
+	}
+	if !task.SupportAPIOperate {
+		t.Fatal("SupportAPIOperate = false, want true")
+	}
+	if len(task.Summaries) != 1 || task.Summaries[0].Key != "reason" {
+		t.Fatalf("Summaries = %#v", task.Summaries)
 	}
 }
 
-func TestQueryApprovalTasksUsesOfficialUATQueryAndUserToken(t *testing.T) {
+func TestQueryApprovalTasksUsesCurrentListPathAndUserToken(t *testing.T) {
 	const userToken = "u-test"
-	var gotPath, gotAuth, gotUserID string
+	var gotMethod, gotPath, gotAuth, gotUserID, gotTopic, gotPageSize string
 	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotUserID = r.URL.Query().Get("user_id")
+		gotTopic = r.URL.Query().Get("topic")
+		gotPageSize = r.URL.Query().Get("page_size")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"tasks":[],"has_more":false}}`))
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"tasks":[],"has_more":false,"count":0}}`))
 	})
 	defer cleanup()
 
 	_, err := QueryApprovalTasksRaw(ApprovalTaskQueryOptions{
-		UserID:     "ou_test",
 		Topic:      "1",
+		PageSize:   20,
 		UserIDType: "open_id",
 	}, userToken)
 	if err != nil {
 		t.Fatalf("QueryApprovalTasksRaw() error = %v", err)
 	}
-	if gotPath != "/open-apis/approval/v4/tasks/uat_query" {
-		t.Fatalf("path = %q, want uat_query", gotPath)
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/open-apis/approval/v4/tasks" {
+		t.Fatalf("path = %q, want /open-apis/approval/v4/tasks", gotPath)
 	}
 	if gotAuth != "Bearer "+userToken {
 		t.Fatalf("Authorization = %q, want user token", gotAuth)
 	}
-	if gotUserID != "ou_test" {
-		t.Fatalf("user_id = %q, want ou_test", gotUserID)
+	if gotUserID != "" {
+		t.Fatalf("user_id query = %q, want empty", gotUserID)
+	}
+	if gotTopic != "1" {
+		t.Fatalf("topic = %q, want 1", gotTopic)
+	}
+	if gotPageSize != "20" {
+		t.Fatalf("page_size = %q, want 20", gotPageSize)
 	}
 }
 
 func TestQueryApprovalTasksRejectsMissingUserToken(t *testing.T) {
-	_, err := QueryApprovalTasksRaw(ApprovalTaskQueryOptions{UserID: "ou_test", Topic: "1"}, "")
+	_, err := QueryApprovalTasksRaw(ApprovalTaskQueryOptions{Topic: "1"}, "")
 	if err == nil {
 		t.Fatal("expected missing user token error")
 	}
 }
 
-func TestGetApprovalInstanceUsesOfficialUATGetAndUserToken(t *testing.T) {
+func TestGetApprovalInstanceUsesCurrentDetailPathAndUserToken(t *testing.T) {
 	const userToken = "u-test"
-	var gotPath, gotAuth, gotInstanceCode, gotUserIDType string
+	var gotMethod, gotPath, gotAuth, gotInstanceCode, gotUserIDType string
 	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotInstanceCode = r.URL.Query().Get("instance_code")
@@ -287,20 +256,23 @@ func TestGetApprovalInstanceUsesOfficialUATGetAndUserToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetApprovalInstance() error = %v", err)
 	}
-	if gotPath != "/open-apis/approval/v4/instances/uat_get" {
-		t.Fatalf("path = %q, want uat_get", gotPath)
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/open-apis/approval/v4/instances/detail" {
+		t.Fatalf("path = %q, want instances/detail", gotPath)
 	}
 	if gotAuth != "Bearer "+userToken {
 		t.Fatalf("Authorization = %q, want user token", gotAuth)
 	}
 	if gotInstanceCode != "instance_1" {
-		t.Fatalf("instance_code = %q, want instance_1", gotInstanceCode)
+		t.Fatalf("instance_code = %q", gotInstanceCode)
 	}
 	if gotUserIDType != "open_id" {
-		t.Fatalf("user_id_type = %q, want open_id", gotUserIDType)
+		t.Fatalf("user_id_type = %q", gotUserIDType)
 	}
 	if data["status"] != "PENDING" {
-		t.Fatalf("status = %#v, want PENDING", data["status"])
+		t.Fatalf("status = %#v", data["status"])
 	}
 }
 
@@ -308,5 +280,49 @@ func TestGetApprovalInstanceRejectsMissingUserToken(t *testing.T) {
 	_, err := GetApprovalInstanceRaw(GetApprovalInstanceOptions{InstanceCode: "instance_1"}, "")
 	if err == nil {
 		t.Fatal("expected missing user token error")
+	}
+}
+
+func TestGetApprovalDefinitionUsesCurrentDetailPathAndUserToken(t *testing.T) {
+	const userToken = "u-test"
+	var gotMethod, gotPath, gotAuth, gotLocale string
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotLocale = r.URL.Query().Get("locale")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"approval_name":"请假","form":"[]","node_list":[]}}`))
+	})
+	defer cleanup()
+
+	def, err := GetApprovalDefinition("7C468A54-8745-2245-9675-08B7C63E7A85", GetApprovalOptions{Locale: "zh-CN"}, userToken)
+	if err != nil {
+		t.Fatalf("GetApprovalDefinition() error = %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q", gotMethod)
+	}
+	if gotPath != "/open-apis/approval/v4/approvals/7C468A54-8745-2245-9675-08B7C63E7A85/detail" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer "+userToken {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+	if gotLocale != "zh-CN" {
+		t.Fatalf("locale = %q", gotLocale)
+	}
+	if def.ApprovalName != "请假" {
+		t.Fatalf("ApprovalName = %q", def.ApprovalName)
+	}
+}
+
+func TestApprovalSourceHasNoUATPaths(t *testing.T) {
+	data, err := os.ReadFile("approval.go")
+	if err != nil {
+		t.Fatalf("read approval.go: %v", err)
+	}
+	if strings.Contains(string(data), "uat_") {
+		t.Fatal("production approval.go still contains uat_ paths")
 	}
 }

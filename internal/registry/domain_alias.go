@@ -140,9 +140,9 @@ var extraDomainScopes = map[string][]string{
 		"docs:document:export", "drive:file:download",
 	},
 
-	// approval shortcuts: definition read + official uat instance/task user-token flows.
+	// approval shortcuts: current official user-token definition/instance/task flows.
 	"approval": {
-		"approval:approval:readonly",
+		"approval:approval:read",
 		"approval:instance:read", "approval:instance:write",
 		"approval:task:read", "approval:task:write",
 	},

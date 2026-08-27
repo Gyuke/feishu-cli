@@ -15,7 +15,7 @@ var approvalInstanceCancelCmd = &cobra.Command{
 	Long: `撤回一条已发起的审批实例，对齐官方 approval.instances.cancel。
 
 底层接口:
-  POST /open-apis/approval/v4/instances/uat_cancel
+  POST /open-apis/approval/v4/instances/recall
 
 权限:
   User Token，scope: approval:instance:write

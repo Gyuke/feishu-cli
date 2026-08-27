@@ -14,7 +14,7 @@ var approvalInstanceGetCmd = &cobra.Command{
 	Long: `获取单个审批实例详情，对齐官方 approval.instances.get。
 
 底层接口:
-  GET /open-apis/approval/v4/instances/uat_get
+  GET /open-apis/approval/v4/instances/detail
 
 权限:
   User Token，scope: approval:instance:read
@@ -65,6 +65,7 @@ var approvalInstanceGetCmd = &cobra.Command{
 
 		fmt.Printf("审批实例详情\n")
 		printApprovalInstanceField(data, "instance_code", "  实例 Code")
+		printApprovalInstanceField(data, "serial_number", "  审批单号")
 		printApprovalInstanceField(data, "definition_name", "  审批名称")
 		printApprovalInstanceField(data, "status", "  状态")
 		printApprovalInstanceField(data, "user_id", "  发起人")

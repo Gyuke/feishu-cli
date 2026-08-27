@@ -10,6 +10,7 @@ var approvalCmd = &cobra.Command{
 当前已提供：
   - 审批定义查询（approval get）
   - 审批实例详情（approval instance get）
+  - 已发起审批实例（approval instance initiated）
   - 审批任务查询（approval task query）
   - 发起审批实例（approval instance create）
   - 取消审批实例（approval instance cancel）
@@ -18,6 +19,8 @@ var approvalCmd = &cobra.Command{
   - 拒绝审批任务（approval task reject）
   - 转交审批任务（approval task transfer）
 
+所有当前审批 API 均使用 User Token。
+
 示例:
   # 查看审批定义详情
   feishu-cli approval get <approval_code>
@@ -25,11 +28,14 @@ var approvalCmd = &cobra.Command{
   # 查看当前登录用户的待我审批任务
   feishu-cli approval task query --topic todo
 
-  # 发起审批实例
-  feishu-cli approval instance create --approval-code <code> --user-id ou_xxx --form-file form.json
+  # 查看我发起的审批实例
+  feishu-cli approval instance initiated
+
+  # 发起审批实例（身份取当前 User Token）
+  feishu-cli approval instance create --approval-code <code> --form-file form.json
 
   # 通过审批任务
-  feishu-cli approval task approve --approval-code <code> --instance-code <ic> --task-id <task> --user-id ou_xxx
+  feishu-cli approval task approve --instance-code <ic> --task-id <task>
 
   # 官方资源名别名也可用
   feishu-cli approval tasks transfer --instance-code <ic> --task-id <task> --transfer-user-id ou_xxx`,

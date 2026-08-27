@@ -70,6 +70,35 @@ func TestApprovalResourceAliases(t *testing.T) {
 	}
 }
 
+func TestApprovalInstanceInitiatedRegistered(t *testing.T) {
+	found := false
+	for _, sub := range approvalInstanceCmd.Commands() {
+		if sub == approvalInstanceInitiatedCmd {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("approvalInstanceInitiatedCmd should be child of approvalInstanceCmd")
+	}
+}
+
+func TestApprovalInstanceCreateDoesNotRequireUserID(t *testing.T) {
+	if approvalInstanceCreateCmd.Flags().Lookup("user-id") != nil {
+		t.Fatal("approval instance create should not register --user-id; identity comes from User Token")
+	}
+	assertRequiredFlags(t, approvalInstanceCreateCmd, "approval-code")
+}
+
+func TestApprovalGetRequiresUserTokenFlag(t *testing.T) {
+	if approvalGetCmd.Flags().Lookup("user-access-token") == nil {
+		t.Fatal("approval get should register --user-access-token")
+	}
+	if approvalGetCmd.Flags().Lookup("with-admin-id") != nil {
+		t.Fatal("approval get should not register removed --with-admin-id")
+	}
+}
+
 func assertHiddenFlags(t *testing.T, cmd *cobra.Command, names ...string) {
 	t.Helper()
 	for _, n := range names {

@@ -15,7 +15,7 @@ var approvalTaskApproveCmd = &cobra.Command{
 	Long: `通过指定的审批任务（同意），对齐官方 approval.tasks.approve。
 
 底层接口:
-  POST /open-apis/approval/v4/tasks/uat_approval
+  POST /open-apis/approval/v4/tasks/pass
 
 权限:
   User Token，scope: approval:task:write
@@ -52,7 +52,6 @@ var approvalTaskApproveCmd = &cobra.Command{
 	},
 }
 
-// readApprovalTaskActionFlags 共享 approve/reject 两条命令的 flag 解析与校验。
 func readApprovalTaskActionFlags(cmd *cobra.Command) (client.ApprovalTaskActionOptions, error) {
 	instanceCode, _ := cmd.Flags().GetString("instance-code")
 	if strings.TrimSpace(instanceCode) == "" {
@@ -84,17 +83,6 @@ func validateApprovalWriteUserIDType(userIDType string) error {
 		return nil
 	default:
 		return fmt.Errorf("user_id_type 不支持 %q，仅支持 open_id / user_id / union_id", userIDType)
-	}
-}
-
-func validateApprovalCreateUserIDType(userIDType string) error {
-	switch strings.TrimSpace(userIDType) {
-	case "", "open_id", "user_id":
-		return nil
-	case "union_id":
-		return fmt.Errorf("approval/v4/instances 不支持 user_id_type=%q（仅支持 open_id / user_id；该端点 body 只有 open_id 和 user_id 两个字段，参 SDK InstanceCreate struct）", userIDType)
-	default:
-		return fmt.Errorf("user_id_type 不支持 %q，仅支持 open_id / user_id", userIDType)
 	}
 }
 

@@ -22,6 +22,14 @@ var approvalTaskQueryCmd = &cobra.Command{
 	Short: "查询审批任务列表",
 	Long: `查询当前 auth 登录用户的审批任务列表，可用于查看待办审批、已办审批、已发起审批和抄送通知。
 
+底层接口:
+  GET /open-apis/approval/v4/tasks
+
+权限:
+  User Token，scope: approval:task:read
+
+当前契约不再传 user_id query，身份取 User Token。
+
 参数:
   --topic        任务主题，可选：todo、done、started、cc-unread、cc-read
   --output, -o   输出格式，可选：json、raw-json
@@ -52,25 +60,31 @@ var approvalTaskQueryCmd = &cobra.Command{
 			return err
 		}
 
-		userID, err := resolveCurrentAuthedUserID(cmd, "open_id")
-		if err != nil {
-			return fmt.Errorf("无法从当前登录态自动获取用户身份，请先执行 feishu-cli auth login: %w", err)
-		}
-
 		pageSize, _ := cmd.Flags().GetInt("page-size")
 		pageToken, _ := cmd.Flags().GetString("page-token")
+		locale, _ := cmd.Flags().GetString("locale")
+		definitionCode, _ := cmd.Flags().GetString("definition-code")
+		startTimestamp, _ := cmd.Flags().GetString("start-timestamp")
+		endTimestamp, _ := cmd.Flags().GetString("end-timestamp")
+		userIDType, _ := cmd.Flags().GetString("user-id-type")
 		output, _ := cmd.Flags().GetString("output")
+		if err := validateApprovalWriteUserIDType(userIDType); err != nil {
+			return err
+		}
 
 		token, err := requireUserToken(cmd, "approval task query")
 		if err != nil {
 			return err
 		}
 		queryOpts := client.ApprovalTaskQueryOptions{
-			PageSize:   pageSize,
-			PageToken:  pageToken,
-			UserID:     userID,
-			Topic:      topicValue,
-			UserIDType: "open_id",
+			PageSize:       pageSize,
+			PageToken:      pageToken,
+			Topic:          topicValue,
+			Locale:         locale,
+			DefinitionCode: definitionCode,
+			StartTimestamp: startTimestamp,
+			EndTimestamp:   endTimestamp,
+			UserIDType:     userIDType,
 		}
 
 		if output == "raw-json" {
@@ -97,7 +111,7 @@ var approvalTaskQueryCmd = &cobra.Command{
 		}
 
 		if result.Count != nil {
-			fmt.Printf("审批任务（%s），总数约 %d\n\n", approvalTaskTopicLabel(topicValue), result.Count.Total)
+			fmt.Printf("审批任务（%s），总数约 %d\n\n", approvalTaskTopicLabel(topicValue), *result.Count)
 		} else {
 			fmt.Printf("审批任务（%s），当前页 %d 条\n\n", approvalTaskTopicLabel(topicValue), len(result.Tasks))
 		}
@@ -105,22 +119,26 @@ var approvalTaskQueryCmd = &cobra.Command{
 		for idx, task := range result.Tasks {
 			fmt.Printf("[%d] %s\n", idx+1, task.Title)
 			fmt.Printf("    任务 ID: %s\n", task.TaskID)
+			if task.InstanceCode != "" {
+				fmt.Printf("    实例 Code: %s\n", task.InstanceCode)
+			}
 			if task.DefinitionName != "" {
 				fmt.Printf("    审批流: %s\n", task.DefinitionName)
 			}
-			if len(task.InitiatorNames) > 0 {
-				fmt.Printf("    发起人: %s\n", strings.Join(task.InitiatorNames, ", "))
+			if task.InitiatorName != "" {
+				fmt.Printf("    发起人: %s\n", task.InitiatorName)
 			}
 			if task.Status != "" {
 				fmt.Printf("    任务状态: %s\n", task.Status)
 			}
-			if task.ProcessStatus != "" {
-				fmt.Printf("    流程状态: %s\n", task.ProcessStatus)
+			if task.InstanceStatus != "" {
+				fmt.Printf("    实例状态: %s\n", task.InstanceStatus)
 			}
-			if task.PCURL != "" {
-				fmt.Printf("    PC 链接: %s\n", task.PCURL)
-			} else if task.MobileURL != "" {
-				fmt.Printf("    移动端链接: %s\n", task.MobileURL)
+			if task.SupportAPIOperate {
+				fmt.Printf("    支持 API 操作: true\n")
+			}
+			if task.Link != "" {
+				fmt.Printf("    链接: %s\n", task.Link)
 			}
 			fmt.Println()
 		}
@@ -173,6 +191,11 @@ func init() {
 	approvalTaskQueryCmd.Flags().String("topic", "", "任务主题：todo、done、started、cc-unread、cc-read")
 	approvalTaskQueryCmd.Flags().Int("page-size", 50, "每页数量")
 	approvalTaskQueryCmd.Flags().String("page-token", "", "分页标记")
+	approvalTaskQueryCmd.Flags().String("locale", "", "语言，如 zh-CN / en-US / ja-JP")
+	approvalTaskQueryCmd.Flags().String("definition-code", "", "审批定义 Code，用于筛选")
+	approvalTaskQueryCmd.Flags().String("start-timestamp", "", "任务时间范围开始（秒级时间戳）")
+	approvalTaskQueryCmd.Flags().String("end-timestamp", "", "任务时间范围结束（秒级时间戳）")
+	approvalTaskQueryCmd.Flags().String("user-id-type", "open_id", "用户 ID 类型：open_id/user_id/union_id")
 	approvalTaskQueryCmd.Flags().StringP("output", "o", "", "输出格式（json/raw-json）")
 	approvalTaskQueryCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")
 	mustMarkFlagRequired(approvalTaskQueryCmd, "topic")

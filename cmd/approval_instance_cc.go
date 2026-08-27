@@ -15,7 +15,7 @@ var approvalInstanceCcCmd = &cobra.Command{
 	Long: `把某条审批实例抄送给一个或多个用户，对齐官方 approval.instances.cc。
 
 底层接口:
-  POST /open-apis/approval/v4/instances/uat_cc
+  POST /open-apis/approval/v4/instances/add_cc
 
 权限:
   User Token，scope: approval:instance:write
@@ -70,7 +70,6 @@ var approvalInstanceCcCmd = &cobra.Command{
 }
 
 // parseCommaSeparatedIDs 把逗号分隔的字符串切成去空格、去空值、去重的切片。
-// 保留首次出现顺序，便于用户传入 ou_a,ou_b,ou_a 时只抄送一次。
 func parseCommaSeparatedIDs(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
