@@ -295,7 +295,7 @@ Commands:
   dept      部门操作（详情、子部门列表）
   board     画板操作（精排绘图、图表导入、克隆、几何质检 lint、SVG 双向、图片上传、覆盖更新）
   comment   评论操作（列出、添加、解决/恢复、回复管理）
-  approval  审批操作（定义/实例详情、任务查询、实例创建/撤回/抄送、任务通过/拒绝/转交）
+  approval  审批操作（定义/实例详情、已发起列表、任务查询、实例创建/撤回/抄送、任务通过/拒绝/转交；全部 User Token）
   search    搜索操作（消息、应用、文档）
   event     实时事件订阅（WebSocket 长连接、list/schema/consume/status/stop）
   schema    本地浏览飞书 OpenAPI 方法（无需 token）
@@ -581,15 +581,15 @@ feishu-cli search docs "产品需求"
 <details>
 <summary>审批操作</summary>
 
-`approval get` 使用应用权限查询审批定义（审批模板/流程定义），支持 `--output raw-json` 查看飞书 API 原始响应，需要开通 `approval:approval:readonly`；`approval instance get` 对齐官方 `instances/uat_get`，必须使用 User Token，需要开通 `approval:instance:read`；`approval task query` 对齐官方 `tasks/uat_query`，必须使用 User Token，需要开通 `approval:task:read`。审批写流程覆盖 `instance create/cancel/cc`、`task approve/reject/transfer`；其中 `instance create` 是本项目额外应用态能力，其余写命令均对齐官方 `uat_*` 用户态接口。
+全部当前审批 API 使用 User Token。`approval get` 走 `GET /open-apis/approval/v4/approvals/{approval_code}/detail`，需要 `approval:approval:read`；`approval instance get` 走 `GET .../instances/detail`，需要 `approval:instance:read`；`approval instance initiated` 走 `GET .../instances/initiated`；`approval task query` 走 `GET .../tasks`（不传 `user_id` query），需要 `approval:task:read`。写流程：`instance create` → `POST .../instances/initiate`（`approval:instance:write`，发起人取当前登录用户）；`instance cancel` → `POST .../instances/recall`；`instance cc` → `POST .../instances/add_cc`；`task approve/reject/transfer` → `POST .../tasks/pass|refuse|forward`。
 
 输出说明：
 - 不传 `--output`：输出便于阅读的文本摘要
 - `--output json`：输出 CLI 归一化后的 JSON，部分字段会做拍平和字符串化处理
-- `--output raw-json`：输出飞书 API 原始响应，便于排查字段差异
+- `--output raw-json`：输出飞书 API 原始**成功**响应；HTTP 200 但业务 `code != 0` 时非零退出
 
 ```bash
-# 查询审批定义详情（审批模板/流程定义）
+# 查询审批定义详情（User Token）
 feishu-cli approval get <approval_code>
 
 # 输出完整 JSON
@@ -602,13 +602,17 @@ feishu-cli approval get <approval_code> --output raw-json
 feishu-cli approval instance get --instance-code <instance_code>
 feishu-cli approval instances get --instance-code <instance_code> --output raw-json
 
+# 查询我发起的审批实例
+feishu-cli approval instance initiated
+feishu-cli approval instance initiated --output json
+
 # 查询当前登录用户的待我审批
 feishu-cli approval task query --topic todo
 
 # 查询我已审批的任务
 feishu-cli approval task query --topic done
 
-# 查询我发起的审批
+# 查询我发起的审批任务分组
 feishu-cli approval task query --topic started --output json
 
 # 输出飞书 API 原始响应
@@ -620,8 +624,8 @@ feishu-cli approval task query --topic todo --page-size 20 --page-token <token>
 # 显式指定 User Access Token
 feishu-cli approval task query --topic cc-unread --user-access-token <token>
 
-# 发起审批实例（form.json 为飞书审批表单 JSON 数组）
-feishu-cli approval instance create --approval-code <code> --user-id ou_xxx --form-file form.json
+# 发起审批实例（身份取当前 User Token；form.json 为飞书审批表单 JSON 数组）
+feishu-cli approval instance create --approval-code <code> --form-file form.json
 
 # 撤回 / 抄送审批实例
 feishu-cli approval instance cancel --instance-code <instance_code>
@@ -1349,6 +1353,7 @@ feishu-cli 涵盖文档、知识库、电子表格、多维表格、消息、群
       "aily:skill:write",
       "aily:table:read",
       "app_engine:application.event_subscriber:read",
+      "approval:approval:read",
       "approval:approval:readonly",
       "approval:instance:read",
       "approval:instance:write",

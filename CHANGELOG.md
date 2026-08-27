@@ -55,6 +55,21 @@
 - `token.json` 增加 `app_id` 绑定：与当前选中 App 不一致，或旧文件未绑定，一律 fail closed（即使 access 仍有效）。显式迁移：`feishu-cli auth token --bind-legacy-app --as user`（不可与 `--as bot` / `--user-access-token` 同时使用）或重新 `auth login`。
 - `base_url` 默认只允许官方 HTTPS（`open.feishu.cn` / `open.larksuite.com`）；loopback HTTP 仅用于本机开发/测试。自定义远端 host、非 loopback HTTP、HTTPS→HTTP 或带 body 的跨源重定向必须分别设置 `FEISHU_ALLOW_CUSTOM_BASE_URL` / `FEISHU_ALLOW_INSECURE_HTTP` / `FEISHU_ALLOW_CROSS_ORIGIN_REDIRECT`（或对应配置项）。跨源重定向会剥离 `Authorization`，避免 App Secret 被外送。
 
+### 修复 — 审批命令对齐官方当前 v4 用户态契约
+
+全部 Approval 专用命令不再走旧 `uat_*` path，也不再把 `instance create` / `approval get` 当作 Tenant 应用态能力：
+
+- `approval get` → `GET /open-apis/approval/v4/approvals/{approval_code}/detail`（User Token，`approval:approval:read`）
+- `approval instance get` → `GET .../instances/detail`
+- `approval instance initiated`（新增）→ `GET .../instances/initiated`
+- `approval instance create` → `POST .../instances/initiate`（发起人取当前 User Token，不再传 `--user-id`）
+- `approval instance cancel` → `POST .../instances/recall`
+- `approval instance cc` → `POST .../instances/add_cc`
+- `approval task query` → `GET .../tasks`（删除不存在的 `user_id` query；`count` 为整数；任务含 `instance_code` / `instance_status` / `initiator` / `initiator_name` / `summaries` / `support_api_operate`）
+- `approval task approve/reject/transfer` → `POST .../tasks/pass|refuse|forward`
+
+`--output raw-json` 在 HTTP 200 且飞书业务 `code != 0` 时非零退出，不再把失败 envelope 当成功输出。定义搜索、加签、退回、催办仍不在本命令面。
+
 ## [v1.36.0] - 2026-07-22
 
 本版为一次全域能力补齐：消息读取发送者名字服务端回填、CLI 交互健壮性守卫、OKR 全量接线、多维表格结构化过滤 DSL、电子表格类型保真读取闭环、大文档选择性读取、卡片交互回调与审批 v4 事件订阅，以及邮件/会议/纪要/云盘/任务/日历多域新命令。

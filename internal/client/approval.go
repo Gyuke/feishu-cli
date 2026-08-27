@@ -306,6 +306,10 @@ func doApprovalUserGet(apiPath string, pathParams, query map[string]string, user
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s失败: HTTP %d, body: %s", action, resp.StatusCode, string(resp.RawBody))
 	}
+	// HTTP 200 仍可能带业务错误码；Raw / --output raw-json 必须先检查再吐原始 body。
+	if _, err := parseGenericApprovalData(resp.RawBody, action); err != nil {
+		return nil, err
+	}
 	return resp.RawBody, nil
 }
 

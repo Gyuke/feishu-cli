@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -156,4 +157,94 @@ func TestApprovalCurrentContractHTTPSurface(t *testing.T) {
 			t.Fatalf("auth = %q", got.Auth)
 		}
 	})
+}
+
+func TestApprovalRawJSONRejectsHTTP200BusinessCode(t *testing.T) {
+	const userToken = "u-raw"
+	const bizBody = `{"code":1395001,"msg":"task status invalid","data":{}}`
+
+	tests := []struct {
+		name     string
+		wantPath string
+		call     func() ([]byte, error)
+	}{
+		{
+			name:     "definition raw-json",
+			wantPath: "/open-apis/approval/v4/approvals/code_1/detail",
+			call: func() ([]byte, error) {
+				return GetApprovalDefinitionRaw("code_1", GetApprovalOptions{}, userToken)
+			},
+		},
+		{
+			name:     "instance raw-json",
+			wantPath: "/open-apis/approval/v4/instances/detail",
+			call: func() ([]byte, error) {
+				return GetApprovalInstanceRaw(GetApprovalInstanceOptions{InstanceCode: "ic"}, userToken)
+			},
+		},
+		{
+			name:     "task raw-json",
+			wantPath: "/open-apis/approval/v4/tasks",
+			call: func() ([]byte, error) {
+				return QueryApprovalTasksRaw(ApprovalTaskQueryOptions{Topic: "1"}, userToken)
+			},
+		},
+		{
+			name:     "initiated raw-json",
+			wantPath: "/open-apis/approval/v4/instances/initiated",
+			call: func() ([]byte, error) {
+				return ListInitiatedApprovalInstancesRaw(ListInitiatedApprovalInstancesOptions{}, userToken)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			var gotStatus int
+			_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				gotStatus = http.StatusOK
+				_, _ = w.Write([]byte(bizBody))
+			})
+			defer cleanup()
+
+			body, err := tt.call()
+			if err == nil {
+				t.Fatalf("HTTP 200 + code!=0 must fail, got body %s", body)
+			}
+			if !strings.Contains(err.Error(), "code=1395001") {
+				t.Fatalf("error = %q, want business code=1395001", err.Error())
+			}
+			if body != nil {
+				t.Fatalf("raw body must not be returned on business error, got %s", body)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("path = %q, want %q", gotPath, tt.wantPath)
+			}
+			if gotStatus != http.StatusOK {
+				t.Fatalf("stub status = %d, want 200", gotStatus)
+			}
+		})
+	}
+}
+
+func TestApprovalRawJSONReturnsOriginalSuccessBody(t *testing.T) {
+	const userToken = "u-raw-ok"
+	want := []byte(`{"code":0,"msg":"ok","data":{"instance_code":"ic","status":"PENDING"}}`)
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(want)
+	})
+	defer cleanup()
+
+	got, err := GetApprovalInstanceRaw(GetApprovalInstanceOptions{InstanceCode: "ic"}, userToken)
+	if err != nil {
+		t.Fatalf("GetApprovalInstanceRaw() error = %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("raw body = %s, want original success envelope", got)
+	}
 }
