@@ -96,6 +96,13 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	}
 	userAccessToken := resolveOptionalUserToken(cmd)
 	revisionID, _ := cmd.Flags().GetInt("revision-id")
+	if revisionID < -1 {
+		return fmt.Errorf("--revision-id 必须 >= -1（-1 表示忽略校验或自动最新，当前输入: %d）", revisionID)
+	}
+
+	if cmd.Flags().Changed("table-column-width") && colWidthRaw != "auto" {
+		return fmt.Errorf("doc content-update 现采用官方原子安全更新协议，暂不支持 --table-column-width 自定义列宽；如需保留/自定义表格列宽，请改用 'feishu-cli doc import' 进行文档导入")
+	}
 
 	// 解析 Markdown 内容
 	markdownContent, err := resolveMarkdownContent(markdownStr, markdownFile)
@@ -176,6 +183,20 @@ func validateContentUpdateParams(mode, markdown, selByTitle, selWithEllipsis str
 		}
 		if selByTitle != "" && selWithEllipsis != "" {
 			return fmt.Errorf("--selection-by-title 和 --selection-with-ellipsis 不能同时使用")
+		}
+		if selWithEllipsis != "" {
+			trimmed := strings.TrimSpace(selWithEllipsis)
+			if trimmed == "..." {
+				return fmt.Errorf("--selection-with-ellipsis 不能仅为省略号 '...'")
+			}
+			if strings.Contains(trimmed, "...") {
+				parts := strings.SplitN(trimmed, "...", 2)
+				startText := strings.TrimSpace(parts[0])
+				endText := strings.TrimSpace(parts[1])
+				if startText == "" || endText == "" {
+					return fmt.Errorf("--selection-with-ellipsis 的起始和结束端点均不能为空，当前输入: %q", selWithEllipsis)
+				}
+			}
 		}
 	}
 
@@ -449,14 +470,15 @@ func validateNoLocalResources(uploadImages bool, markdown string) error {
 // 7 种模式实现（对齐官方 PUT /open-apis/docs_ai/v1/documents/{id} 原子更新能力）
 // ============================================================
 
-// doAppend 追加到文档末尾（原子更新）
+// doAppend 追加到文档末尾（对齐官方：docs_ai 将 append 转为 block_insert_after + block_id="-1"）
 func doAppend(documentID, markdown string, output, userAccessToken string, revisionID int) error {
 	body := map[string]any{
-		"format":  "markdown",
-		"command": "append",
-		"content": markdown,
+		"format":   "markdown",
+		"command":  "block_insert_after",
+		"block_id": "-1",
+		"content":  markdown,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
@@ -477,7 +499,7 @@ func doOverwrite(documentID, markdown string, output, userAccessToken string, re
 		"command": "overwrite",
 		"content": markdown,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
@@ -517,7 +539,7 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, ou
 		"start_block_id": startBlockID,
 		"end_block_id":   endBlockID,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 
@@ -563,7 +585,7 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, outp
 			"start_block_id": startBlockID,
 			"end_block_id":   endBlockID,
 		}
-		if currentRevision > 0 {
+		if currentRevision >= -1 {
 			body["revision_id"] = currentRevision
 		}
 
@@ -574,12 +596,23 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, outp
 		}
 		replaced++
 
+		var nextRev int = -1
 		if docObj, ok := data["document"].(map[string]any); ok {
 			if rev, ok := docObj["revision_id"].(float64); ok && int(rev) > 0 {
-				currentRevision = int(rev)
+				nextRev = int(rev)
 			}
 		} else if rev, ok := data["revision_id"].(float64); ok && int(rev) > 0 {
-			currentRevision = int(rev)
+			nextRev = int(rev)
+		} else if docRev, ok := data["document_revision_id"].(float64); ok && int(docRev) > 0 {
+			nextRev = int(docRev)
+		}
+
+		if i > 0 {
+			if nextRev <= 0 {
+				return fmt.Errorf("全文替换中断：共 %d 处匹配，已成功完成 %d 处，但服务端未返回新的 revision_id；为防止并发数据破坏已停止后续未保护替换",
+					totalRanges, replaced)
+			}
+			currentRevision = nextRev
 		}
 	}
 
@@ -616,7 +649,7 @@ func doInsertBefore(documentID, markdown, selByTitle, selWithEllipsis string, ou
 		"block_id": blockID,
 		"content":  markdown,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
@@ -650,7 +683,7 @@ func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, out
 		"block_id": targetBlockID,
 		"content":  markdown,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
@@ -688,7 +721,7 @@ func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userA
 		"start_block_id": startBlockID,
 		"end_block_id":   endBlockID,
 	}
-	if revisionID > 0 {
+	if revisionID >= -1 {
 		body["revision_id"] = revisionID
 	}
 

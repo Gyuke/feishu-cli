@@ -23,6 +23,73 @@ var validWikiNodeDeleteObjTypes = map[string]bool{
 	"file":     true,
 }
 
+var wikiURLMarkers = []struct {
+	Marker  string
+	ObjType string
+}{
+	{"/wiki/", "wiki"},
+	{"/docx/", "docx"},
+	{"/sheets/", "sheet"},
+	{"/base/", "bitable"},
+	{"/bitable/", "bitable"},
+	{"/mindnote/", "mindnote"},
+	{"/slides/", "slides"},
+	{"/file/", "file"},
+	{"/doc/", "doc"},
+}
+
+// parseWikiDeleteInput 对齐官方输入契约：URL 自动推断 obj_type，裸 token 必须显式传 --obj-type
+func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, err error) {
+	rawInput = strings.TrimSpace(rawInput)
+	if rawInput == "" {
+		return "", "", fmt.Errorf("<node_token> 不能为空")
+	}
+
+	flagObjType = strings.ToLower(strings.TrimSpace(flagObjType))
+
+	if strings.Contains(rawInput, "://") {
+		inferredType := ""
+		extractedToken := ""
+		for _, m := range wikiURLMarkers {
+			if idx := strings.Index(rawInput, m.Marker); idx >= 0 {
+				rest := rawInput[idx+len(m.Marker):]
+				for _, sep := range []string{"?", "#", "/"} {
+					if i := strings.Index(rest, sep); i >= 0 {
+						rest = rest[:i]
+					}
+				}
+				if rest != "" {
+					extractedToken = rest
+					inferredType = m.ObjType
+					break
+				}
+			}
+		}
+		if extractedToken == "" {
+			return "", "", fmt.Errorf("无法从 URL 解析出文档 token: %q", rawInput)
+		}
+		if flagObjType != "" && flagObjType != inferredType {
+			return "", "", fmt.Errorf("--obj-type %q 与从 URL 推断的文档类型 %q 冲突；请二选一", flagObjType, inferredType)
+		}
+		token = extractedToken
+		objType = inferredType
+	} else {
+		if strings.ContainsAny(rawInput, "/?#") {
+			return "", "", fmt.Errorf("参数 %q 既非完整 URL 亦非合法 token，不支持带部分路径的输入", rawInput)
+		}
+		token = rawInput
+		if flagObjType == "" {
+			return "", "", fmt.Errorf("当输入为裸 token 时，--obj-type 为必填项（无法从 URL 自动推断文档类型）；可选值: wiki, doc, docx, sheet, bitable, mindnote, slides, file")
+		}
+		objType = flagObjType
+	}
+
+	if !validWikiNodeDeleteObjTypes[objType] {
+		return "", "", fmt.Errorf("不支持的 --obj-type %q；可选值: wiki, doc, docx, sheet, bitable, mindnote, slides, file", objType)
+	}
+	return token, objType, nil
+}
+
 var (
 	wikiDeleteNodePollAttempts = 30
 	wikiDeleteNodePollInterval = 2 * time.Second
@@ -32,56 +99,59 @@ var deleteWikiNodeCmd = &cobra.Command{
 	Use:   "delete <node_token>",
 	Short: "删除知识库节点",
 	Long: `删除知识库节点（通过官方 Wiki 节点删除 API）。
+URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token 输入必须显式指定 --obj-type。
 若节点包含子节点或数据量较大，后端可能转为异步任务，本命令会自动轮询任务直至完成。
 
 参数:
-  node_token    节点 Token 或知识库 URL（必填）
+  node_token    节点 Token 或知识库完整 URL（必填）
 
 可选参数:
   --space-id            知识空间 ID（可选，未指定时自动通过 get_node 解析）
-  --obj-type            文档类型（默认 wiki）
+  --obj-type            文档类型（裸 token 必填，URL 输入自动推断；可选: wiki, doc, docx, sheet, bitable, mindnote, slides, file）
   --include-children    是否级联删除子节点（默认 true）
   --force, -f           跳过确认直接删除
   --output, -o          输出格式 (json)
 
 示例:
-  # 删除节点（自动解析空间）
-  feishu-cli wiki delete wikcnXXXXXX
+  # 通过 URL 删除节点（自动推断空间和类型）
+  feishu-cli wiki delete https://sample.feishu.cn/wiki/wikcnXXXXXX
+
+  # 通过裸 token 删除（必须指定 --obj-type）
+  feishu-cli wiki delete wikcnXXXXXX --obj-type wiki
 
   # 指定空间 ID 删除并跳过确认
-  feishu-cli wiki delete wikcnXXXXXX --space-id 7012345678901234567 -f
+  feishu-cli wiki delete wikcnXXXXXX --obj-type wiki --space-id 7012345678901234567 -f
 
   # JSON 格式输出
-  feishu-cli wiki delete wikcnXXXXXX -o json`,
+  feishu-cli wiki delete https://sample.feishu.cn/wiki/wikcnXXXXXX -o json`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
 		}
 
-		nodeToken, err := extractWikiToken(args[0])
+		rawObjType, _ := cmd.Flags().GetString("obj-type")
+		nodeToken, objType, err := parseWikiDeleteInput(args[0], rawObjType)
 		if err != nil {
 			return err
 		}
+
 		spaceID, _ := cmd.Flags().GetString("space-id")
-		objType, _ := cmd.Flags().GetString("obj-type")
 		includeChildren, _ := cmd.Flags().GetBool("include-children")
 		force, _ := cmd.Flags().GetBool("force")
 		output, _ := cmd.Flags().GetString("output")
-
-		objType = strings.ToLower(strings.TrimSpace(objType))
-		if !validWikiNodeDeleteObjTypes[objType] {
-			return fmt.Errorf("不支持的 --obj-type %q；可选值: wiki, doc, docx, sheet, bitable, mindnote, slides, file", objType)
-		}
 
 		token := resolveOptionalUserToken(cmd)
 
 		nodeTitle := ""
 		if spaceID == "" {
-			// 未指定 space-id 时先获取节点信息解析 space_id
-			node, err := client.GetWikiNode(nodeToken, token)
+			// 未指定 space-id 时通过 get_node 解析 space_id（对 wiki token 省略 obj_type，对 non-wiki token 传 obj_type）
+			node, err := client.GetWikiNodeWithOptions(nodeToken, objType, token)
 			if err != nil {
 				return fmt.Errorf("获取节点信息失败: %w", err)
+			}
+			if node.SpaceID == "" {
+				return fmt.Errorf("未能通过 get_node 获取 space_id，请通过 --space-id 显式指定")
 			}
 			spaceID = node.SpaceID
 			nodeTitle = node.Title
@@ -142,8 +212,16 @@ var deleteWikiNodeCmd = &cobra.Command{
 	},
 }
 
+func buildWikiDeleteNodeResumeCmd(taskID, userToken string) string {
+	resumeCmd := fmt.Sprintf("feishu-cli drive task-result --scenario wiki_delete_node --task-id %s", taskID)
+	if userToken != "" {
+		resumeCmd += fmt.Sprintf(" --user-access-token %s", userToken)
+	}
+	return resumeCmd
+}
+
 func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken string) (*client.WikiDeleteNodeTaskStatus, error) {
-	resumeCmd := fmt.Sprintf("feishu-cli drive task-result --task-id %s", taskID)
+	resumeCmd := buildWikiDeleteNodeResumeCmd(taskID, userToken)
 	var last client.WikiDeleteNodeTaskStatus
 	var lastErr error
 	hadSuccessfulPoll := false
@@ -152,7 +230,7 @@ func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken string) (*cli
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
-				return &last, ctx.Err()
+				return &last, fmt.Errorf("知识库节点删除轮询被取消 (task_id=%s): %w\n可通过以下命令继续查询: %s", taskID, ctx.Err(), resumeCmd)
 			case <-time.After(wikiDeleteNodePollInterval):
 			}
 		}
@@ -199,7 +277,7 @@ func printDeleteWikiNodeResult(result map[string]any, output string) error {
 func init() {
 	wikiCmd.AddCommand(deleteWikiNodeCmd)
 	deleteWikiNodeCmd.Flags().String("space-id", "", "知识空间 ID（可选，未指定时自动解析）")
-	deleteWikiNodeCmd.Flags().String("obj-type", "wiki", "文档类型（默认 wiki）")
+	deleteWikiNodeCmd.Flags().String("obj-type", "", "文档类型（裸 token 必填，URL 输入自动推断；可选: wiki, doc, docx, sheet, bitable, mindnote, slides, file）")
 	deleteWikiNodeCmd.Flags().Bool("include-children", true, "是否级联删除子节点（默认 true）")
 	deleteWikiNodeCmd.Flags().BoolP("force", "f", false, "跳过确认直接删除")
 	deleteWikiNodeCmd.Flags().StringP("output", "o", "", "输出格式 (json)")

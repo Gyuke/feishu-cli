@@ -8,20 +8,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var driveTaskScenarios = []string{"import", "export", "task_check"}
+var driveTaskScenarios = []string{"import", "export", "task_check", "wiki_delete_node"}
 
 var driveTaskResultCmd = &cobra.Command{
 	Use:   "task-result",
-	Short: "通用异步任务查询（import / export / task_check）",
-	Long: `统一查询异步任务状态，用于 drive import / export / move 超时后的 resume。
+	Short: "通用异步任务查询（import / export / task_check / wiki_delete_node）",
+	Long: `统一查询异步任务状态，用于 drive import / export / move 与 wiki 节点删除等异步任务的 resume。
 
 必填:
-  --scenario     任务场景: import / export / task_check
+  --scenario     任务场景: import / export / task_check / wiki_delete_node
 
 对应入参:
   --ticket       import/export 场景必填
   --file-token   export 场景必填（原始文档 token）
-  --task-id      task_check 场景必填（drive move 的异步 task_id）
+  --task-id      task_check 与 wiki_delete_node 场景必填（异步任务 ID）
 
 权限:
   - User Access Token
@@ -29,7 +29,8 @@ var driveTaskResultCmd = &cobra.Command{
 示例:
   feishu-cli drive task-result --scenario export --ticket abcxxx --file-token docxxx
   feishu-cli drive task-result --scenario import --ticket abcxxx
-  feishu-cli drive task-result --scenario task_check --task-id xxx`,
+  feishu-cli drive task-result --scenario task_check --task-id xxx
+  feishu-cli drive task-result --scenario wiki_delete_node --task-id xxx`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
@@ -114,6 +115,23 @@ var driveTaskResultCmd = &cobra.Command{
 				"ready":    status.Status == "success",
 				"failed":   status.Status == "failed",
 			}
+		case "wiki_delete_node":
+			if taskID == "" {
+				return fmt.Errorf("--task-id 在 wiki_delete_node 场景必填")
+			}
+			status, err := client.GetWikiDeleteNodeTask(taskID, token)
+			if err != nil {
+				return err
+			}
+			result = map[string]any{
+				"scenario":   "wiki_delete_node",
+				"task_id":    taskID,
+				"ready":      status.Ready(),
+				"failed":     status.Failed(),
+				"pending":    !status.Ready() && !status.Failed(),
+				"status":     status.Status,
+				"status_msg": status.StatusMsg,
+			}
 		}
 
 		if output == "json" {
@@ -133,10 +151,10 @@ var driveTaskResultCmd = &cobra.Command{
 
 func init() {
 	driveCmd.AddCommand(driveTaskResultCmd)
-	driveTaskResultCmd.Flags().String("scenario", "", "任务场景: import/export/task_check（必填）")
+	driveTaskResultCmd.Flags().String("scenario", "", "任务场景: import/export/task_check/wiki_delete_node（必填）")
 	driveTaskResultCmd.Flags().String("ticket", "", "异步任务 ticket（import/export 必填）")
 	driveTaskResultCmd.Flags().String("file-token", "", "原始文档 token（export 必填）")
-	driveTaskResultCmd.Flags().String("task-id", "", "异步任务 ID（task_check 必填）")
+	driveTaskResultCmd.Flags().String("task-id", "", "异步任务 ID（task_check 与 wiki_delete_node 场景必填）")
 	driveTaskResultCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveTaskResultCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveTaskResultCmd, "scenario")

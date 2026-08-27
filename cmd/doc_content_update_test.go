@@ -410,3 +410,231 @@ func TestFailClosedOnLocalResources(t *testing.T) {
 		t.Fatalf("网络图片应允许通行，但报错: %v", err)
 	}
 }
+
+// TestAppendWireBodyUsesBlockInsertAfterSentinel 验证 append 模式在 wire 上正确转换为 block_insert_after + block_id="-1"
+func TestAppendWireBodyUsesBlockInsertAfterSentinel(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "PUT" && r.URL.Path == "/open-apis/docs_ai/v1/documents/doc-append":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":1}}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doAppend("doc-append", "追加的内容", "", "", -1)
+	if err != nil {
+		t.Fatalf("doAppend 失败: %v", err)
+	}
+
+	if gotBody["command"] != "block_insert_after" {
+		t.Fatalf("command = %v, 期望 block_insert_after", gotBody["command"])
+	}
+	if gotBody["block_id"] != "-1" {
+		t.Fatalf("block_id = %v, 期望 -1", gotBody["block_id"])
+	}
+	if gotBody["revision_id"] != float64(-1) {
+		t.Fatalf("默认 revision_id 应当发送 -1，实际发送: %v", gotBody["revision_id"])
+	}
+}
+
+// TestDestructiveModesFailWhenResultFailed 验证所有破坏性模式在服务端返回 result="failed" 时必须退出非零
+func TestDestructiveModesFailWhenResultFailed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"b1","block_type":3,"heading1":{"elements":[{"text_run":{"content":"章节1"}}]}},
+						{"block_id":"b2","block_type":2,"text":{"elements":[{"text_run":{"content":"内容1"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT":
+			// 返回 code=0 但 data.result="failed"
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"result":"failed"}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	// 1. overwrite
+	if err := doOverwrite("doc-1", "新内容", "", "", -1); err == nil {
+		t.Fatal("overwrite 在 result=failed 时必须非零报错")
+	}
+
+	// 2. replace_range
+	if err := doReplaceRange("doc-1", "新内容", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("replace_range 在 result=failed 时必须非零报错")
+	}
+
+	// 3. delete_range
+	if err := doDeleteRange("doc-1", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("delete_range 在 result=failed 时必须非零报错")
+	}
+
+	// 4. replace_all
+	if err := doReplaceAll("doc-1", "新内容", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("replace_all 在 result=failed 时必须非零报错")
+	}
+}
+
+// TestDestructiveModesFailWhenEmptyData 验证所有破坏性模式在服务端返回空 data 时必须退出非零
+func TestDestructiveModesFailWhenEmptyData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"b1","block_type":3,"heading1":{"elements":[{"text_run":{"content":"章节1"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT":
+			// 返回 code=0 但 data 为 null/空
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":null}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	if err := doOverwrite("doc-1", "新内容", "", "", -1); err == nil {
+		t.Fatal("overwrite 在 data 为空时必须非零报错")
+	}
+	if err := doReplaceRange("doc-1", "新内容", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("replace_range 在 data 为空时必须非零报错")
+	}
+	if err := doDeleteRange("doc-1", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("delete_range 在 data 为空时必须非零报错")
+	}
+	if err := doReplaceAll("doc-1", "新内容", "章节1", "", "", "", -1); err == nil {
+		t.Fatal("replace_all 在 data 为空时必须非零报错")
+	}
+}
+
+// TestNegativeRevisionIDRejected 验证负数非法 revision-id（<-1）被校验拒绝
+func TestNegativeRevisionIDRejected(t *testing.T) {
+	initDocUpdateTestConfig(t, "http://127.0.0.1:9999")
+	_ = docContentUpdateCmd.Flags().Set("mode", "overwrite")
+	_ = docContentUpdateCmd.Flags().Set("markdown", "test")
+	_ = docContentUpdateCmd.Flags().Set("revision-id", "-2")
+	defer func() {
+		_ = docContentUpdateCmd.Flags().Set("mode", "")
+		_ = docContentUpdateCmd.Flags().Set("markdown", "")
+		_ = docContentUpdateCmd.Flags().Set("revision-id", "-1")
+	}()
+	err := docContentUpdateCmd.RunE(docContentUpdateCmd, []string{"doc-1"})
+	if err == nil {
+		t.Fatal("--revision-id -2 必须被拒绝报错")
+	}
+	if !strings.Contains(err.Error(), "--revision-id 必须 >= -1") {
+		t.Fatalf("错误信息应说明 >= -1，实际得到: %v", err)
+	}
+}
+
+// TestTableColumnWidthCustomFailsClosed 验证自定义 --table-column-width 时 fail closed 拒绝并提供迁移提示
+func TestTableColumnWidthCustomFailsClosed(t *testing.T) {
+	initDocUpdateTestConfig(t, "http://127.0.0.1:9999")
+	_ = docContentUpdateCmd.Flags().Set("mode", "overwrite")
+	_ = docContentUpdateCmd.Flags().Set("markdown", "test")
+	_ = docContentUpdateCmd.Flags().Set("table-column-width", "100,200")
+	defer func() {
+		_ = docContentUpdateCmd.Flags().Set("mode", "")
+		_ = docContentUpdateCmd.Flags().Set("markdown", "")
+		_ = docContentUpdateCmd.Flags().Set("table-column-width", "auto")
+	}()
+	err := docContentUpdateCmd.RunE(docContentUpdateCmd, []string{"doc-1"})
+	if err == nil {
+		t.Fatal("自定义 --table-column-width 必须 fail closed 报错")
+	}
+	if !strings.Contains(err.Error(), "feishu-cli doc import") {
+		t.Fatalf("错误信息必须包含迁移提示 doc import，实际得到: %v", err)
+	}
+}
+
+// TestEllipsisSelectorRejectsEmptyEndpoints 验证省略号定位端点为空或仅为省略号时拒绝报错
+func TestEllipsisSelectorRejectsEmptyEndpoints(t *testing.T) {
+	tests := []string{
+		"...",
+		"...结尾",
+		"开头...",
+		"   ...   ",
+	}
+
+	for _, tt := range tests {
+		err := validateContentUpdateParams("replace_range", "新内容", "", tt)
+		if err == nil {
+			t.Errorf("端点为空或单省略号 %q 必须报错拒绝", tt)
+		}
+	}
+
+	// 正常端点允许通过
+	if err := validateContentUpdateParams("replace_range", "新内容", "", "开头...结尾"); err != nil {
+		t.Fatalf("合法端点应当通过: %v", err)
+	}
+}
+
+// TestReplaceAllAbortsWhenNextRevisionMissing 验证多步 replace_all 如果未返回新的 revision_id 则非零退出并停止后续替换
+func TestReplaceAllAbortsWhenNextRevisionMissing(t *testing.T) {
+	putCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"item_1","block_type":2,"text":{"elements":[{"text_run":{"content":"待替换"}}]}},
+						{"block_id":"item_2","block_type":2,"text":{"elements":[{"text_run":{"content":"待替换"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT":
+			putCount++
+			// 成功，但 data 缺少 revision_id
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{}}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doReplaceAll("doc-rep", "新内容", "", "待替换", "", "", 5)
+	if err == nil {
+		t.Fatal("缺少新的 revision_id 时必须非零中止，绝不能未受保护继续执行")
+	}
+	if !strings.Contains(err.Error(), "未返回新的 revision_id") {
+		t.Fatalf("错误应说明未返回新的 revision_id，实际得到: %v", err)
+	}
+	if putCount != 1 {
+		t.Fatalf("PUT 应当在第 1 处后中止，实际调用了 %d 次", putCount)
+	}
+}

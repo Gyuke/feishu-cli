@@ -115,12 +115,14 @@ func TestDeleteWikiNodePathBodyAndAsyncPoll(t *testing.T) {
 	initWikiNodeDeleteTestConfig(t, server.URL)
 
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	origAttempts := wikiDeleteNodePollAttempts
 	origInterval := wikiDeleteNodePollInterval
 	wikiDeleteNodePollAttempts = 3
 	wikiDeleteNodePollInterval = 5 * time.Millisecond
 	defer func() {
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		wikiDeleteNodePollAttempts = origAttempts
 		wikiDeleteNodePollInterval = origInterval
 	}()
@@ -167,9 +169,11 @@ func TestDeleteWikiNodeSyncCompletion(t *testing.T) {
 	initWikiNodeDeleteTestConfig(t, server.URL)
 
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-1")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
 	defer func() {
 		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
 	}()
 
@@ -213,7 +217,13 @@ func TestDeleteWikiNodeAllFailedReturnsError(t *testing.T) {
 	}()
 
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-fail")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-fail"})
 	if err == nil {
@@ -271,7 +281,13 @@ func TestDeleteWikiNodeTimeoutReturnsError(t *testing.T) {
 	}()
 
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-timeout")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-timeout"})
 	if err == nil {
@@ -342,7 +358,13 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 	}()
 
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp 123")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnEscaped"})
 	if err != nil {
@@ -356,5 +378,69 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 	wantPollPath := "/open-apis/wiki/v2/tasks/task%20id%20with%20space"
 	if gotPollPath != wantPollPath {
 		t.Fatalf("Task 轮询路径转义异常: got %q, want %q", gotPollPath, wantPollPath)
+	}
+}
+
+// TestDeleteWikiNodeBareTokenRequiresObjType 验证裸 token 输入缺 --obj-type 时报错
+func TestDeleteWikiNodeBareTokenRequiresObjType(t *testing.T) {
+	initWikiNodeDeleteTestConfig(t, "http://127.0.0.1:9999")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnBareToken"})
+	if err == nil {
+		t.Fatal("裸 token 未指定 --obj-type 必须报错")
+	}
+	if !strings.Contains(err.Error(), "--obj-type 为必填项") {
+		t.Fatalf("错误应提示 --obj-type 为必填项，实际得到: %v", err)
+	}
+}
+
+// TestDeleteWikiNodeURLInfersObjTypeAndPassesObjType 验证完整 URL 自动推断 obj_type，且对 non-wiki token 向 get_node 发送 obj_type 参数
+func TestDeleteWikiNodeURLInfersObjTypeAndPassesObjType(t *testing.T) {
+	var gotGetNodeQuery string
+	var gotDeleteBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.URL.Path == "/open-apis/wiki/v2/spaces/get_node":
+			gotGetNodeQuery = r.URL.RawQuery
+			_, _ = fmt.Fprint(w, `{
+				"code": 0, "msg": "ok",
+				"data": {"node": {"space_id": "sp-inferred", "node_token": "doxcnReal", "obj_type": "docx"}}
+			}`)
+		case r.Method == "DELETE" && r.URL.Path == "/open-apis/wiki/v2/spaces/sp-inferred/nodes/doxcnReal":
+			_ = json.NewDecoder(r.Body).Decode(&gotDeleteBody)
+			_, _ = fmt.Fprint(w, `{"code": 0, "msg": "ok", "data": {"task_id": ""}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"https://sample.feishu.cn/docx/doxcnReal"})
+	if err != nil {
+		t.Fatalf("URL 执行删除失败: %v", err)
+	}
+
+	// 验证 non-wiki docx token 向 get_node 传递了 obj_type=docx
+	if !strings.Contains(gotGetNodeQuery, "obj_type=docx") {
+		t.Fatalf("non-wiki docx URL 解析 space 时向 get_node 必须发送 obj_type=docx，实际 query: %q", gotGetNodeQuery)
+	}
+	if gotDeleteBody["obj_type"] != "docx" {
+		t.Fatalf("DELETE 请求 body obj_type = %v, 期望 docx", gotDeleteBody["obj_type"])
 	}
 }

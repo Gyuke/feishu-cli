@@ -35,18 +35,27 @@ type WikiSpace struct {
 	Visibility  string `json:"visibility,omitempty"`
 }
 
-// GetWikiNode 获取知识库节点信息
+// GetWikiNode 获取知识库节点信息（向后兼容）。
 func GetWikiNode(token string, userAccessToken string) (*WikiNode, error) {
+	return GetWikiNodeWithOptions(token, "", userAccessToken)
+}
+
+// GetWikiNodeWithOptions 获取知识库节点信息。
+// 当 token 为 non-wiki obj_token 时必须传入 objType（如 docx/sheet 等）；
+// 当 token 为 wiki node_token 时（objType 为 "" 或 "wiki"），OpenAPI 规定省略 obj_type 参数。
+func GetWikiNodeWithOptions(token, objType, userAccessToken string) (*WikiNode, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
 	}
 
-	req := larkwiki.NewGetNodeSpaceReqBuilder().
-		Token(token).
-		Build()
+	reqBuilder := larkwiki.NewGetNodeSpaceReqBuilder().
+		Token(token)
+	if objType != "" && objType != "wiki" {
+		reqBuilder.ObjType(objType)
+	}
 
-	resp, err := client.Wiki.Space.GetNode(Context(), req, UserTokenOption(userAccessToken)...)
+	resp, err := client.Wiki.Space.GetNode(Context(), reqBuilder.Build(), UserTokenOption(userAccessToken)...)
 	if err != nil {
 		return nil, fmt.Errorf("获取节点信息失败: %w", err)
 	}

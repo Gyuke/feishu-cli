@@ -1230,5 +1230,11 @@ func UpdateDocContentAtomic(documentID string, body map[string]any, userAccessTo
 	if parsed.Code != 0 {
 		return nil, fmt.Errorf("更新文档内容失败: code=%d, msg=%s", parsed.Code, parsed.Msg)
 	}
+	if parsed.Data == nil || len(parsed.Data) == 0 {
+		return nil, fmt.Errorf("更新文档接口返回空数据对象")
+	}
+	if resStr, ok := parsed.Data["result"].(string); ok && strings.EqualFold(strings.TrimSpace(resStr), "failed") {
+		return nil, fmt.Errorf("更新文档操作失败: result=failed")
+	}
 	return parsed.Data, nil
 }
