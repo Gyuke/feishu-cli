@@ -92,89 +92,17 @@ func parseSparkResponse(statusCode int, raw []byte) (map[string]any, error) {
 	return result, nil
 }
 
-// 妙搭 html-publish 端点的业务错误码（后端 owns，文档更新时同步）。
-const (
-	sparkErrCodeBuildFailed = 90001 // tar.gz 上传成功但服务端构建失败
-	sparkErrCodeAppNotFound = 90002 // app_id 不存在或无权访问
-)
-
-// SparkHTMLPublish 把打包好的 tar.gz 以单次 multipart POST 上传并发布，返回 data（含访问 url）。
-//
-// 复用 SDK 的 Formdata 原语——线格式：单个 file part，
-// field name="file"，part body 即 tar.gz 字节；app_id 走 URL path，不放 body。
-// 不手搓 multipart。
-func SparkHTMLPublish(appID string, tarball []byte, userAccessToken string) (map[string]any, error) {
-	cli, err := GetClient()
-	if err != nil {
-		return nil, err
-	}
-
-	fd := larkcore.NewFormdata()
-	fd.AddFile("file", bytes.NewReader(tarball))
-
-	req := &larkcore.ApiReq{
-		HttpMethod:                http.MethodPost,
-		ApiPath:                   fmt.Sprintf("%s/apps/%s/upload_and_release_html_code", SparkBasePath, url.PathEscape(appID)),
-		Body:                      fd,
-		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeUser},
-	}
-
-	opts := []larkcore.RequestOptionFunc{larkcore.WithFileUpload()}
-	if userAccessToken != "" {
-		opts = append(opts, larkcore.WithUserAccessToken(userAccessToken))
-	}
-
-	resp, err := cli.Do(Context(), req, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("妙搭 html-publish 上传失败: %w", err)
-	}
-	return parseHTMLPublishResponse(resp.StatusCode, resp.RawBody)
+// SparkAppGetPath 返回 GET /apps/{id}（查 app_type 等元数据）。
+func SparkAppGetPath(appID string) string {
+	return fmt.Sprintf("%s/apps/%s", SparkBasePath, url.PathEscape(appID))
 }
 
-// parseHTMLPublishResponse 解析 html-publish 响应：HTTP 4xx/5xx 透出原始 body（与
-// parseSparkResponse 一致，避免网关级失败被笼统的「解析失败」掩盖真实状态码）；
-// 业务 code!=0 → 带 hint 的 error；成功只白名单提取 data.url（
-// 刻意丢掉 status/release_id 等兄弟字段，后端新增字段不会无意泄漏到输出）。
-func parseHTMLPublishResponse(statusCode int, raw []byte) (map[string]any, error) {
-	if statusCode >= http.StatusBadRequest {
-		bodyPreview := strings.TrimSpace(string(raw))
-		if bodyPreview == "" {
-			return nil, fmt.Errorf("妙搭 html-publish HTTP %d", statusCode)
-		}
-		return nil, fmt.Errorf("妙搭 html-publish HTTP %d: %s", statusCode, bodyPreview)
-	}
-
-	var env struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			URL string `json:"url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("解析 html-publish 响应失败: %w", err)
-	}
-	if env.Code != 0 {
-		msg := fmt.Sprintf("妙搭 html-publish 失败: code=%d, msg=%s", env.Code, env.Msg)
-		if hint := sparkHTMLPublishHint(env.Code); hint != "" {
-			msg += "\n" + hint
-		}
-		return nil, fmt.Errorf("%s", msg)
-	}
-	out := map[string]any{}
-	if env.Data.URL != "" {
-		out["url"] = env.Data.URL
-	}
-	return out, nil
+// SparkPreReleasePath 返回 GET /apps/{id}/pre_release（取 TOS 预签名 upload_url / tos_path）。
+func SparkPreReleasePath(appID string) string {
+	return SparkAppGetPath(appID) + "/pre_release"
 }
 
-func sparkHTMLPublishHint(code int) string {
-	switch code {
-	case sparkErrCodeBuildFailed:
-		return "构建失败：用 `feishu-cli apps html-publish --app-id <id> --path <path> --dry-run` 检查打包文件清单"
-	case sparkErrCodeAppNotFound:
-		return "应用不存在或无权访问；确认 app_id（从妙搭应用链接 https://miaoda.feishu.cn/app/app_xxx 的 /app/ 后提取，或直接给 app_xxx 字符串）"
-	default:
-		return ""
-	}
+// SparkReleaseCreatePath 返回 POST /apps/{id}/releases（body.tos_path 触发发布）。
+func SparkReleaseCreatePath(appID string) string {
+	return SparkAppGetPath(appID) + "/releases"
 }

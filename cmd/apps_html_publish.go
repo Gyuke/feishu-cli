@@ -32,23 +32,27 @@ const maxAppsSensitiveListInError = 5
 
 var appsHTMLPublishCmd = &cobra.Command{
 	Use:   "html-publish",
-	Short: "把 HTML 文件/目录打包发布到妙搭应用，返回访问 URL（一键部署）",
-	Long: `把 --path（单个 HTML 文件或整个目录）打包成 tar.gz，单次 multipart POST 上传并发布，
-返回可访问的应用 URL。
+	Short: "把 HTML 文件/目录打包发布到妙搭应用，返回 release_id",
+	Long: `把 --path（单个 HTML 文件或整个目录）打包成 tar.gz，按官方三段协议发布：
+  GET /apps/{id}/pre_release 解析 upload_url / tos_path →
+  对预签名 URL PUT tar.gz（不携带飞书 Authorization）→
+  POST /apps/{id}/releases（body.tos_path）返回 release_id。
 
 要求:
+  - 目标应用 app_type 必须是 html 或 modern_html（实跑时 GET 应用校验）
   - 目录形态：根目录下必须有 index.html（妙搭以它作为应用入口）
   - 单文件形态：文件名必须就是 index.html
   - 未压缩总大小 ≤ 200MB；打包后 tar.gz ≤ 20MB；单个 .html 文件 ≤ 10MB
   - 默认拦截凭证文件（.env / .npmrc / .netrc / .git-credentials / .aws/credentials /
     .docker/config.json / .kube/config），用 --allow-sensitive 显式放行
+  - --dry-run 只展示计划（三段 endpoint + 打包清单），不获取 token、不访问网络、不上传
 
-权限: User Access Token + spark:app:write
+权限: User Access Token + spark:app:read + spark:app:write
 
 示例:
   feishu-cli apps html-publish --app-id app_xxx --path ./index.html
   feishu-cli apps html-publish --app-id app_xxx --path ./dist
-  feishu-cli apps html-publish --app-id app_xxx --path ./dist --dry-run   # 只看打包清单`,
+  feishu-cli apps html-publish --app-id app_xxx --path ./dist --dry-run   # 只看计划与打包清单`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
@@ -136,10 +140,25 @@ func appsHTMLPublishDryRun(cmd *cobra.Command, appID, pathArg string, pathIsDir 
 		return err
 	}
 	m := map[string]any{
-		"method":       "POST",
-		"endpoint":     appsAppPath(appID, "/upload_and_release_html_code"),
-		"content_type": "multipart/form-data",
-		"dry_run":      true,
+		"dry_run": true,
+		"plan":    "Pack tar.gz → GET pre_release → PUT tar.gz to TOS（不携带飞书 Authorization）→ POST release-create（body.tos_path）；返回 release_id",
+		"steps": []map[string]any{
+			{
+				"method":   "GET",
+				"endpoint": appsAppPath(appID, "/pre_release"),
+			},
+			{
+				"method":        "PUT",
+				"endpoint":      "<presigned_upload_url>",
+				"content_type":  "application/gzip",
+				"authorization": false,
+			},
+			{
+				"method":   "POST",
+				"endpoint": appsAppPath(appID, "/releases"),
+				"body":     map[string]string{"tos_path": "<from pre_release response>"},
+			},
+		},
 	}
 	if walkErr != nil {
 		m["path_error"] = walkErr.Error()

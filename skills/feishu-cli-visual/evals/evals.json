@@ -30,7 +30,7 @@
       "workflows": ["apps"],
       "prompt": "把 ./dist 里的 HTML 网站发布成名为“项目看板”的妙搭应用并设为组织内可见。先检查 spark 权限；告诉我从 create 返回值取 app_id 的 jq 路径，以及目录发布前必须满足什么入口文件要求。",
       "expected_output": "预检 spark scope，依次 create、html-publish、access-scope-set，并使用正确的返回路径与入口约束。",
-      "expectations": ["先检查 spark:app:read 和 spark:app:write 权限", "按 apps create、apps html-publish、apps access-scope-set --scope tenant 的顺序执行", "从 create 返回值使用 .app.app_id 而不是 .data.app.app_id", "明确 ./dist 根目录必须包含 index.html"],
+      "expectations": ["先检查 spark:app:read 和 spark:app:write 权限", "按 apps create、apps html-publish、apps access-scope-set --scope tenant 的顺序执行", "从 create 返回值使用 .app.app_id 而不是 .data.app.app_id", "明确 ./dist 根目录必须包含 index.html", "html-publish 输出使用 .release_id 而不是 .url"],
       "files": []
     }
   ]

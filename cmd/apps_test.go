@@ -4,7 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -519,7 +522,7 @@ func TestAppsHTMLPublish_RequiresPath(t *testing.T) {
 }
 
 // TestAppsHTMLPublish_DryRunPrintsManifest 覆盖 dry-run 渲染分支（appsHTMLPublishDryRun）：
-// 不发请求、打印打包清单（endpoint/文件列表/dry_run 标记），且不要求 User Token。
+// 不发请求、打印三段计划 + 打包清单，且不要求 User Token。
 func TestAppsHTMLPublish_DryRunPrintsManifest(t *testing.T) {
 	initAppsTestConfig(t)
 	dir := writeAppsIndexFixture(t, "<h1>hi</h1>")
@@ -532,10 +535,55 @@ func TestAppsHTMLPublish_DryRunPrintsManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dry-run 不应报错（即使无 User Token）: %v", err)
 	}
-	for _, want := range []string{"upload_and_release_html_code", "index.html", "\"dry_run\": true"} {
+	for _, want := range []string{
+		"pre_release",
+		"presigned_upload_url",
+		"/releases",
+		"tos_path",
+		"index.html",
+		"\"dry_run\": true",
+		"\"authorization\": false",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run 预览缺 %q，实际输出:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "upload_and_release_html_code") {
+		t.Errorf("dry-run 不应再展示退役单 POST 端点，实际输出:\n%s", out)
+	}
+}
+
+// TestAppsHTMLPublish_DryRunZeroNetwork 锁住 dry-run 零网络：即使 OpenAPI 一被打就失败，
+// dry-run 仍 exit 0 且不要求 token。
+func TestAppsHTMLPublish_DryRunZeroNetwork(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("dry-run 不应发网络请求: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	viper.Reset()
+	cfgFile := filepath.Join(t.TempDir(), "config.yaml")
+	content := fmt.Sprintf("app_id: a\napp_secret: b\nbase_url: %q\n", srv.URL)
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	dir := writeAppsIndexFixture(t, "<h1>hi</h1>")
+	c := newAppsHTMLPublishTestCmd()
+	mustSet(t, c, "app-id", "app_x")
+	mustSet(t, c, "path", dir)
+	mustSet(t, c, "dry-run", "true")
+
+	out, err := captureAppsStdout(t, func() error { return appsHTMLPublishCmd.RunE(c, nil) })
+	if err != nil {
+		t.Fatalf("dry-run 零网络应成功: %v", err)
+	}
+	if !strings.Contains(out, "pre_release") || !strings.Contains(out, "\"dry_run\": true") {
+		t.Fatalf("dry-run 应打印三段计划，实际:\n%s", out)
 	}
 }
 

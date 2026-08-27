@@ -22,14 +22,14 @@ var appsCmd = &cobra.Command{
 
 子命令:
   create            创建一个 HTML 妙搭应用
-  html-publish      把 HTML 文件/目录打包发布到应用，返回访问 URL（一键部署）
+  html-publish      把 HTML 文件/目录按官方三段协议打包发布，返回 release_id
   update            修改应用名称 / 描述
   access-scope-get  查看应用访问范围
   access-scope-set  设置应用访问范围（specific / public / tenant）
 
 典型流程:
   feishu-cli apps create --name "我的页面" --app-type HTML        # 拿 app_id
-  feishu-cli apps html-publish --app-id app_xxx --path ./site     # 发布拿 URL
+  feishu-cli apps html-publish --app-id app_xxx --path ./site     # 发布拿 release_id
   feishu-cli apps access-scope-set --app-id app_xxx --scope tenant`,
 }
 

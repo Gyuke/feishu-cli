@@ -78,6 +78,16 @@
 - `msg search-chats` 迁移到 `POST /im/v2/chats/search`，解析 `next_page_token`；`--as bot|user|auto`；`page-size` 1–100 越界报错；`--page-all` 最多 40 页。
 - `msg mget` / `--enrich` 改用 `GET /im/v1/messages/mget`，每批最多 50，禁止 N+1。`msg history` 线程展开与 `with_sender_name` 保持不变。
 
+### 变更 — `apps html-publish` 迁移到官方三段协议
+
+退役单次 multipart POST `/apps/{id}/upload_and_release_html_code`。现按官方协议：
+
+1. GET `/apps/{id}` 校验 `app_type` 为 `html` / `modern_html`
+2. GET `/apps/{id}/pre_release` 解析 `upload_url` / `tos_path`
+3. 对预签名 URL PUT tar.gz（**不携带飞书 Authorization**）
+4. POST `/apps/{id}/releases`，body `{"tos_path":...}`，白名单返回 `release_id`（jq `.release_id`，不再返回 `.url`）
+
+`--dry-run` 只展示三段计划与打包清单，不获取 token、不访问网络。HTTP/业务错误非零退出并带恢复建议；任一步失败中止后续调用。敏感文件扫描、index.html、尺寸上限保持不变。
 
 ## [v1.36.0] - 2026-07-22
 
