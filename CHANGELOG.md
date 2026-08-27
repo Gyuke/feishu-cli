@@ -10,10 +10,12 @@
 
 - **Markdown 源/历史下载**改为 `GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16`，支持 `--version`。
 - 新增 `markdown patch`；`create` 支持 `--wiki-token`；`create/overwrite/patch` 在 **20MB+1** 走 `files/upload_prepare/part/finish`，覆盖保留 `file_token`。
-- Markdown 命令改为 User Token 优先、未登录回退 Bot。
+- Markdown 与 Drive import/export/export-download/move 增加 `--as bot|user|auto`（默认 auto；已配置 User 但刷新失败 fail-closed；`--dry-run` 不解析 token）。依赖已验收的 `fix(api): generic api 业务错误码校验与 auto 身份 fail-closed`。
 - **Drive import**：`medias/upload_all` 省略 `parent_node`；>20MB prepare 显式 `parent_node=""`；`import_tasks` 始终带 `point.mount_type=1`；官方扩展名/大小矩阵（含 slides/base）；拒绝 wiki `--folder-token`。
-- **Drive export**：docx markdown 走 `POST /docs_ai/v1/documents/{token}/fetch`；补齐类型/格式矩阵（slides/pptx、bitable/base、wiki 解析）。
-- **Drive move**：省略 `--folder-token` 时先 `GET /drive/explorer/v2/root_folder/meta` 取真实根目录 token。
+- **Drive export**：docx markdown 走 `POST /docs_ai/v1/documents/{token}/fetch`（缺少 `data.document.content` fail-closed）；补齐类型/格式矩阵（slides/pptx、bitable/base、wiki 解析）。markdown 落盘走 output-dir 内路径校验 + 同目录 temp/fsync/rename，失败不截断已有 `--overwrite` 目标。
+- **Drive move**：省略 `--folder-token` 时先 `GET /drive/explorer/v2/root_folder/meta` 取真实根目录 token；`task_check` 的 `task_id` 走 `url.Values` 编码。
+- Markdown/import 分片：`block_size` 在转 int / 分配前做 max-int 校验；分片数用除法计算，避免 `(size+blockSize-1)` 溢出。
+- `markdown diff`：每侧 10MB Stat + LimitReader 预检；`--format`/`--jq` 在下载前解析。
 - 保留 Drive 大文件 hash / 远端重复路径 fail-closed / 重试词边界分类（0073317）。
 
 ### 新增 — 官方 OpenAPI catalog overlay（可回退、可缓存、无凭证）

@@ -140,14 +140,9 @@ func uploadMediaForImportMultipart(filePath, fileName string, fileSize int64, ex
 		return "", fmt.Errorf("初始化导入媒体分片上传失败: HTTP %d, body: %s", prepareResp.StatusCode, string(prepareResp.RawBody))
 	}
 
-	session, err := parseMarkdownMultipartSession(prepareResp.RawBody)
+	session, err := parseMultipartSessionFromAPI(prepareResp.RawBody, fileSize)
 	if err != nil {
 		return "", fmt.Errorf("初始化导入媒体分片上传失败: %w", err)
-	}
-	expectedBlocks := int((fileSize + session.BlockSize - 1) / session.BlockSize)
-	if session.BlockNum != expectedBlocks {
-		return "", fmt.Errorf("upload_prepare 返回的分片计划不一致: block_size=%d, block_num=%d, expected=%d, size=%d",
-			session.BlockSize, session.BlockNum, expectedBlocks, fileSize)
 	}
 
 	fmt.Fprintf(os.Stderr, "导入媒体分片上传: %s，%d 片 × %s\n", fileName, session.BlockNum, formatSize(int(session.BlockSize)))
@@ -160,7 +155,7 @@ func uploadMediaForImportMultipart(filePath, fileName string, fileSize int64, ex
 
 	buffer := make([]byte, int(session.BlockSize))
 	remaining := fileSize
-	for seq := 0; seq < session.BlockNum; seq++ {
+	for seq := int64(0); seq < session.BlockNum; seq++ {
 		chunkSize := session.BlockSize
 		if remaining > 0 && chunkSize > remaining {
 			chunkSize = remaining

@@ -39,7 +39,8 @@ var driveExportCmd = &cobra.Command{
   --file-name    本地文件名
   --output-dir   输出目录（默认当前目录）
   --overwrite    已存在时覆盖
-  --dry-run      只打印将要发出的请求
+  --as           bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）
+  --dry-run      只打印将要发出的请求（不解析/刷新 token）
 
 示例:
   feishu-cli drive export --token docxxx --doc-type docx --file-extension markdown
@@ -97,6 +98,9 @@ var driveExportCmd = &cobra.Command{
 		if outputDir == "" {
 			outputDir = "."
 		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
 
 		if dryRun {
 			var steps []dryRunStep
@@ -149,7 +153,7 @@ var driveExportCmd = &cobra.Command{
 			return printDryRunPlan(cmd, "export cloud document", extra, steps)
 		}
 
-		token, err := requireUserToken(cmd, "drive export")
+		token, err := resolveIdentityToken(cmd)
 		if err != nil {
 			return err
 		}
@@ -207,12 +211,9 @@ var driveExportCmd = &cobra.Command{
 				fileName = title
 			}
 			fileName = ensureExportFileExtension(sanitizeExportName(fileName, sourceToken), fileExtension)
-			savedPath := filepath.Join(outputDir, fileName)
-			if _, err := os.Stat(savedPath); err == nil && !overwrite {
-				return fmt.Errorf("文件已存在: %s（使用 --overwrite 覆盖）", savedPath)
-			}
-			if err := os.WriteFile(savedPath, []byte(content), 0o644); err != nil {
-				return fmt.Errorf("写文件失败: %w", err)
+			savedPath, err := writeMarkdownExportFile(outputDir, fileName, []byte(content), overwrite)
+			if err != nil {
+				return err
 			}
 			result := annotateWiki(map[string]any{
 				"token":          sourceToken,
@@ -378,16 +379,12 @@ var driveExportDownloadCmd = &cobra.Command{
   --file-name   保存文件名（默认由 file_token 自动构造）
   --output-dir  输出目录（默认当前目录）
   --overwrite   已存在时覆盖
+  --as          bot|user|auto（默认 auto）
 
 示例:
   feishu-cli drive export-download --file-token boxxxx --output-dir ./exports`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
-			return err
-		}
-
-		token, err := requireUserToken(cmd, "drive export-download")
-		if err != nil {
 			return err
 		}
 
@@ -399,6 +396,13 @@ var driveExportDownloadCmd = &cobra.Command{
 
 		if fileToken == "" {
 			return fmt.Errorf("--file-token 必填")
+		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
 		}
 		if outputDir == "" {
 			outputDir = "."
@@ -449,6 +453,7 @@ func init() {
 	driveExportCmd.Flags().String("output-dir", ".", "输出目录")
 	driveExportCmd.Flags().Bool("overwrite", false, "已存在时覆盖")
 	driveExportCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
+	addAsFlag(driveExportCmd)
 	driveExportCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveExportCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveExportCmd, "file-extension")
@@ -458,6 +463,7 @@ func init() {
 	driveExportDownloadCmd.Flags().String("file-name", "", "保存文件名")
 	driveExportDownloadCmd.Flags().String("output-dir", ".", "输出目录")
 	driveExportDownloadCmd.Flags().Bool("overwrite", false, "已存在时覆盖")
+	addAsFlag(driveExportDownloadCmd)
 	driveExportDownloadCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveExportDownloadCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveExportDownloadCmd, "file-token")

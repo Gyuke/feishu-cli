@@ -30,7 +30,7 @@
 
 ## 前置条件
 
-- **认证**：User Token 优先（`feishu-cli auth login`）；未登录时回退 Bot/Tenant，便于无人值守
+- **认证**：`--as bot|user|auto`（默认 auto）。User 优先；完全未配置 User Token 时回退 Bot；**已配置但解析/刷新失败 fail-closed**，不会静默切 Bot。cron 用 `--as bot`
 - **预检**：`feishu-cli auth check --scope "drive:file:upload drive:file:download"`
 
 ## 命令速查
@@ -63,7 +63,8 @@ feishu-cli markdown create --name plan.md --content-file ./plan.md -o json
 | `--file` | 兼容别名，等价于 `--content-file` |
 | `--folder-token` | 目标 Drive 文件夹（缺省根目录；与 `--wiki-token` 互斥） |
 | `--wiki-token` | 目标 wiki 节点（`parent_type=wiki`） |
-| `--dry-run` | 只打印将要发出的请求 |
+| `--dry-run` | 只打印将要发出的请求（不解析/刷新 token） |
+| `--as` | `bot\|user\|auto`（默认 auto；已配置 User 刷新失败 fail-closed） |
 | `-o json` | JSON 输出（含 `file_token` / `file_name` / `size_bytes`） |
 | `--user-access-token` | 覆盖登录态 |
 
@@ -215,7 +216,12 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼
 
 `upload_all` 单次上限 **20MB**。`create` / `overwrite` / `patch` 在 **恰好 20MB** 仍走 `upload_all`，**20MB+1** 自动切 `upload_prepare/upload_part/upload_finish`，覆盖路径同样携带 `file_token` 保留原文件。
 
-**`markdown diff` 另有独立的行数/矩阵上限**（与 20MB 上传上限无关，防 LCS 矩阵 OOM）：
+**`markdown diff` 另有独立的体积/行数上限**（防 OOM；在下载完成、计算 LCS **之前**拦截）：
+
+- **单侧 ≤ 10MB**：远端走流式 `LimitReader`，本地先 `Stat` 再 `LimitReader`；恰好 10MB 放行，10MB+1 报 `exceeds 10.0 MB markdown +diff content limit`
+- `--format` / `--jq` 在下载前解析，非法取值不会先把远端内容读进内存
+
+**行数/矩阵上限**（与 20MB 上传上限无关，防 LCS 矩阵 OOM）：
 
 - **单侧 ≤ 20000 行**：任一侧超过即报错 `内容过大（N 行 / M 行），单侧超过行数上限 20000，建议用外部 diff 工具`
 - **两侧行数乘积 ≤ 2000 万单元**：LCS 用完整 `(n+1)×(m+1)` int 矩阵，内存随两侧行数**乘积**增长；乘积超限报错 `内容过大（N × M 行），LCS 矩阵超过 20000000 单元上限（防 OOM），建议用外部 diff 工具`
@@ -254,11 +260,11 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼
 
 ## 权限要求
 
-| 命令 | 所需 scope |
-|------|------|
-| `markdown create` | `drive:file:upload`（或 `drive:drive`） |
-| `markdown fetch` / `diff` | `drive:file:download`（或 `drive:drive`） |
-| `markdown overwrite` / `patch` | `drive:file:upload` + `drive:drive.metadata:readonly` + `drive:file:download` |
+| 命令 | Token 策略 | 所需 scope |
+|------|------|------|
+| `markdown create` | `--as bot\|user\|auto`（默认 auto） | `drive:file:upload`（或 `drive:drive`） |
+| `markdown fetch` / `diff` | `--as bot\|user\|auto`（默认 auto） | `drive:file:download`（或 `drive:drive`） |
+| `markdown overwrite` / `patch` | `--as bot\|user\|auto`（默认 auto） | `drive:file:upload` + `drive:drive.metadata:readonly` + `drive:file:download` |
 
 **推荐做法**：执行 `feishu-cli auth login` 登录后，由 `auth check --scope "drive:file:upload drive:file:download"` 预检；缺 scope 时按提示 `auth login` 补申请。
 
@@ -297,7 +303,7 @@ feishu-cli doc import ./design.md --title "设计稿" --upload-images
 
 ## 注意事项
 
-- **User 优先 + Bot 兜底**：已登录用 User Token；未登录回退 App Token
+- **`--as bot|user|auto`**：默认 auto。未配置 User 回退 Bot；已配置但刷新失败 fail-closed
 - **不做 Markdown 转换**：本命令组保留 `.md` 字节流不变，**不**做飞书 docx 块转换
 - **>20MB 分片覆盖**：`overwrite`/`patch`/`create` 均支持 multipart，保留 file_token
 - **`fetch` 输出参数**：路径走 `--output-path`，格式走 `-o/--output`

@@ -25,10 +25,11 @@ var markdownCmd = &cobra.Command{
 		"  patch      本地查找替换后覆盖（literal / regex）\n" +
 		"  diff       比对远端 Markdown（版本间，或远端 vs 本地文件），本地计算 unified diff（不改远端）\n\n" +
 		"权限要求:\n" +
-		"  - User Token 优先，未登录回退 Bot/Tenant\n" +
+		"  - --as bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）\n" +
 		"  - drive:drive 或 drive:file:upload + drive:file:download",
 }
 
 func init() {
 	rootCmd.AddCommand(markdownCmd)
+	addAsPersistentFlag(markdownCmd)
 }

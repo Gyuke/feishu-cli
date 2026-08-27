@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/riba2534/feishu-cli/internal/config"
 )
+
+const MarkdownDiffMaxContentBytes int64 = 10 * 1024 * 1024
 
 const (
 	// markdownSourceFilePreviewType 是官方 native Markdown 源文件预览码（preview_type=16）。
@@ -92,6 +96,153 @@ func FetchMarkdownSource(fileToken, version, userAccessToken string) ([]byte, st
 	fallback := fileToken + ".md"
 	fileName := fileNameFromDownloadHeader(resp.Header, fallback)
 	return resp.RawBody, fileName, nil
+}
+
+// FetchMarkdownSourceLimited 流式下载 Markdown 源文件，超过 maxBytes 立即失败，避免 OOM。
+func FetchMarkdownSourceLimited(fileToken, version, userAccessToken string, maxBytes int64) ([]byte, string, error) {
+	if maxBytes <= 0 {
+		return nil, "", fmt.Errorf("maxBytes 必须为正")
+	}
+	if strings.TrimSpace(fileToken) == "" {
+		return nil, "", fmt.Errorf("file_token 不能为空")
+	}
+	if version != "" && strings.TrimSpace(version) == "" {
+		return nil, "", fmt.Errorf("version 不能为空")
+	}
+
+	httpResp, err := openMarkdownPreviewDownload(fileToken, version, userAccessToken)
+	if err != nil {
+		return nil, "", err
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		apiErr, parseErr := parseDownloadAPIError("下载 Markdown 源文件", httpResp)
+		if parseErr != nil {
+			return nil, "", parseErr
+		}
+		return nil, "", fmt.Errorf("下载 Markdown 源文件失败: code=%d, msg=%s", apiErr.Code, apiErr.Msg)
+	}
+
+	bodyReader, apiErr, inspectErr := inspectDownloadAPIErrorResponse(httpResp)
+	if inspectErr != nil {
+		return nil, "", fmt.Errorf("下载 Markdown 源文件失败: 读取响应失败: %w", inspectErr)
+	}
+	if apiErr != nil {
+		return nil, "", fmt.Errorf("下载 Markdown 源文件失败: code=%d, msg=%s", apiErr.Code, apiErr.Msg)
+	}
+
+	payload, err := io.ReadAll(io.LimitReader(bodyReader, maxBytes+1)) // +1 才能区分恰好上限与越界
+	if err != nil {
+		return nil, "", fmt.Errorf("下载 Markdown 源文件失败: %w", err)
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, "", fmt.Errorf("remote Markdown content exceeds %s markdown +diff content limit", formatSize(int(maxBytes)))
+	}
+
+	fallback := fileToken + ".md"
+	fileName := fileNameFromDownloadHeader(httpResp.Header, fallback)
+	return payload, fileName, nil
+}
+
+func ReadLocalMarkdownLimited(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取本地文件失败: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("本地路径必须指向文件，不是目录")
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("local Markdown file exceeds %s markdown +diff content limit", formatSize(int(maxBytes)))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取本地文件失败: %w", err)
+	}
+	defer f.Close()
+	payload, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取本地文件失败: %w", err)
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, fmt.Errorf("local Markdown file exceeds %s markdown +diff content limit", formatSize(int(maxBytes)))
+	}
+	return payload, nil
+}
+
+func openMarkdownPreviewDownload(fileToken, version, userAccessToken string) (*http.Response, error) {
+	bearer := strings.TrimSpace(userAccessToken)
+	if bearer == "" {
+		token, err := fetchTenantAccessTokenForDownload()
+		if err != nil {
+			return nil, err
+		}
+		bearer = token
+	}
+	reqURL := buildMarkdownPreviewDownloadURL(fileToken, version)
+	req, err := newBearerDownloadRequest(reqURL, bearer, "")
+	if err != nil {
+		return nil, fmt.Errorf("下载 Markdown 源文件失败: %w", err)
+	}
+	httpClient := &http.Client{Timeout: downloadTimeout}
+	httpResp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("下载 Markdown 源文件失败: %w", err)
+	}
+	return httpResp, nil
+}
+
+func buildMarkdownPreviewDownloadURL(fileToken, version string) string {
+	cfg := config.Get()
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://open.feishu.cn"
+	}
+	u, _ := url.Parse(fmt.Sprintf("%s/open-apis/drive/v1/medias/%s/preview_download", baseURL, url.PathEscape(fileToken)))
+	q := u.Query()
+	q.Set("preview_type", markdownSourceFilePreviewType)
+	if version != "" {
+		q.Set("version", version)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func fetchTenantAccessTokenForDownload() (string, error) {
+	cfg := config.Get()
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://open.feishu.cn"
+	}
+	body, err := json.Marshal(map[string]string{
+		"app_id":     cfg.AppID,
+		"app_secret": cfg.AppSecret,
+	})
+	if err != nil {
+		return "", fmt.Errorf("构造 tenant token 请求失败: %w", err)
+	}
+	resp, err := http.Post(baseURL+"/open-apis/auth/v3/tenant_access_token/internal", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("获取 tenant token 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取 tenant token 失败: %w", err)
+	}
+	var apiResp struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.Unmarshal(raw, &apiResp); err != nil {
+		return "", fmt.Errorf("解析 tenant token 失败: %w", err)
+	}
+	if apiResp.Code != 0 || apiResp.TenantAccessToken == "" {
+		return "", fmt.Errorf("获取 tenant token 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	return apiResp.TenantAccessToken, nil
 }
 
 // FetchFileContent 把一个 Drive 原生 Markdown 文件的最新内容下载到内存。
@@ -258,15 +409,9 @@ func uploadMarkdownMultipart(spec MarkdownUploadSpec, fileSize int64, openReader
 		return MarkdownUploadResult{}, fmt.Errorf("初始化 Markdown 分片上传失败: HTTP %d, body: %s", prepareResp.StatusCode, string(prepareResp.RawBody))
 	}
 
-	session, err := parseMarkdownMultipartSession(prepareResp.RawBody)
+	session, err := parseMultipartSessionFromAPI(prepareResp.RawBody, fileSize)
 	if err != nil {
-		return MarkdownUploadResult{}, err
-	}
-
-	expectedBlocks := int((fileSize + session.BlockSize - 1) / session.BlockSize)
-	if session.BlockNum != expectedBlocks {
-		return MarkdownUploadResult{}, fmt.Errorf("upload_prepare 返回的分片计划不一致: block_size=%d, block_num=%d, expected=%d, size=%d",
-			session.BlockSize, session.BlockNum, expectedBlocks, fileSize)
+		return MarkdownUploadResult{}, fmt.Errorf("初始化 Markdown 分片上传失败: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "Markdown 分片上传: %d 片 × %s\n", session.BlockNum, formatSize(int(session.BlockSize)))
@@ -279,7 +424,7 @@ func uploadMarkdownMultipart(spec MarkdownUploadSpec, fileSize int64, openReader
 
 	buffer := make([]byte, int(session.BlockSize))
 	remaining := fileSize
-	for seq := 0; seq < session.BlockNum; seq++ {
+	for seq := int64(0); seq < session.BlockNum; seq++ {
 		chunkSize := session.BlockSize
 		if remaining > 0 && chunkSize > remaining {
 			chunkSize = remaining
@@ -322,39 +467,6 @@ func uploadMarkdownMultipart(spec MarkdownUploadSpec, fileSize int64, openReader
 		return MarkdownUploadResult{}, fmt.Errorf("完成 Markdown 分片上传失败: HTTP %d, body: %s", finishResp.StatusCode, string(finishResp.RawBody))
 	}
 	return parseMarkdownUploadAPIResponse(finishResp.RawBody, spec.FileToken != "")
-}
-
-type markdownMultipartSession struct {
-	UploadID  string
-	BlockSize int64
-	BlockNum  int
-}
-
-func parseMarkdownMultipartSession(raw []byte) (markdownMultipartSession, error) {
-	var apiResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			UploadID  string `json:"upload_id"`
-			BlockSize int64  `json:"block_size"`
-			BlockNum  int    `json:"block_num"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &apiResp); err != nil {
-		return markdownMultipartSession{}, fmt.Errorf("解析 upload_prepare 响应失败: %w", err)
-	}
-	if apiResp.Code != 0 {
-		return markdownMultipartSession{}, fmt.Errorf("初始化 Markdown 分片上传失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
-	}
-	if apiResp.Data.UploadID == "" || apiResp.Data.BlockSize <= 0 || apiResp.Data.BlockNum <= 0 {
-		return markdownMultipartSession{}, fmt.Errorf("upload_prepare 返回数据异常: upload_id=%q, block_size=%d, block_num=%d",
-			apiResp.Data.UploadID, apiResp.Data.BlockSize, apiResp.Data.BlockNum)
-	}
-	return markdownMultipartSession{
-		UploadID:  apiResp.Data.UploadID,
-		BlockSize: apiResp.Data.BlockSize,
-		BlockNum:  apiResp.Data.BlockNum,
-	}, nil
 }
 
 func parseMarkdownUploadAPIResponse(raw []byte, requireVersion bool) (MarkdownUploadResult, error) {

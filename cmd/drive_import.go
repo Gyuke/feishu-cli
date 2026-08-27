@@ -41,7 +41,8 @@ upload_all 省略 parent_node；upload_prepare 显式 parent_node=""。
   --folder-token   目标 Drive 文件夹 token
   --name           导入后的文件名（默认本地文件名去扩展名）
   --target-token   已有 bitable token（仅 --type bitable）
-  --dry-run        只打印将要发出的请求
+  --as             bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）
+  --dry-run        只打印将要发出的请求（不解析/刷新 token）
 
 示例:
   feishu-cli drive import --file report.docx --type docx
@@ -82,6 +83,9 @@ upload_all 省略 parent_node；upload_prepare 显式 parent_node=""。
 
 		ext := driveImportFileExtension(filePath, "")
 		if err := validateDriveImportFileSize(ext, targetType, stat.Size()); err != nil {
+			return err
+		}
+		if err := validateIdentityAs(cmd); err != nil {
 			return err
 		}
 
@@ -144,7 +148,7 @@ upload_all 省略 parent_node；upload_prepare 显式 parent_node=""。
 			}, steps)
 		}
 
-		token, err := requireUserToken(cmd, "drive import")
+		token, err := resolveIdentityToken(cmd)
 		if err != nil {
 			return err
 		}
@@ -245,6 +249,7 @@ func init() {
 	driveImportCmd.Flags().String("name", "", "导入后的文件名（默认本地文件名去扩展名）")
 	driveImportCmd.Flags().String("target-token", "", "已有 bitable token（仅 --type bitable）")
 	driveImportCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
+	addAsFlag(driveImportCmd)
 	driveImportCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveImportCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveImportCmd, "file", "type")

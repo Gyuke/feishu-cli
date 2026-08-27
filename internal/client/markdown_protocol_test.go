@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -203,4 +204,129 @@ func TestDriveNeedsMultipartBoundary(t *testing.T) {
 	if !DriveNeedsMultipart(20*1024*1024 + 1) {
 		t.Fatal("20MB+1 must use multipart")
 	}
+}
+
+func TestUploadMarkdownFile_RejectsOversizedBlockSize(t *testing.T) {
+	tmp := t.TempDir() + "/big.md"
+	payload := []byte("chunk-body")
+	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var sawPart bool
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/files/upload_prepare"):
+			_, _ = io.WriteString(w, `{"code":0,"data":{"upload_id":"up_overflow","block_size":1e20,"block_num":1}}`)
+		case strings.HasSuffix(r.URL.Path, "/files/upload_part"):
+			sawPart = true
+			_, _ = io.WriteString(w, `{"code":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+
+	orig := maxSingleUploadSize
+	maxSingleUploadSize = len(payload) - 1
+	defer func() { maxSingleUploadSize = orig }()
+
+	_, err := UploadMarkdownFile(MarkdownUploadSpec{FileName: "big.md"}, tmp, "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "block_size") {
+		t.Fatalf("expected oversized block_size error, got %v", err)
+	}
+	if sawPart {
+		t.Fatal("oversized block_size must fail before upload_part")
+	}
+}
+
+func TestUploadMarkdownFile_RejectsInconsistentChunkPlan(t *testing.T) {
+	tmp := t.TempDir() + "/plan.md"
+	payload := []byte("chunk-body")
+	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/files/upload_prepare") {
+			_, _ = io.WriteString(w, `{"code":0,"data":{"upload_id":"up_bad_plan","block_size":10,"block_num":99}}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	defer cleanup()
+
+	orig := maxSingleUploadSize
+	maxSingleUploadSize = len(payload) - 1
+	defer func() { maxSingleUploadSize = orig }()
+
+	_, err := UploadMarkdownFile(MarkdownUploadSpec{FileName: "plan.md"}, tmp, "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "分片计划不一致") {
+		t.Fatalf("expected inconsistent plan, got %v", err)
+	}
+}
+
+func TestReadLocalMarkdownLimited_10MBBoundary(t *testing.T) {
+	dir := t.TempDir()
+	okPath := dir + "/ok.md"
+	if err := os.WriteFile(okPath, bytes.Repeat([]byte("a"), int(MarkdownDiffMaxContentBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadLocalMarkdownLimited(okPath, MarkdownDiffMaxContentBytes)
+	if err != nil {
+		t.Fatalf("exact 10MB should pass: %v", err)
+	}
+	if int64(len(got)) != MarkdownDiffMaxContentBytes {
+		t.Fatalf("len = %d", len(got))
+	}
+
+	overPath := dir + "/over.md"
+	f, err := os.Create(overPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MarkdownDiffMaxContentBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	_, err = ReadLocalMarkdownLimited(overPath, MarkdownDiffMaxContentBytes)
+	if err == nil || !strings.Contains(err.Error(), "local Markdown file exceeds 10.0 MB markdown +diff content limit") {
+		t.Fatalf("expected +1 size error, got %v", err)
+	}
+}
+
+func TestFetchMarkdownSourceLimited_10MBBoundary(t *testing.T) {
+	t.Run("exact 10MB", func(t *testing.T) {
+		body := bytes.Repeat([]byte("x"), int(MarkdownDiffMaxContentBytes))
+		_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("preview_type") != "16" {
+				t.Fatalf("preview_type = %q", r.URL.Query().Get("preview_type"))
+			}
+			w.Header().Set("Content-Type", "text/markdown")
+			_, _ = w.Write(body)
+		})
+		defer cleanup()
+
+		got, _, err := FetchMarkdownSourceLimited("boxcnLimitOK", "", "u-test-token", MarkdownDiffMaxContentBytes)
+		if err != nil {
+			t.Fatalf("exact 10MB should pass: %v", err)
+		}
+		if int64(len(got)) != MarkdownDiffMaxContentBytes {
+			t.Fatalf("len = %d", len(got))
+		}
+	})
+	t.Run("10MB+1", func(t *testing.T) {
+		_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/markdown")
+			_, _ = w.Write(bytes.Repeat([]byte("x"), int(MarkdownDiffMaxContentBytes)+1))
+		})
+		defer cleanup()
+
+		_, _, err := FetchMarkdownSourceLimited("boxcnLimitOver", "", "u-test-token", MarkdownDiffMaxContentBytes)
+		if err == nil || !strings.Contains(err.Error(), "remote Markdown content exceeds 10.0 MB markdown +diff content limit") {
+			t.Fatalf("expected +1 size error, got %v", err)
+		}
+	})
 }

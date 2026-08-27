@@ -27,6 +27,7 @@ var markdownPatchCmd = &cobra.Command{
 
 可选:
   --regex       将 --pattern 解释为 RE2
+  --as          bot|user|auto（默认 auto）
   --dry-run     只打印将要发出的请求
 
 示例:
@@ -64,6 +65,9 @@ var markdownPatchCmd = &cobra.Command{
 		mode := "literal"
 		if useRegex {
 			mode = "regex"
+		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
 		}
 
 		if dryRun {
@@ -116,7 +120,10 @@ var markdownPatchCmd = &cobra.Command{
 			})
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 		payload, _, err := client.FetchMarkdownSource(fileToken, "", token)
 		if err != nil {
 			return err

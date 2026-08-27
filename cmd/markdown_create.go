@@ -16,7 +16,7 @@ var markdownCreateCmd = &cobra.Command{
 	Long: `把一段 Markdown 内容（或本地 .md 文件）作为普通 Drive 文件上传，保留原始 Markdown 格式。
 
 底层调用 ` + "`POST /open-apis/drive/v1/files/upload_all`" + `；>20MB 自动走 upload_prepare/part/finish。
---wiki-token 时 parent_type=wiki。User Token 优先，未登录回退 Bot。
+--wiki-token 时 parent_type=wiki。--as bot|user|auto（默认 auto）。
 
 必填:
   --content / --content-file / --file  三选一（content 与 file 互斥）
@@ -95,6 +95,9 @@ var markdownCreateCmd = &cobra.Command{
 		if size == 0 {
 			return fmt.Errorf("Markdown 内容为空，不支持创建空 .md 文件")
 		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
 
 		spec := client.MarkdownUploadSpec{
 			FileName:    fileName,
@@ -128,7 +131,10 @@ var markdownCreateCmd = &cobra.Command{
 			}, steps)
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 		var result client.MarkdownUploadResult
 		if fileChanged {
 			result, err = client.UploadMarkdownFile(spec, contentFile, token)

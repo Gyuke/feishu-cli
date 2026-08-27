@@ -17,7 +17,7 @@ var markdownOverwriteCmd = &cobra.Command{
 	Long: `把新的 Markdown 内容写到一个已存在的 .md 文件，file_token 保持不变。
 
 底层调 ` + "`POST /open-apis/drive/v1/files/upload_all`" + `，带 file_token。>20MB 走分片。
-未传 --name 时通过 metas/batch_query 读取现有文件名。User Token 优先，未登录回退 Bot。
+未传 --name 时通过 metas/batch_query 读取现有文件名。--as bot|user|auto（默认 auto）。
 
 必填:
   --file-token     目标 .md 文件 token
@@ -88,6 +88,9 @@ var markdownOverwriteCmd = &cobra.Command{
 		if size == 0 {
 			return fmt.Errorf("Markdown 内容为空，不支持把 .md 覆盖为空文件")
 		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
 
 		uploadSpec := client.MarkdownUploadSpec{FileToken: fileToken, FileName: fileName}
 		if dryRun {
@@ -114,7 +117,10 @@ var markdownOverwriteCmd = &cobra.Command{
 			}, steps)
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 		if fileName == "" {
 			remoteName, err := client.FetchMarkdownFileName(fileToken, token)
 			if err != nil {

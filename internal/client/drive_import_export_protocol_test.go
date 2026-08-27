@@ -254,3 +254,140 @@ func TestMoveFileWithToken_UsesResolvedFolder(t *testing.T) {
 		t.Fatalf("type=%q folder=%q", gotType, gotFolder)
 	}
 }
+
+func TestParseDocsAIMarkdownContent_FailClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{name: "missing data", raw: "", wantErr: "document"},
+		{name: "null data", raw: "null", wantErr: "document"},
+		{name: "empty object", raw: `{}`, wantErr: "document"},
+		{name: "missing document", raw: `{"other":1}`, wantErr: "document"},
+		{name: "null document", raw: `{"document":null}`, wantErr: "document"},
+		{name: "missing content", raw: `{"document":{}}`, wantErr: "document.content"},
+		{name: "null content", raw: `{"document":{"content":null}}`, wantErr: "document.content"},
+		{name: "non-string content", raw: `{"document":{"content":123}}`, wantErr: "document.content"},
+		{name: "empty string content is valid", raw: `{"document":{"content":""}}`, want: ""},
+		{name: "ok", raw: `{"document":{"content":"# hi"}}`, want: "# hi"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDocsAIMarkdownContent([]byte(tc.raw))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("content = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFetchDocxMarkdownContent_MissingDocumentFailClosed(t *testing.T) {
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{}}`)
+	})
+	defer cleanup()
+
+	_, err := FetchDocxMarkdownContent("doxcnMissing", "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "document") {
+		t.Fatalf("expected missing document, got %v", err)
+	}
+}
+
+func TestFetchDocxMarkdownContent_MissingContentFailClosed(t *testing.T) {
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"document":{}}}`)
+	})
+	defer cleanup()
+
+	_, err := FetchDocxMarkdownContent("doxcnMissingContent", "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "document.content") {
+		t.Fatalf("expected missing document.content, got %v", err)
+	}
+}
+
+func TestDriveTaskCheckPath_AmpersandInjection(t *testing.T) {
+	got := driveTaskCheckPath("abc&evil=1")
+	if strings.Contains(got, "task_id=abc&") {
+		t.Fatalf("task_id was concatenated unsafely: %s", got)
+	}
+	if !strings.Contains(got, "task_id=abc%26evil%3D1") && !strings.Contains(got, "abc%26evil") {
+		t.Fatalf("task_id should be query-escaped, got %s", got)
+	}
+}
+
+func TestGetDriveTaskCheck_AmpersandInjection(t *testing.T) {
+	var rawQuery, taskID, evil string
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/files/task_check") {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		rawQuery = r.URL.RawQuery
+		taskID = r.URL.Query().Get("task_id")
+		evil = r.URL.Query().Get("evil")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"status":"success"}}`)
+	})
+	defer cleanup()
+
+	status, err := GetDriveTaskCheck("abc&evil=1", "u-test-token")
+	if err != nil {
+		t.Fatalf("GetDriveTaskCheck: %v", err)
+	}
+	if status.Status != "success" {
+		t.Fatalf("status = %+v", status)
+	}
+	if taskID != "abc&evil=1" {
+		t.Fatalf("task_id query = %q, raw=%s", taskID, rawQuery)
+	}
+	if evil != "" {
+		t.Fatalf("ampersand injected extra query evil=%q raw=%s", evil, rawQuery)
+	}
+}
+
+func TestUploadMediaForImport_RejectsOversizedBlockSize(t *testing.T) {
+	tmp := t.TempDir() + "/large.xlsx"
+	payload := []byte("0123456789ab")
+	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var sawPart bool
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/medias/upload_prepare"):
+			_, _ = io.WriteString(w, `{"code":0,"data":{"upload_id":"up_media_overflow","block_size":1e20,"block_num":1}}`)
+		case strings.HasSuffix(r.URL.Path, "/medias/upload_part"):
+			sawPart = true
+			_, _ = io.WriteString(w, `{"code":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+
+	orig := maxSingleUploadSize
+	maxSingleUploadSize = len(payload) - 1
+	defer func() { maxSingleUploadSize = orig }()
+
+	_, err := UploadMediaForImport(tmp, "large.xlsx", "sheet", "xlsx", "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "block_size") {
+		t.Fatalf("expected oversized block_size, got %v", err)
+	}
+	if sawPart {
+		t.Fatal("oversized block_size must fail before upload_part")
+	}
+}

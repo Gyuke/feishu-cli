@@ -145,6 +145,27 @@ func resolveIdentityToken(cmd *cobra.Command) (string, error) {
 	}
 }
 
+const identityAsFlagHelp = "身份: bot(App Token) | user(User Token) | auto(User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed)"
+
+func addAsFlag(cmd *cobra.Command) {
+	cmd.Flags().String("as", "auto", identityAsFlagHelp)
+}
+
+func addAsPersistentFlag(cmd *cobra.Command) {
+	cmd.PersistentFlags().String("as", "auto", identityAsFlagHelp)
+}
+
+// validateIdentityAs 只校验 --as 枚举，不解析/刷新 token。dry-run 前调用。
+func validateIdentityAs(cmd *cobra.Command) error {
+	as, _ := cmd.Flags().GetString("as")
+	switch strings.ToLower(strings.TrimSpace(as)) {
+	case "", "auto", "bot", "tenant", "app", "user":
+		return nil
+	default:
+		return fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", as)
+	}
+}
+
 // resolveCurrentAuthedUserID returns the current logged-in user's ID for the requested type.
 func resolveCurrentAuthedUserID(cmd *cobra.Command, userIDType string) (string, error) {
 	token, err := resolveRequiredUserToken(cmd)

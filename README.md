@@ -970,7 +970,7 @@ feishu-cli sheet batch-set-style shtcnxxxx \
 
 # Drive 原生 Markdown 文件（不做 docx 块转换）
 feishu-cli markdown create --name README.md --content-file ./README.md --folder-token fldxxx
-feishu-cli markdown create --file ./README.md --wiki-token wikcnxxx
+feishu-cli markdown create --file ./README.md --wiki-token wikcnxxx --as bot --dry-run
 feishu-cli markdown fetch --file-token boxcnxxx --output-path ./remote.md
 feishu-cli markdown overwrite --file-token boxcnxxx --file ./remote.md
 feishu-cli markdown patch --file-token boxcnxxx --pattern "TODO" --content "DONE"
@@ -1653,7 +1653,7 @@ go vet ./...
 <details>
 <summary><b>什么时候需要 <code>auth login</code>？App Token 和 User Token 有什么区别？</b></summary>
 
-大部分读写操作用 **App（Bot）身份** 即可（只需 App ID/Secret）。以下能力必须 **User Token**（`feishu-cli auth login` 一次即可，token 自动刷新）：搜索（docs/messages/apps）、审批任务操作、邮箱全部、vc/minutes 全部、drive 上传下载导出、`markdown` 命令组等。命令级要求见各命令 `--help`；`feishu-cli auth check --scope "..."` 可在执行前预检。
+大部分读写操作用 **App（Bot）身份** 即可（只需 App ID/Secret）。以下能力必须 **User Token**（`feishu-cli auth login` 一次即可，token 自动刷新）：搜索（docs/messages/apps）、审批任务操作、邮箱全部、vc/minutes 全部、`drive upload/download/add-comment/task-result/search/secure-label` 等。`markdown create/fetch/overwrite/patch/diff` 与 `drive import/export/export-download/move` 支持 `--as bot|user|auto`（默认 auto：User 优先；未配置回退 Bot；已配置但刷新失败 fail-closed，不会静默切 Bot）。命令级要求见各命令 `--help`；`feishu-cli auth check --scope "..."` 可在执行前预检。
 </details>
 
 <details>

@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
+	"github.com/itchyny/gojq"
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/riba2534/feishu-cli/internal/output"
@@ -40,8 +40,9 @@ var markdownDiffCmd = &cobra.Command{
   --output, -o     [兼容] -o json 等价 --format json
 
 权限:
-  - User Access Token
+  - --as bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）
   - drive:file:download（或 drive:drive）
+  - 单侧内容上限 10MB（Stat 预检 + LimitReader）；超限在下载完成前失败，避免 OOM
 
 示例:
   feishu-cli markdown diff --file-token boxcnxxx --file ./local.md
@@ -82,6 +83,13 @@ var markdownDiffCmd = &cobra.Command{
 		if err := validateMarkdownDiffVersionValue(toVersion, "--to-version"); err != nil {
 			return err
 		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
+		o, structured, oerr := resolveMarkdownDiffOutput(cmd)
+		if oerr != nil {
+			return oerr
+		}
 
 		if dryRun {
 			var steps []dryRunStep
@@ -118,7 +126,10 @@ var markdownDiffCmd = &cobra.Command{
 			return printDryRunPlan(cmd, "Download the requested Markdown content and compute a unified diff locally", extra, steps)
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 
 		var (
 			fromName, toName   string
@@ -138,9 +149,9 @@ var markdownDiffCmd = &cobra.Command{
 				return fmt.Errorf("下载远端内容失败: %w", err)
 			}
 			toName = "b/" + localFile
-			toBytes, err = os.ReadFile(localFile)
+			toBytes, err = client.ReadLocalMarkdownLimited(localFile, client.MarkdownDiffMaxContentBytes)
 			if err != nil {
-				return fmt.Errorf("读取本地文件失败: %w", err)
+				return err
 			}
 		case "remote_vs_remote":
 			fromName = "a/" + fileToken + "@version:" + fromVersion
@@ -166,11 +177,6 @@ var markdownDiffCmd = &cobra.Command{
 
 		hunks := unifiedDiff(string(fromBytes), string(toBytes), contextLines)
 
-		// 用户显式要结构化输出（--format / --jq / 兼容的 -o json）时走统一渲染；否则输出 unified diff 文本。
-		o, structured, oerr := resolveMarkdownDiffOutput(cmd)
-		if oerr != nil {
-			return oerr
-		}
 		if structured {
 			added, removed := countDiffLines(hunks)
 			return output.Render(o, map[string]any{
@@ -215,7 +221,15 @@ func resolveMarkdownDiffOutput(cmd *cobra.Command) (*output.Options, bool, error
 		format = output.FormatJSON // 仅 --jq 或 -o json 时默认 JSON
 	}
 	o, err := output.NewOptions(format, jqExpr)
-	return o, true, err
+	if err != nil {
+		return o, true, err
+	}
+	if strings.TrimSpace(jqExpr) != "" {
+		if _, jqErr := gojq.Parse(jqExpr); jqErr != nil {
+			return nil, true, fmt.Errorf("jq 表达式解析失败: %w", jqErr)
+		}
+	}
+	return o, true, nil
 }
 
 // resolveMarkdownDiffMode 根据参数组合判定比对模式，并校验互斥/缺省。
@@ -241,7 +255,7 @@ func resolveMarkdownDiffMode(localFile, fromVersion, toVersion string) (string, 
 
 // fetchMarkdownPreviewContent 走官方 preview_download?preview_type=16[&version=N]。
 func fetchMarkdownPreviewContent(fileToken, version, userAccessToken string) ([]byte, error) {
-	data, _, err := client.FetchMarkdownSource(fileToken, version, userAccessToken)
+	data, _, err := client.FetchMarkdownSourceLimited(fileToken, version, userAccessToken, client.MarkdownDiffMaxContentBytes)
 	return data, err
 }
 

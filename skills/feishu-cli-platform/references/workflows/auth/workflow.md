@@ -236,23 +236,23 @@ CLI 把命令分成四类；另有少量只接受显式 flag 的严格命令：
 | `task search` | `task:task:read` |
 | `vc search/notes/recording`、`minutes *` | `vc:*`、`minutes:*` 相关 scope |
 | `mail *` | `mail:user_mailbox:*` |
-| `drive upload/download/export/import/move/add-comment/task-result/search/secure-label` | `drive:drive`、`drive:file:*`、`search:docs:read` |
+| `drive upload/download/add-comment/task-result/search/secure-label` | `drive:drive`、`drive:file:*`、`search:docs:read` |
 | `calendar rsvp` | `calendar:calendar.event:reply` |
-| `markdown create/fetch/overwrite/diff` | `drive:file:upload/download/content:read` 或 `drive:drive` |
 
 > 本表为速查非穷举，以各命令 `--help` 为准。
-
-`markdown create/fetch/overwrite/diff` 使用 Drive scope：创建/覆盖需要 `drive:file:upload`（或
-`drive:drive`），读取/diff 需要 `drive:file:download` 或 `drive:file.content:read`（或 `drive:drive`）。
 
 `chat create` 和 `chat link` **不在此表**：当前命令没有 User Token flag，始终使用 App Token。
 
 ### 4. 身份可选 · `--as bot|user|auto`（`resolveIdentityToken`）
 
-`bitable` 与 `okr` 全家桶使用这一模式。`auto` 优先 User Token、缺失时回落 Tenant Token；`bot` 强制
-Tenant Token；`user` 强制 User Token，缺失即报错。默认值不同：**bitable 默认 `auto`，okr 默认 `--as bot`**
-（OKR 的 user scope 通常未随默认登录域授予）。`chat member` 和 `msg history` 也提供同名
+`bitable`、`okr`、**native Markdown**（`create/fetch/overwrite/patch/diff`）与 **`drive import/export/export-download/move`**
+使用这一模式。`auto` 优先 User Token；**未配置**时回落 Tenant Token；**已配置但解析/刷新失败 fail-closed**，禁止静默切 Bot。
+`bot` 强制 Tenant Token；`user` 强制 User Token，缺失即报错。默认值：**bitable / markdown / 上述 drive 入口默认 `auto`，okr 默认 `--as bot`**
+（OKR 的 user scope 通常未随默认登录域授予）。身份在 `--dry-run` 之后才 resolve。`chat member` 和 `msg history` 也提供同名
 身份选择，但使用各自的解析函数，边界以命令帮助为准。
+
+`markdown create/fetch/overwrite/patch/diff` 使用 Drive scope：创建/覆盖需要 `drive:file:upload`（或
+`drive:drive`），读取/diff 需要 `drive:file:download` 或 `drive:file.content:read`（或 `drive:drive`）。
 
 ### 严格 flag-only
 

@@ -17,7 +17,7 @@ var markdownFetchCmd = &cobra.Command{
 	Long: `下载一个 Drive 上的 .md 文件，按需要直接打印到 stdout 或保存到本地。
 
 底层走 ` + "`GET /open-apis/drive/v1/medias/{file_token}/preview_download?preview_type=16`" + `。
-可选 ` + "`--version`" + ` 下载历史版本。User Token 优先，未登录时回退 Bot/Tenant。
+可选 ` + "`--version`" + ` 下载历史版本。--as bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）。
 
 必填:
   --file-token   Markdown 文件 token
@@ -31,7 +31,7 @@ var markdownFetchCmd = &cobra.Command{
   --user-access-token  覆盖登录态
 
 权限:
-  - User 或 Bot
+  - --as bot|user|auto（默认 auto）
   - drive:file:download（或 drive:drive）
 
 示例:
@@ -59,6 +59,9 @@ var markdownFetchCmd = &cobra.Command{
 		if err := validateMarkdownDiffVersionValue(version, "--version"); err != nil {
 			return err
 		}
+		if err := validateIdentityAs(cmd); err != nil {
+			return err
+		}
 
 		if dryRun {
 			return printDryRunPlan(cmd, "download markdown source file preview artifact bytes", map[string]any{
@@ -71,7 +74,10 @@ var markdownFetchCmd = &cobra.Command{
 			}})
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 		data, fileName, err := client.FetchMarkdownSource(fileToken, version, token)
 		if err != nil {
 			return err

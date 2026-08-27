@@ -26,7 +26,8 @@ var driveMoveCmd = &cobra.Command{
 
 可选:
   --folder-token   目标文件夹 token（默认真实根目录）
-  --dry-run        只打印将要发出的请求
+  --as             bot|user|auto（默认 auto：User 优先；未配置回退 Bot；已配置但解析/刷新失败 fail-closed）
+  --dry-run        只打印将要发出的请求（不解析/刷新 token）
   --user-access-token  覆盖登录态
 
 示例:
@@ -47,6 +48,9 @@ var driveMoveCmd = &cobra.Command{
 			return fmt.Errorf("--file-token 必填")
 		}
 		if err := validateEnum(fileType, "--type", driveMoveAllowedTypes); err != nil {
+			return err
+		}
+		if err := validateIdentityAs(cmd); err != nil {
 			return err
 		}
 
@@ -84,7 +88,7 @@ var driveMoveCmd = &cobra.Command{
 			}, steps)
 		}
 
-		token, err := requireUserToken(cmd, "drive move")
+		token, err := resolveIdentityToken(cmd)
 		if err != nil {
 			return err
 		}
@@ -161,6 +165,7 @@ func init() {
 	driveMoveCmd.Flags().String("type", "", "类型: file/docx/doc/sheet/bitable/mindnote/folder/slides（必填）")
 	driveMoveCmd.Flags().String("folder-token", "", "目标文件夹 token（默认真实根目录）")
 	driveMoveCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
+	addAsFlag(driveMoveCmd)
 	driveMoveCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveMoveCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveMoveCmd, "file-token", "type")

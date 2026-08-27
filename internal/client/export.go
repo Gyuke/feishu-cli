@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -494,13 +495,9 @@ func FetchDocxMarkdownContent(docToken, userAccessToken string) (string, error) 
 	}
 
 	var apiResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Document struct {
-				Content string `json:"content"`
-			} `json:"document"`
-		} `json:"data"`
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
 		return "", fmt.Errorf("解析文档 Markdown 响应失败: %w", err)
@@ -508,7 +505,26 @@ func FetchDocxMarkdownContent(docToken, userAccessToken string) (string, error) 
 	if apiResp.Code != 0 {
 		return "", fmt.Errorf("获取文档 Markdown 内容失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
-	return apiResp.Data.Document.Content, nil
+	return parseDocsAIMarkdownContent(apiResp.Data)
+}
+
+func parseDocsAIMarkdownContent(data json.RawMessage) (string, error) {
+	if len(bytes.TrimSpace(data)) == 0 || string(bytes.TrimSpace(data)) == "null" {
+		return "", fmt.Errorf("docs_ai fetch 响应缺少 document 对象")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", fmt.Errorf("解析文档 Markdown 响应失败: %w", err)
+	}
+	doc, ok := payload["document"].(map[string]any)
+	if !ok || doc == nil {
+		return "", fmt.Errorf("docs_ai fetch 响应缺少 document 对象")
+	}
+	content, ok := doc["content"].(string)
+	if !ok {
+		return "", fmt.Errorf("docs_ai fetch 响应缺少 document.content")
+	}
+	return content, nil
 }
 
 // WaitDriveExportWithBound 有界轮询导出任务
@@ -639,6 +655,12 @@ type DriveTaskCheckStatus struct {
 	Status string `json:"status"` // success / failed / pending 等
 }
 
+func driveTaskCheckPath(taskID string) string {
+	query := url.Values{}
+	query.Set("task_id", taskID)
+	return "/open-apis/drive/v1/files/task_check?" + query.Encode()
+}
+
 // GetDriveTaskCheck 查询通用异步任务状态
 // API: GET /open-apis/drive/v1/files/task_check?task_id=xxx
 func GetDriveTaskCheck(taskID, userAccessToken string) (*DriveTaskCheckStatus, error) {
@@ -647,7 +669,7 @@ func GetDriveTaskCheck(taskID, userAccessToken string) (*DriveTaskCheckStatus, e
 		return nil, err
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/drive/v1/files/task_check?task_id=%s", taskID)
+	apiPath := driveTaskCheckPath(taskID)
 	tokenType, opts := resolveTokenOpts(userAccessToken)
 	resp, err := client.Get(Context(), apiPath, nil, tokenType, opts...)
 	if err != nil {

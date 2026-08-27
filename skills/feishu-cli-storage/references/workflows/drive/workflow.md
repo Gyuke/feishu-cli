@@ -16,7 +16,7 @@
 
 ## 前置条件
 
-- **认证**：多数 drive 命令必需 User Token（先 `feishu-cli auth login`）；各命令的 Token 策略以「[权限要求](#权限要求)」表为唯一权威。
+- **认证**：多数 drive 命令必需 User Token（先 `feishu-cli auth login`）。`drive import/export/export-download/move` 支持 `--as bot|user|auto`（默认 auto：User 优先；未配置回退 Bot；已配置但刷新失败 fail-closed）。各命令的 Token 策略以「[权限要求](#权限要求)」表为唯一权威。
 - **预检**：`feishu-cli auth check --scope "drive:file:upload"` 可验证 scope
 
 ## 命令速查
@@ -401,10 +401,10 @@ feishu-cli drive export --token $DOC_TOKEN --doc-type docx --file-extension mark
 |---|---|---|
 | `drive upload` | 必需 User Token | `drive:file:upload` |
 | `drive download` | 必需 User Token | `drive:file:download` |
-| `drive export` | 必需 User Token | `docs:document:export`、`drive:drive.metadata:readonly`（导出 markdown 还需 `docs:document.content:read`） |
-| `drive export-download` | 必需 User Token | `drive:file:download` |
-| `drive import` | 必需 User Token | `docs:document:import`、`drive:file:upload` |
-| `drive move` | 必需 User Token | `drive:file:write` [^1] |
+| `drive export` | `--as bot\|user\|auto`（默认 auto；已配置 User 刷新失败 fail-closed） | `docs:document:export`、`drive:drive.metadata:readonly`（导出 markdown 还需 `docs:document.content:read`） |
+| `drive export-download` | `--as bot\|user\|auto`（默认 auto） | `drive:file:download` |
+| `drive import` | `--as bot\|user\|auto`（默认 auto） | `docs:document:import`、`drive:file:upload` |
+| `drive move` | `--as bot\|user\|auto`（默认 auto） | `drive:file:write` [^1] |
 | `drive add-comment` | 必需 User Token | `docs:document.comment:create`、`docs:document.comment:write_only`；wiki URL 还需 `wiki:node:read`；docx 局部评论还需 `docx:document:readonly` |
 | `drive task-result` | 必需 User Token | `drive:drive.metadata:readonly`（具体依 scenario：`import` 还需 `docs:document:import`；`export` 还需 `docs:document:export`） |
 | `drive pull` / `status` | User 优先 + App 兜底 | `drive:drive.metadata:readonly`、`drive:file:download` |
@@ -420,7 +420,7 @@ feishu-cli drive export --token $DOC_TOKEN --doc-type docx --file-extension mark
 
 ## 注意事项
 
-- **Token 策略**：以「权限要求」表为唯一权威（多数命令必需 User Token；`pull/push/status/inspect` 未登录可回落 App Token）。
+- **Token 策略**：以「权限要求」表为唯一权威（多数命令必需 User Token；`import/export/export-download/move` 走 `--as`，默认 auto 且刷新失败 fail-closed；`pull/push/status/inspect` 未登录可回落 App Token）。
 - **SSRF 防护**：下载 URL 会被校验，拒绝 localhost / 回环 IP / 内网段 / 链路本地
 - **重定向策略**：下载 HTTP 重定向最多 5 次，禁止 HTTPS → HTTP 降级
 - **大文件分块阈值**：固定 20MB，超过自动切分片
