@@ -13,17 +13,17 @@ import (
 // isOfficePresentation 判定演示文稿 token 是否为导入的 Office deck。
 // 识别规则（对齐官方 lark-cli / slides 规范）：
 // 1. 兼容 legacy 前缀: "fake_office_" 或 "local_office_"
-// 2. 官方 28 字符交织标记: 长度恰好为 28，且在下标 5, 10, 15, 20, 25 处依次为 'O', 'F', 'L', '0', 'X'
+// 2. 官方 28 字符交织标记: 长度恰好为 28，且 0-based 下标 [4],[9],[14],[19],[24]（人类 1-based 第 5,10,15,20,25 位）依次为 'O', 'F', 'L', '0', 'X'
 func isOfficePresentation(token string) bool {
 	if strings.HasPrefix(token, "fake_office_") || strings.HasPrefix(token, "local_office_") {
 		return true
 	}
 	if len(token) == 28 &&
-		token[5] == 'O' &&
-		token[10] == 'F' &&
-		token[15] == 'L' &&
-		token[20] == '0' &&
-		token[25] == 'X' {
+		token[4] == 'O' &&
+		token[9] == 'F' &&
+		token[14] == 'L' &&
+		token[19] == '0' &&
+		token[24] == 'X' {
 		return true
 	}
 	return false

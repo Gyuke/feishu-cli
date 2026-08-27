@@ -37,9 +37,10 @@ func TestBuildPresentationXML_NamespaceHTTPS(t *testing.T) {
 
 // TestIsOfficePresentation_Contract 覆盖官方 isOfficePresentation 契约的全部正例与负例。
 func TestIsOfficePresentation_Contract(t *testing.T) {
-	// 标准 28 字符交织 marker：位置 5, 10, 15, 20, 25 分别为 O, F, L, 0, X
-	// 索引: 01234 5 6789 10 11121314 15 16171819 20 21222324 25 2627
-	valid28Marker := "aaaaaObbbbFccccLdddd0eeeeXff" // len=28
+	// 官方标准 28 字符交织 marker：0-based 下标 [4],[9],[14],[19],[24] 分别为 'O', 'F', 'L', '0', 'X'
+	// 索引: 0123 4 5678 9 10..13 14 15..18 19 20..23 24 25..27
+	// 字符: aaaa O aaaa F aaaa   L  aaaa   0  aaaa   X  aaa  (len=28)
+	officialPositiveFixture := "aaaaOaaaaFaaaaLaaaa0aaaaXaaa"
 
 	cases := []struct {
 		name  string
@@ -51,17 +52,18 @@ func TestIsOfficePresentation_Contract(t *testing.T) {
 		{"legacy fake_office_ 前缀自身", "fake_office_", true},
 		{"legacy local_office_ 前缀", "local_office_deck_888", true},
 		{"legacy local_office_ 前缀自身", "local_office_", true},
-		{"官方标准 28 字符交织 OFL0X marker", valid28Marker, true},
-		{"真实格式 28 字符交织 marker", "abcdeOfghiFjklmLmnop0qrstXuv", true},
+		{"官方标准 28 字符交织 OFL0X marker fixture", officialPositiveFixture, true},
+		{"真实格式 28 字符交织 marker", "abcdOefghFijklLmnop0qrstXuvw", true},
 
 		// --- 负例 ---
+		{"5-shifted marker fixture (下标 5,10,15,20,25 错位)", "aaaaaObbbbFccccLdddd0eeeeXff", false},
 		{"普通原生 slides 28 字符 token (无 marker)", "zTqAwsEb4clrjOLd3drAcNZabcef", false},
-		{"短 marker (长度 27 字符)", "aaaaaObbbbFccccLdddd0eeeeXf", false},
-		{"长 marker (长度 29 字符)", "aaaaaObbbbFccccLdddd0eeeeXfff", false},
-		{"错位 marker: 提前 1 位 (位置 4,9,14,19,24)", "aaaaObbbbFccccLdddd0eeeeXfff", false},
-		{"错位 marker: 滞后 1 位 (位置 6,11,16,21,26)", "aaaaaaObbbbFccccLdddd0eeeeXf", false},
-		{"小写 marker 不匹配 (ofl0x)", "aaaaaobbbbfccccldddd0eeeexff", false},
-		{"部分字符不匹配 (第 25 位不是 X 而是 Y)", "aaaaaObbbbFccccLdddd0eeeeYff", false},
+		{"短 marker (长度 27 字符)", "aaaaOaaaaFaaaaLaaaa0aaaaXaa", false},
+		{"长 marker (长度 29 字符)", "aaaaOaaaaFaaaaLaaaa0aaaaXaaaa", false},
+		{"错位 marker: 提前 1 位 (位置 3,8,13,18,23)", "aaaOaaaaFaaaaLaaaa0aaaaXaaaa", false},
+		{"错位 marker: 滞后 1 位 (位置 5,10,15,20,25)", "aaaaaOaaaaFaaaaLaaaa0aaaaXaa", false},
+		{"小写 marker 不匹配 (ofl0x)", "aaaaoaaaafaaaalaaaa0aaaaxaaa", false},
+		{"部分字符不匹配 (第 24 位不是 X 而是 Y)", "aaaaOaaaaFaaaaLaaaa0aaaaYaaa", false},
 		{"前缀出现在中间不匹配", "prefix_fake_office_123", false},
 		{"普通短 token", "sldcnABC123", false},
 		{"空 token", "", false},
@@ -157,8 +159,8 @@ func TestUploadSlidesMedia_ParentTypeSelection(t *testing.T) {
 		t.Errorf("parent_node 不符: %s", gotParentNode)
 	}
 
-	// 3. 导入型 Office deck (28 字符 OFL0X marker) 上传 -> office_slide_file
-	markerToken := "abcdeOfghiFjklmLmnop0qrstXuv"
+	// 3. 导入型 Office deck (官方 28 字符 OFL0X marker) 上传 -> office_slide_file
+	markerToken := "aaaaOaaaaFaaaaLaaaa0aaaaXaaa"
 	gotParentType = ""
 	gotParentNode = ""
 	token, err = UploadSlidesMedia(imgPath, "test.png", markerToken, "u-test")
