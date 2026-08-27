@@ -70,6 +70,15 @@
 
 `--output raw-json` 在 HTTP 200 且飞书业务 `code != 0` 时非零退出，不再把失败 envelope 当成功输出。定义搜索、加签、退回、催办仍不在本命令面。
 
+### 修复 — Calendar / IM 对齐官方当前契约
+
+- `calendar event-search` 迁移到 `POST /calendars/{id}/events/search_event`，时间过滤写入 `filter.time_range`；新增 `--attendee-ids`。
+- `calendar agenda` 正确处理小于 40 天窗口、超 40 天预切分、193104 再切分去重；去掉 instance_view 伪分页；全天结束日按排他日期转为含当日。
+- `search messages` 迁移到 `POST /im/v1/messages/search`（current filter/identity/output，默认 JSON 仍为 `{MessageIDs,PageToken,HasMore}`）。
+- `msg search-chats` 迁移到 `POST /im/v2/chats/search`。
+- `msg mget` / `--enrich` 改用 `GET /im/v1/messages/mget`，每批最多 50，禁止 N+1。`msg history` 线程展开与 `with_sender_name` 保持不变。
+
+
 ## [v1.36.0] - 2026-07-22
 
 本版为一次全域能力补齐：消息读取发送者名字服务端回填、CLI 交互健壮性守卫、OKR 全量接线、多维表格结构化过滤 DSL、电子表格类型保真读取闭环、大文档选择性读取、卡片交互回调与审批 v4 事件订阅，以及邮件/会议/纪要/云盘/任务/日历多域新命令。

@@ -7,6 +7,10 @@
 `calendar agenda --end-date` 按当天 `23:59:59` 处理，是包含端。只查“明天”时 start-date 和
 end-date 都传明天日期；传“明天到后天”会同时包含后天。
 
+`calendar agenda` 走 `GET /open-apis/calendar/v4/calendars/{id}/events/instance_view`：单次窗口上限 40 天，超过会客户端对半切分；命中 193104（单窗口超过 1000 个实例）同样切分后去重。instance_view **没有服务端分页**，`--page-size` / `--page-token` 会被忽略。全天日程的结束日按飞书排他日期转为含当日（例如 API 的 `end.date=2025-03-22` 输出为 `2025-03-21`）。
+
+`calendar event-search` 走 `POST /open-apis/calendar/v4/calendars/{id}/events/search_event`，时间过滤写入 `filter.time_range.{start_time,end_time}`（RFC3339），不要再用旧 `/events/search` 的顶层 `start_time`/`end_time`。`--attendee-ids` 按前缀拆到 `attendee_user_ids`（`ou_`）/ `attendee_chat_ids`（`oc_`）/ `meeting_room_ids`（`omm_`）。`--page-size` 范围 1-30。
+
 ## 目录
 
 - [核心概念](#核心概念)

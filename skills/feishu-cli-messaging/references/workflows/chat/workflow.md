@@ -9,9 +9,9 @@
 | 看一段时间窗内的群消息（含话题回复、名字反解、卡片解析） | **`scripts/fetch_chat_history.py`**（一条命令搞定） |
 | 看一页群聊最新消息（v1.27.1+ 默认自动展开所有话题） | `msg history` 单次调用 |
 | 看私聊记录 | `msg history --user-email` 或 `--user-id` |
-| 找群 | `msg search-chats --query` |
+| 找群 | `msg search-chats --query`（`POST /im/v2/chats/search`） |
 | 列出自己加入的所有群 | `chat list`（`--page-all` 拉全量） |
-| 看单条消息 / 合并转发 | `msg get` / `msg mget` |
+| 看单条消息 / 合并转发 | `msg get` / `msg mget`（`mget` 走 `GET /im/v1/messages/mget`，每批最多 50） |
 | 看一个话题的全部回复 | `msg thread-messages <thread_id>` |
 | 按关键词搜消息 | `search messages`（属于 `feishu-cli-platform`） |
 | 群成员管理、改群名 | `chat update` / `chat member ...` |
@@ -93,7 +93,7 @@ feishu-cli msg history --container-id oc_xxx --container-id-type chat \
     --start-time $(date -v-24H +%s) --end-time $(date +%s) \
     --sort-type ByCreateTimeAsc --page-size 50 -o json
 
-# 单条 / 批量消息详情
+# 单条 / 批量消息详情（mget 单次 /im/v1/messages/mget，每批最多 50，禁止逐条 Get）
 feishu-cli msg get <message_id> -o json
 feishu-cli msg mget --message-ids <id1,id2>
 
@@ -116,12 +116,12 @@ feishu-cli msg thread-messages <thread_id> --page-size 50 --sort ByCreateTimeAsc
 ## 搜索与定位
 
 ```bash
-feishu-cli msg search-chats --query "项目群" -o json   # 搜群
-feishu-cli search messages "关键词" --chat-type p2p_chat -o json
+feishu-cli msg search-chats --query "项目群" -o json   # POST /im/v2/chats/search
+feishu-cli search messages "关键词" --chat-type p2p_chat -o json   # POST /im/v1/messages/search
 feishu-cli search messages "关键词" --chat-ids oc_xxx -o json
 ```
 
-搜消息属于 `feishu-cli-platform`，本技能在阅读任务里顺带调用。
+搜消息属于 `feishu-cli-platform`，走 current `POST /open-apis/im/v1/messages/search`（`filter.time_range` / `from_ids` / `chat_ids` / `include_attachment_types`）。本技能在阅读任务里顺带调用。`msg search-chats` 走 `POST /open-apis/im/v2/chats/search`，含连字符的关键词会自动加引号。`msg mget` 走 `GET /open-apis/im/v1/messages/mget`（`with_sender_name=true`，每批最多 50）。
 
 ## 消息互动
 

@@ -138,7 +138,9 @@ sheet 走 sheet，wiki 先按 node 类型解析，bitable/file/slides 分别走�
 
 ## 搜索消息
 
-搜索飞书消息记录。**scope: `search:message`**
+搜索飞书消息记录。走 **`POST /open-apis/im/v1/messages/search`**（不再使用 `/search/v2/message`）。**scope: `search:message`**
+
+CLI 仍接受旧 flag 写法，会映射到 current filter：`--start-time`/`--end-time` → `filter.time_range`；`--chat-type group_chat|p2p_chat` → `group|p2p`；`--message-type media` → `include_attachment_types: ["video"]`。
 
 ```bash
 feishu-cli search messages "关键词" [选项]
@@ -148,14 +150,14 @@ feishu-cli search messages "关键词" [选项]
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `--chat-ids` | string | 限定群聊范围（逗号分隔） |
-| `--from-ids` | string | 限定发送者 ID（逗号分隔） |
-| `--at-chatter-ids` | string | 限定被@的用户 ID（逗号分隔） |
-| `--message-type` | string | 消息类型：`file`/`image`/`media` |
-| `--chat-type` | string | 会话类型：`group_chat`/`p2p_chat` |
-| `--from-type` | string | 发送者类型：`bot`/`user` |
-| `--start-time` | string | 起始时间（Unix 秒级时间戳） |
-| `--end-time` | string | 结束时间（Unix 秒级时间戳） |
+| `--chat-ids` | string | 限定群聊范围（逗号分隔）→ `filter.chat_ids` |
+| `--from-ids` | string | 限定发送者 ID（逗号分隔）→ `filter.from_ids` |
+| `--at-chatter-ids` | string | 限定被@的用户 ID（逗号分隔）→ `filter.at_chatter_ids` |
+| `--message-type` | string | `file`/`image`/`media`（`media` 映射为 `video`）→ `include_attachment_types` |
+| `--chat-type` | string | `group_chat`/`p2p_chat`（也接受 `group`/`p2p`） |
+| `--from-type` | string | 发送者类型：`bot`/`user` → `from_types` |
+| `--start-time` | string | 起始时间（RFC3339 或 Unix 秒）→ `filter.time_range.start_time` |
+| `--end-time` | string | 结束时间（RFC3339 或 Unix 秒）→ `filter.time_range.end_time` |
 | `--page-size` | int | 每页数量（默认 20） |
 | `--page-token` | string | 分页 token（上一页返回） |
 | `--page-all` | bool | 自动翻页拉取全部（受 `--page-limit` 限制） |
@@ -169,7 +171,7 @@ feishu-cli search messages "关键词" [选项]
 
 > **`--page-all` 截断无提示**：仅非翻页模式（`!--page-all` 且 `HasMore=true`）会打印"还有更多结果"。当 `--page-all` 因达到 `--page-limit` 提前停止（而非真正耗尽）时，CLI **不会**提示结果被截断——需要拉全量时把 `--page-limit` 设为 `0`，或结合 JSON 输出的 `HasMore` 自行判断。
 
-> **默认 vs `--enrich`**：默认仅返回消息 ID（`-o json` 输出 `{MessageIDs,HasMore,PageToken}`），与历史行为一致、向后兼容。加 `--enrich` 才会多发 `BatchGetMessages` 等 API 补全内容/发送者/群名/时间，`-o json` 此时返回富化后的数组。
+> **默认 vs `--enrich`**：默认仅返回消息 ID（`-o json` 输出 `{MessageIDs,HasMore,PageToken}`），与历史行为一致、向后兼容。加 `--enrich` 才会多发 `GET /im/v1/messages/mget`（每批最多 50）等 API 补全内容/发送者/群名/时间，`-o json` 此时返回富化后的数组。
 
 ### 示例
 

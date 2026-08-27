@@ -17,6 +17,8 @@ Token 有效期约 2 小时，Refresh Token 有效期 30 天（Device Flow 自�
 
 ## 搜索消息
 
+走 `POST /open-apis/im/v1/messages/search`。`--start-time`/`--end-time` 写入 `filter.time_range`（RFC3339；纯数字仍按 Unix 秒转换）。`--chat-type group_chat|p2p_chat` 映射为 `group|p2p`。`--enrich` 用 `GET /im/v1/messages/mget` 批量补全（每批最多 50）。
+
 ```bash
 feishu-cli search messages "关键词" \
   --user-access-token <token> \
@@ -26,8 +28,8 @@ feishu-cli search messages "关键词" \
   [--message-type file|image|media] \
   [--chat-type group_chat|p2p_chat] \
   [--from-type bot|user] \
-  [--start-time 1704067200] \
-  [--end-time 1704153600] \
+  [--start-time 2024-01-01T00:00:00+08:00] \
+  [--end-time 2024-01-02T00:00:00+08:00] \
   [--page-size 20] \
   [--page-token <token>]
 ```
@@ -42,8 +44,8 @@ feishu-cli search messages "关键词" \
 | `--message-type` | string | 消息类型：`file`/`image`/`media` |
 | `--chat-type` | string | 会话类型：`group_chat`（群聊）/`p2p_chat`（单聊） |
 | `--from-type` | string | 发送者类型：`bot`（机器人）/`user`（用户） |
-| `--start-time` | string | 起始时间（Unix 秒级时间戳） |
-| `--end-time` | string | 结束时间（Unix 秒级时间戳） |
+| `--start-time` | string | 起始时间（RFC3339 或 Unix 秒） |
+| `--end-time` | string | 结束时间（RFC3339 或 Unix 秒） |
 
 ### 示例
 
