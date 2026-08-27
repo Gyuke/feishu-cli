@@ -29,6 +29,9 @@ func resetAPIFlags() {
 	apiTimeoutSec = 30
 	apiFormat = ""
 	apiJQ = ""
+	apiPageAll = false
+	apiPageLimit = 10
+	apiPageDelayMs = 200
 }
 
 func newTestAPICmd() *cobra.Command {
@@ -48,6 +51,9 @@ func newTestAPICmd() *cobra.Command {
 	c.Flags().IntVar(&apiTimeoutSec, "timeout", 30, "")
 	c.Flags().StringVar(&apiFormat, "format", "", "")
 	c.Flags().StringVar(&apiJQ, "jq", "", "")
+	c.Flags().BoolVar(&apiPageAll, "page-all", false, "")
+	c.Flags().IntVar(&apiPageLimit, "page-limit", 10, "")
+	c.Flags().IntVar(&apiPageDelayMs, "page-delay", 200, "")
 	c.Flags().String("user-access-token", "", "")
 	return c
 }
@@ -117,6 +123,33 @@ func TestNormalizeAPIPath(t *testing.T) {
 			wantPath: "/open-apis/foo",
 		},
 		{
+			name:      "fragment 不含 query：先剥 # 再解析 ?",
+			input:     "/open-apis/foo?a=1#frag?b=2",
+			wantPath:  "/open-apis/foo",
+			wantQuery: map[string]string{"a": "1"},
+		},
+		{
+			name:     "纯 fragment 中的问号不得进入 query",
+			input:    "/open-apis/foo#section?x=1",
+			wantPath: "/open-apis/foo",
+		},
+		{
+			name:      "完整官方 URL 的 fragment 不进入 query",
+			input:     "https://open.feishu.cn/open-apis/foo?x=y#hash",
+			wantPath:  "/open-apis/foo",
+			wantQuery: map[string]string{"x": "y"},
+		},
+		{
+			name:    "非官方完整 URL 拒绝",
+			input:   "https://example.com/open-apis/foo",
+			wantErr: true,
+		},
+		{
+			name:    "租户文档 host 拒绝",
+			input:   "https://tenant.feishu.cn/open-apis/foo",
+			wantErr: true,
+		},
+		{
 			name:    "空字符串报错",
 			input:   "",
 			wantErr: true,
@@ -148,9 +181,20 @@ func TestNormalizeAPIPath(t *testing.T) {
 			if path != tc.wantPath {
 				t.Errorf("path = %q，期望 %q", path, tc.wantPath)
 			}
+			if tc.wantQuery == nil && q.Get("b") != "" {
+				t.Errorf("fragment 中的参数不应进入 query，得到 b=%q", q.Get("b"))
+			}
+			if tc.wantQuery == nil && q.Get("x") != "" {
+				t.Errorf("fragment 中的参数不应进入 query，得到 x=%q", q.Get("x"))
+			}
 			for k, v := range tc.wantQuery {
 				if got := q.Get(k); got != v {
 					t.Errorf("query[%s] = %q，期望 %q", k, got, v)
+				}
+			}
+			if tc.wantQuery != nil {
+				if got := q.Get("b"); got != "" && tc.wantQuery["b"] == "" {
+					t.Errorf("fragment 泄漏到 query: b=%q", got)
 				}
 			}
 		})

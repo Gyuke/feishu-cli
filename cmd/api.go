@@ -34,6 +34,9 @@ var (
 	apiTimeoutSec     int
 	apiFormat         string // 输出格式: json|pretty|table|ndjson|csv（空=保持默认 pretty/raw）
 	apiJQ             string // jq 表达式（内置 gojq）
+	apiPageAll        bool
+	apiPageLimit      int
+	apiPageDelayMs    int
 )
 
 var apiCmd = &cobra.Command{
@@ -72,7 +75,10 @@ var apiCmd = &cobra.Command{
   # 从 stdin 读 body
   cat body.json | feishu-cli api POST /open-apis/xxx --data-file -
 
-  # 直接传完整 URL 也行
+  # 可识别 has_more + page_token/next_page_token 的列表接口自动翻页
+  feishu-cli api GET /open-apis/im/v1/chats --page-all --page-limit 10 --as user
+
+  # 直接传完整 URL 也行（仅官方 OpenAPI host）
   feishu-cli api GET https://open.feishu.cn/open-apis/contact/v3/users/me --as user`,
 	Args: cobra.ExactArgs(2),
 	RunE: runAPI,
@@ -90,6 +96,9 @@ func init() {
 	apiCmd.Flags().IntVar(&apiTimeoutSec, "timeout", 30, "请求超时（秒）")
 	apiCmd.Flags().StringVar(&apiFormat, "format", "", "输出格式: json|pretty|table|ndjson|csv（指定后走内置渲染，覆盖默认 pretty）")
 	apiCmd.Flags().StringVar(&apiJQ, "jq", "", "用 jq 表达式过滤响应（内置 gojq，无需外部 jq）")
+	apiCmd.Flags().BoolVar(&apiPageAll, "page-all", false, "自动翻页（仅识别 data.has_more + page_token/next_page_token）")
+	apiCmd.Flags().IntVar(&apiPageLimit, "page-limit", 10, "配合 --page-all 的最大页数（0=不限；空/重复 cursor 仍会停止）")
+	apiCmd.Flags().IntVar(&apiPageDelayMs, "page-delay", 200, "翻页间隔毫秒")
 	apiCmd.Flags().String("user-access-token", "", "显式传入 User Access Token（覆盖 --as）")
 
 	rootCmd.AddCommand(apiCmd)
@@ -163,6 +172,10 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		body = probe
 	}
 
+	if apiPageAll && apiOutput != "" && apiFormat == "" && apiJQ == "" {
+		return fmt.Errorf("--output 与 --page-all 不能同时用于二进制下载；去掉其中一个，或给 --page-all 加上 --format/--jq")
+	}
+
 	// dry-run：静态检查 token 策略，打印请求后直接返回（不触发 token refresh，不写 token 文件，不发网络请求）
 	if apiDryRun {
 		tokenTypes, hasUserToken, err := resolveAPITokenDryRun(cmd, apiAs)
@@ -178,7 +191,27 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 构造请求
+	if apiPageAll {
+		return runAPIPaginated(method, apiPath, queryParams, body, tokenTypes, userToken)
+	}
+
+	resp, err := invokeAPI(method, apiPath, queryParams, body, tokenTypes, userToken)
+	if err != nil {
+		return err
+	}
+	return emitAPIResponse(resp)
+}
+
+// isValidHTTPMethod 仅放行飞书 OpenAPI 实际用到的方法
+func isValidHTTPMethod(m string) bool {
+	switch m {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
+func invokeAPI(method, apiPath string, queryParams larkcore.QueryParams, body any, tokenTypes []larkcore.AccessTokenType, userToken string) (*larkcore.ApiResp, error) {
 	req := &larkcore.ApiReq{
 		HttpMethod:                method,
 		ApiPath:                   apiPath,
@@ -186,44 +219,41 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		Body:                      body,
 		SupportedAccessTokenTypes: tokenTypes,
 	}
-
 	cli, err := client.GetClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(apiTimeoutSec)*time.Second)
 	defer cancel()
-
 	var opts []larkcore.RequestOptionFunc
 	if userToken != "" {
 		opts = append(opts, larkcore.WithUserAccessToken(userToken))
 	}
-
 	resp, err := cli.Do(ctx, req, opts...)
 	if err != nil {
-		return fmt.Errorf("API 调用失败: %w", err)
+		return nil, fmt.Errorf("API 调用失败: %w", err)
 	}
+	return resp, nil
+}
 
-	// 输出响应头到 stderr（可选）
+func emitAPIResponse(resp *larkcore.ApiResp) error {
+	return emitAPIBody(resp.StatusCode, resp.Header, resp.RawBody)
+}
+
+func emitAPIBody(status int, header http.Header, rawBody []byte) error {
 	if apiIncludeHeaders {
-		fmt.Fprintf(os.Stderr, "HTTP/1.1 %d\n", resp.StatusCode)
-		printRespHeaders(os.Stderr, resp.Header)
+		fmt.Fprintf(os.Stderr, "HTTP/1.1 %d\n", status)
+		printRespHeaders(os.Stderr, header)
 		fmt.Fprintln(os.Stderr)
 	}
-
-	// 输出 body：显式 --format / --jq 时走 internal/output（jq 过滤 + table/csv/ndjson + 大整数保精度）；
-	// 否则保持默认 pretty/raw 行为（含 -o 二进制写文件）。
 	if apiFormat != "" || apiJQ != "" {
 		o, oerr := output.NewOptions(apiFormat, apiJQ)
 		if oerr != nil {
 			return oerr
 		}
 		o.OutputFile = apiOutput
-		var parsed any
-		dec := json.NewDecoder(bytes.NewReader(resp.RawBody))
-		dec.UseNumber()
-		if err := dec.Decode(&parsed); err != nil {
+		parsed, err := decodeJSONUseNumber(rawBody)
+		if err != nil {
 			return fmt.Errorf("响应不是合法 JSON，无法用 --format/--jq 渲染（去掉这两个 flag 可用 --raw 原样输出）: %w", err)
 		}
 		if err := output.Render(o, parsed); err != nil {
@@ -239,94 +269,100 @@ func runAPI(cmd *cobra.Command, args []string) error {
 			defer f.Close()
 			outWriter = f
 		}
-		if err := writeAPIResponse(outWriter, resp.RawBody, apiRaw); err != nil {
+		if err := writeAPIResponse(outWriter, rawBody, apiRaw); err != nil {
 			return err
 		}
 	}
-
-	// 业务错误码提示（飞书：code != 0 表示业务错误）
-	if hint := detectFeishuBizError(resp.StatusCode, resp.RawBody); hint != "" {
+	if hint := detectFeishuBizError(status, rawBody); hint != "" {
 		fmt.Fprintln(os.Stderr, hint)
 	}
-
-	// 飞书业务错误码（code != 0）返回非零退出码
-	if bizCode, bizMsg, hasBizErr := parseFeishuBizError(resp.RawBody); hasBizErr {
+	if bizCode, bizMsg, hasBizErr := parseFeishuBizError(rawBody); hasBizErr {
 		return fmt.Errorf("飞书业务错误: code=%d, msg=%s", bizCode, bizMsg)
 	}
-
-	// 非 2xx 返回非零退出码（响应已打印）
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("HTTP %d", status)
 	}
-
 	return nil
 }
 
-// isValidHTTPMethod 仅放行飞书 OpenAPI 实际用到的方法
-func isValidHTTPMethod(m string) bool {
-	switch m {
-	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
-		return true
+func decodeJSONUseNumber(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return nil, err
 	}
-	return false
+	return parsed, nil
 }
 
-// normalizeAPIPath 把用户输入的 path 规范化为 SDK 需要的 /open-apis/... 格式
-//   - 完整 URL（https://open.feishu.cn/...）→ 剥掉 scheme+host
-//   - 缺 / 开头 → 补
-//   - 缺 /open-apis/ → 补
-//   - 如果 path 内含 ?xxx=yyy → 拆解为 query 参数返回（让 caller 合并到 --params）
+func officialOpenAPIHosts() map[string]bool {
+	return map[string]bool{
+		"open.feishu.cn":      true,
+		"open.larksuite.com":  true,
+		"open.larkoffice.com": true,
+	}
+}
+
+func isOfficialOpenAPIHost(host string) bool {
+	return officialOpenAPIHosts()[strings.ToLower(host)]
+}
+
+// normalizeAPIPath 把用户输入的 path 规范化为 SDK 需要的 /open-apis/... 格式。
+// fragment 先于 query 剥离，完整 URL 只接受官方 OpenAPI host，短 path 仍兼容。
 func normalizeAPIPath(raw string) (string, larkcore.QueryParams, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", nil, fmt.Errorf("path 不能为空")
 	}
 
-	// 剥掉常见的 base URL 前缀
-	for _, prefix := range []string{
-		"https://open.feishu.cn",
-		"http://open.feishu.cn",
-		"https://open.larksuite.com",
-		"http://open.larksuite.com",
-		"https://open.larkoffice.com",
-		"http://open.larkoffice.com",
-	} {
-		if rest, ok := strings.CutPrefix(s, prefix); ok {
-			s = rest
-			break
-		}
-	}
-
-	// 拆解 path 内嵌的 query string（用户可能从浏览器粘贴完整 URL）
 	embedded := larkcore.QueryParams{}
-	if idx := strings.Index(s, "?"); idx >= 0 {
-		qstr := s[idx+1:]
-		s = s[:idx]
-		vs, err := url.ParseQuery(qstr)
+
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
 		if err != nil {
-			return "", nil, fmt.Errorf("解析 path 中的 query string 失败: %w", err)
+			return "", nil, fmt.Errorf("解析 URL 失败: %w", err)
 		}
-		for k, vals := range vs {
-			for _, v := range vals {
+		if !isOfficialOpenAPIHost(u.Hostname()) {
+			return "", nil, fmt.Errorf("完整 URL 仅支持官方 OpenAPI host（open.feishu.cn / open.larksuite.com / open.larkoffice.com），得到 %q", u.Hostname())
+		}
+		for k, vs := range u.Query() {
+			for _, v := range vs {
 				embedded.Add(k, v)
+			}
+		}
+		s = u.EscapedPath()
+		if s == "" {
+			s = u.Path
+		}
+	} else {
+		// RFC 3986：先剥 fragment，fragment 绝不能进入 query。
+		if idx := strings.Index(s, "#"); idx >= 0 {
+			s = s[:idx]
+		}
+		if idx := strings.Index(s, "?"); idx >= 0 {
+			qstr := s[idx+1:]
+			s = s[:idx]
+			vs, err := url.ParseQuery(qstr)
+			if err != nil {
+				return "", nil, fmt.Errorf("解析 path 中的 query string 失败: %w", err)
+			}
+			for k, vals := range vs {
+				for _, v := range vals {
+					embedded.Add(k, v)
+				}
 			}
 		}
 	}
 
-	// 剥 fragment（# 后内容飞书 API 用不到）
-	if idx := strings.Index(s, "#"); idx >= 0 {
-		s = s[:idx]
+	if s == "" {
+		s = "/"
 	}
-
 	if !strings.HasPrefix(s, "/") {
 		s = "/" + s
 	}
-
 	if !strings.HasPrefix(s, "/open-apis/") {
-		// 容忍用户写 /im/v1/messages 这种短路径
 		s = "/open-apis" + s
 	}
-
 	return s, embedded, nil
 }
 
@@ -466,8 +502,209 @@ func printAPIDryRun(method, path string, q larkcore.QueryParams, body any, token
 		"supported_tokens":  tokenTypesToString(tokenTypes),
 		"will_use_user_tok": hasUserToken,
 		"dry_run":           true,
+		"page_all":          apiPageAll,
+		"page_limit":        apiPageLimit,
 	}
 	return printJSON(out)
+}
+
+func cloneQueryParams(src larkcore.QueryParams) larkcore.QueryParams {
+	out := larkcore.QueryParams{}
+	for k, vs := range src {
+		cp := make([]string, len(vs))
+		copy(cp, vs)
+		out[k] = cp
+	}
+	return out
+}
+
+func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, body any, tokenTypes []larkcore.AccessTokenType, userToken string) error {
+	limit := apiPageLimit
+	if limit < 0 {
+		limit = 10
+	}
+	seen := map[string]struct{}{}
+	var pages []map[string]any
+	var lastResp *larkcore.ApiResp
+	token := ""
+
+	for page := 1; ; page++ {
+		if limit > 0 && page > limit {
+			break
+		}
+		q := cloneQueryParams(queryParams)
+		if token != "" {
+			q.Set("page_token", token)
+		}
+		resp, err := invokeAPI(method, apiPath, q, body, tokenTypes, userToken)
+		if err != nil {
+			return err
+		}
+		lastResp = resp
+		if page == 1 && apiIncludeHeaders {
+			fmt.Fprintf(os.Stderr, "HTTP/1.1 %d\n", resp.StatusCode)
+			printRespHeaders(os.Stderr, resp.Header)
+			fmt.Fprintln(os.Stderr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return emitAPIBody(resp.StatusCode, resp.Header, resp.RawBody)
+		}
+
+		parsed, err := decodeJSONUseNumber(resp.RawBody)
+		if err != nil {
+			if page == 1 {
+				return emitAPIBody(resp.StatusCode, resp.Header, resp.RawBody)
+			}
+			return fmt.Errorf("第 %d 页响应不是合法 JSON: %w", page, err)
+		}
+		obj, ok := parsed.(map[string]any)
+		if !ok {
+			return emitAPIBody(resp.StatusCode, resp.Header, resp.RawBody)
+		}
+		if _, _, hasBizErr := parseFeishuBizError(resp.RawBody); hasBizErr {
+			return emitAPIBody(resp.StatusCode, resp.Header, resp.RawBody)
+		}
+
+		data, _ := obj["data"].(map[string]any)
+		hasMore, hasMoreOK := false, false
+		if data != nil {
+			hasMore, hasMoreOK = data["has_more"].(bool)
+		}
+		pages = append(pages, obj)
+
+		if !hasMoreOK || !hasMore {
+			break
+		}
+		next, kind := pageCursorFromData(data)
+		if kind == "nonstring" {
+			return fmt.Errorf("分页第 %d 页游标不是字符串，拒绝猜测非标准游标", page)
+		}
+		if next == "" {
+			return fmt.Errorf("分页第 %d 页 has_more=true 但 page_token/next_page_token 为空，已停止以免静默重复", page)
+		}
+		if _, dup := seen[next]; dup {
+			return fmt.Errorf("分页第 %d 页重复游标 %q，已停止以免静默重复", page, next)
+		}
+		seen[next] = struct{}{}
+		token = next
+		if apiPageDelayMs > 0 && (limit == 0 || page < limit) {
+			time.Sleep(time.Duration(apiPageDelayMs) * time.Millisecond)
+		}
+	}
+
+	merged := mergeAPIPages(pages)
+	raw, err := marshalPreserveNumbers(merged)
+	if err != nil {
+		return err
+	}
+	savedInclude := apiIncludeHeaders
+	apiIncludeHeaders = false
+	defer func() { apiIncludeHeaders = savedInclude }()
+	status := 200
+	var header http.Header
+	if lastResp != nil {
+		status = lastResp.StatusCode
+		header = lastResp.Header
+	}
+	return emitAPIBody(status, header, raw)
+}
+
+func pageCursorFromData(data map[string]any) (token string, kind string) {
+	if data == nil {
+		return "", "missing"
+	}
+	for _, key := range []string{"page_token", "next_page_token"} {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr {
+			return "", "nonstring"
+		}
+		return s, key
+	}
+	return "", "missing"
+}
+
+func findAPIArrayField(data map[string]any) string {
+	known := []string{
+		"items", "files", "events", "rooms", "records", "nodes",
+		"members", "departments", "calendar_list", "acl_list", "freebusy_list",
+		"users",
+	}
+	for _, name := range known {
+		if _, ok := data[name].([]any); ok {
+			return name
+		}
+	}
+	var candidates []string
+	for k, v := range data {
+		if _, ok := v.([]any); ok {
+			candidates = append(candidates, k)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+func mergeAPIPages(pages []map[string]any) map[string]any {
+	if len(pages) == 0 {
+		return map[string]any{}
+	}
+	if len(pages) == 1 {
+		return pages[0]
+	}
+	first := pages[0]
+	data, ok := first["data"].(map[string]any)
+	if !ok {
+		return first
+	}
+	field := findAPIArrayField(data)
+	if field == "" {
+		return pages[len(pages)-1]
+	}
+	var merged []any
+	for _, p := range pages {
+		d, _ := p["data"].(map[string]any)
+		if d == nil {
+			continue
+		}
+		if items, ok := d[field].([]any); ok {
+			merged = append(merged, items...)
+		}
+	}
+	outData := make(map[string]any, len(data)+2)
+	for k, v := range data {
+		outData[k] = v
+	}
+	outData[field] = merged
+	lastHasMore := false
+	if last, ok := pages[len(pages)-1]["data"].(map[string]any); ok {
+		lastHasMore, _ = last["has_more"].(bool)
+	}
+	outData["has_more"] = lastHasMore
+	delete(outData, "page_token")
+	delete(outData, "next_page_token")
+	result := make(map[string]any, len(first)+1)
+	for k, v := range first {
+		result[k] = v
+	}
+	result["data"] = outData
+	return result
+}
+
+func marshalPreserveNumbers(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // toPlainQuery 把 QueryParams (map[string][]string) 转成更可读的形式（单值直接是 string）
