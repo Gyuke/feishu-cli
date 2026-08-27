@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### 新增 — 官方 OpenAPI catalog overlay（可回退、可缓存、无凭证）
+
+- 编译期 `meta_data.json` 永远是离线 baseline；运行时可从官方 public `api_definition?protocol=meta` 拉 overlay。
+- 5s 超时、10MB 硬限制、24h TTL；cache 原子写入（`~/.feishu-cli/cache/remote_meta.json` + metadata）；版本/品牌隔离；损坏 cache fail-closed 回退 embedded。
+- 远端 4xx/超时/超限/坏 JSON 不得让正常命令失败。请求不携带 App/User 凭证。
+- 明确 opt-out：`FEISHU_CLI_REMOTE_META=off`；测试注入：`FEISHU_CLI_META_URL` / `FEISHU_CLI_CONFIG_DIR`。
+- `schema status`、`doctor --only catalog`、`auth status` 报告 source（embedded/cache/runtime）、版本、service/method 数。
+- scope 收集递归 nested resources。
+
+### 新增 — 通用 `api --page-all/--page-limit`
+
+- 仅识别 `data.has_more` + `page_token`/`next_page_token`；空/重复 cursor 停止并报错，不静默重复。
+- 多页聚合保留 `json.Number` 大整数。业务 code != 0 非零退出。
+
+### 修复 — `api` URL fragment / 官方 host
+
+- 先剥 fragment 再解析 query，fragment 绝不能进入 query。
+- 完整 URL 只接受 `open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`；短 path 仍兼容。
+
 ### 修复 — 认证 / Token / SDK 传输安全
 
 - SDK client 用 SHA-256 指纹检测 App Secret 变化：同长度轮换也会重建 client，进程内不保存 secret 明文。

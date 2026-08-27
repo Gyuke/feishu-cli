@@ -1,7 +1,7 @@
 # 飞书 OpenAPI 浏览 + 调用技能
 
 两个命令的组合拳：
-- **`feishu-cli schema`** —— 本地查询 OpenAPI 方法的 path/动词/参数/scope/文档链接（纯本地，无需 Token / 无需网络）
+- **`feishu-cli schema`** —— 查询 OpenAPI 方法的 path/动词/参数/scope/文档链接（无需 Token；catalog overlay 为无凭证 public meta）
 - **`feishu-cli api`** —— 直接调用任意飞书 OpenAPI 端点（v1.29+，自动鉴权 + 错误码翻译，覆盖未封装的 2500+ 端点）
 
 典型工作流：`schema list 发现` → `schema get 看参数 + scope` → `feishu-cli auth check/login` 补 scope → `feishu-cli api` 调用。
@@ -22,14 +22,20 @@
 
 按路径深度自动分发：
 
-- `schema` 无参数 → 列出所有 service
-- `schema <service>` → 列出该 service 下所有 resource.method
+- `schema` 无参数 → 列出所有 service（pretty 含 Catalog 头）
+- `schema status` → catalog 来源 / 版本 / service+method 数
+- `schema <service>` → 列出该 service 下所有 resource.method（含嵌套 resources）
 - `schema <service>.<resource>` → 列出 resource 下的所有 method
 - `schema <service>.<resource>.<method>` → method 详情（含 path / 参数 / scope / docUrl）
 
 ### 数据来源
 
-编译期 `embed` 的 `internal/registry/meta_data.json`（约 690KB），与 `auth check` 等模块共用同一份元数据。当前覆盖 **12 个 service**：approval / attendance / calendar / drive / im / mail / minutes / sheets / slides / task / vc / wiki。
+编译期 embed 的 `internal/registry/meta_data.json` 是离线 baseline（约 690KB，12 个 service）。
+运行时默认从官方 public `api_definition?protocol=meta` 拉 overlay（5s 超时、10MB 上限、24h TTL、
+原子 cache、无凭证）；失败回退 embedded。`FEISHU_CLI_REMOTE_META=off` 可关闭。
+
+`feishu-cli schema status --format json` 报告 `source`（embedded/cache/runtime）、版本、
+service/method 数；`doctor --only catalog` 与 `auth status -o json` 的 `catalog` 字段同样可读。
 
 ---
 
@@ -160,6 +166,7 @@ feishu-cli api POST /open-apis/im/v1/chats \
 | `--include-headers` | stderr 打印响应头 |
 | `--output <file>` / `-o` | 写入文件而非 stdout（`-o` 二进制下载与 `--format/--jq` 互斥，见 `feishu-cli-platform` skill） |
 | `--timeout <seconds>` | 自定义超时（默认 30s） |
+| `--page-all` / `--page-limit` | 仅识别 `data.has_more` + `page_token`/`next_page_token`；空/重复 cursor 停止 |
 
 ### 内置错误码翻译（v1.29+）
 
@@ -179,7 +186,8 @@ feishu-cli api POST /open-apis/im/v1/chats \
   不支持任意租户 host
 - 自动补 `/open-apis/` 前缀
 - 自动拆 URL 里内嵌的 `?query=string` 到 query 参数
-- 不要传 `#fragment`；`?query#fragment` 中的 fragment 当前会落入 query 值
+- fragment 先于 query 剥离，`?a=1#frag?b=2` 只会留下 `a=1`
+- 完整 URL 只接受官方 OpenAPI host；短 path 仍自动补 `/open-apis/`
 
 ```bash
 # 下面三种等价：
@@ -202,8 +210,8 @@ feishu-cli api GET '/open-apis/authen/v1/user_info?foo=bar' --as user
 1. **路径过深会报错**：`schema im.messages.delete.foo` → `路径过深: ...（多余片段: foo）`。多写一层不会被静默吞掉。
 2. **路径不存在分级提示**：未知 service / resource / method 都会列出该层的所有可用候选名，便于纠正。
 3. **resource 含点号用最长前缀匹配**：`im.chat.members.create` 会匹配 resource = `chat.members`、method = `create`，不必担心拆错。
-4. **只读不调 API**：本命令永远不发起 HTTP 请求，不消耗任何配额，没有 token 过期顾虑。要真正调用见下方"何时转其他技能"。
-5. **覆盖范围 = 12 service**：当前覆盖 approval / attendance / calendar / drive / im / mail / minutes / sheets / slides / task / vc / wiki；**未含 docx / bitable(base) / contact / authen / board / okr / tenant / application 等业务域**；如果 `schema list` 里没列出，说明本地元数据未收录，请去飞书 OpenAPI Explorer 查在线最新版（或本项目对应的专用 `feishu-cli <模块>` 命令通常都已封装好）。
+4. **查询不需要 token**：schema 查询走本地/缓存 catalog。overlay 是无凭证的 public meta 请求，失败不影响命令。
+5. **覆盖范围**：embedded baseline 仍是 12 个 service；开启 overlay 后 `schema status` 的 `service_count` 可能变大。本地仍没有的域请用 `schema status` 确认，或去飞书 OpenAPI Explorer / 专用 `feishu-cli <模块>` 命令。
 6. **JSON 输出不转义 HTML**：`<` / `>` / `&` 保留原样，便于直接吞进 jq / yq 管道。
 
 ---

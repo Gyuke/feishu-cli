@@ -187,6 +187,7 @@ feishu-cli auth check --scope "search:docs:read" && feishu-cli search docs --que
 | `env_overrides` / `flag_overrides` | 当前命令有哪些 App/Profile 覆盖来源 |
 | `profile_error` | 当前生效那套的配置/token 读取问题（配置损坏时仍会输出，便于排查） |
 | `hint` | App 凭证被覆盖时的说明 |
+| `catalog` | OpenAPI catalog：`source`（embedded/cache/runtime）、版本、service/method 数 |
 
 未登录时返回 `{"logged_in": false, "identity": "bot", "note": "..."}`。
 
@@ -299,7 +300,7 @@ feishu-cli doctor --only proxy
 feishu-cli doctor --only user_token,endpoint_open    # 多值，逗号分隔
 ```
 
-`doctor` 共 8 项检查；`--only` 支持单个值或逗号分隔多个值（typo 会被本地校验拒收）：
+`doctor` 共 9 项检查；`--only` 支持单个值或逗号分隔多个值（typo 会被本地校验拒收）：
 
 | 检查名 | 含义 |
 |---|---|
@@ -311,6 +312,7 @@ feishu-cli doctor --only user_token,endpoint_open    # 多值，逗号分隔
 | `endpoint_larksuite` | `open.larksuite.com` 可达性（海外站） |
 | `proxy` | `HTTPS_PROXY` / `NO_PROXY` 是否会拦截 OpenAPI 域名 |
 | `dependencies` | 当前 Go 版本与编译依赖中的 Lark SDK 版本 |
+| `catalog` | OpenAPI catalog 来源（embedded/cache/runtime）、版本、service/method 数；`--offline` 时不拉 overlay |
 
 `user_identity` 与 `bot_identity` 分别回答"用户态命令能否直接跑"和"应用态（`--as bot` / 无人值守）能否直接跑"：
 `bot_identity` 通过说明 app_id/app_secret 正确且应用已启用；`user_identity` 为 `warn`（未登录）或 `fail`（过期）时，按提示 `feishu-cli auth login`。

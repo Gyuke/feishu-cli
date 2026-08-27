@@ -17,8 +17,9 @@ feishu-cli api <METHOD> <path> [flags]
   `open.feishu.cn`、`open.larksuite.com`、`open.larkoffice.com` 三类 OpenAPI host；租户文档 URL
   （如 `https://tenant.feishu.cn/...`）不会被正确规范化，必须手动提取 `/open-apis/...`。
 
-URL 中可以内嵌 query，但不要携带 `#fragment`：当前实现先解析 query，再处理 fragment，标准的
-`?foo=bar#hash` 会把 `#hash` 留在参数值中。
+URL 中可以内嵌 query。fragment（`#` 之后）会被丢弃且**不会**进入 query。完整 URL 只接受官方
+OpenAPI host：`open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`；租户文档 URL
+必须先抽出 `/open-apis/...` 短 path。
 
 ### Flags
 
@@ -35,6 +36,9 @@ URL 中可以内嵌 query，但不要携带 `#fragment`：当前实现先解析 
 | `--timeout <seconds>` | 单次请求超时，默认 30 秒 |
 | `--format json\|pretty\|table\|ndjson\|csv` | 响应渲染格式（指定后走内置渲染，覆盖默认 pretty；仅适用于 JSON 响应） |
 | `--jq '<expr>'` | 用内置 gojq 过滤响应（无需外部 jq；仅适用于 JSON 响应） |
+| `--page-all` | 自动翻页：仅识别 `data.has_more` + `page_token`/`next_page_token`；空/重复 cursor 停止并报错 |
+| `--page-limit` | 配合 `--page-all` 的最大页数（默认 10，`0`=不限） |
+| `--page-delay` | 翻页间隔毫秒（默认 200） |
 
 > **`-o` 二进制下载 与 `--format/--jq` 互斥**：默认 / `--raw` / 纯 `-o` 走原样写文件路径（binary-safe）；一旦带上 `--format` 或 `--jq`，响应会先按 JSON 解析再渲染，二进制响应会 decode 失败并报错「响应不是合法 JSON，无法用 --format/--jq 渲染（去掉这两个 flag 可用 --raw 原样输出）」。下载媒体/文件时只用 `-o`，不要叠加 `--format/--jq`。
 
@@ -74,6 +78,9 @@ feishu-cli api GET /open-apis/calendar/v4/calendars --as user
 
 # 表格输出
 feishu-cli api GET /open-apis/wiki/v2/spaces --jq '.data.items' --format table
+
+# 安全翻页（空/重复 cursor 会停止并报错）
+feishu-cli api GET /open-apis/im/v1/chats --page-all --page-limit 10 --as user
 ```
 
 ---

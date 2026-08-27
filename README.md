@@ -1013,8 +1013,10 @@ feishu-cli event stop --all
 
 # OpenAPI schema / 健康检查 / 多配置
 feishu-cli schema list --service im
+feishu-cli schema status --format json
 feishu-cli schema im.messages.delete --format json
 feishu-cli doctor --json
+feishu-cli doctor --only catalog --offline --json
 feishu-cli profile list --json
 feishu-cli profile current --json
 feishu-cli profile migrate
@@ -1026,6 +1028,7 @@ feishu-cli profile use -
 # 通用 OpenAPI 透传（v1.29+）⭐ 覆盖 2500+ 未封装端点
 feishu-cli api GET /open-apis/authen/v1/user_info --as user
 feishu-cli api GET /open-apis/im/v1/chats --params '{"page_size":10}' --as user
+feishu-cli api GET /open-apis/im/v1/chats --page-all --page-limit 10 --as user
 feishu-cli api POST /open-apis/im/v1/messages --params '{"receive_id_type":"email"}' \
   --data '{"receive_id":"u@example.com","msg_type":"text","content":"{\"text\":\"hi\"}"}' --as bot
 feishu-cli api DELETE /open-apis/im/v1/messages/om_xxx --as bot --dry-run    # 预览
