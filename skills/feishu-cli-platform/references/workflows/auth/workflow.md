@@ -123,9 +123,10 @@ feishu-cli profile current
 | `bot` | Tenant Access Token（`t-g10...`，2h 有效；Accounts OAuth v3 `client_credentials`） | App 身份，调 tenant scope API |
 | `auto`（默认） | 优先 user，没有再回退 bot | 兼容兜底 |
 
-`--as bot` 与 `--user-access-token` 不能同时出现（会报错，而不是静默覆盖）。
+`--as bot` 与 `--user-access-token` 不能同时出现（会报错，而不是静默覆盖）。`--bind-legacy-app` 也不可与 `--as bot` 或 `--user-access-token` 同时使用。
+`auth token --as auto` 仅在从未配置 User Token 时回退 Bot；token.json 损坏、App mismatch、未绑定或刷新失败都会非 0 退出。
 
-旧版 `token.json` 没有 `app_id` 时：access 仍有效可以继续用；一旦需要刷新，必须先：
+旧版 `token.json` 没有 `app_id` 时，**即使 access 仍有效也不能用**，必须先：
 
 ```bash
 feishu-cli auth token --bind-legacy-app --as user

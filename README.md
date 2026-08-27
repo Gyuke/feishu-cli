@@ -683,7 +683,7 @@ feishu-cli auth logout
 **Token 管理**：
 - Token 保存在 `~/.feishu-cli/token.json`（0600，原子写入），Access Token 有效期约 2 小时
 - Access Token 过期时自动使用 Refresh Token 刷新（跨进程锁，避免两个进程消耗同一 refresh token）
-- 新登录写入的 `token.json` 带 `app_id` 绑定；与当前 App 不一致时拒绝使用。升级前遗留的无绑定文件：access 未过期仍可用，刷新前需 `feishu-cli auth token --bind-legacy-app`（不更换 token）或重新 `auth login`
+- 新登录写入的 `token.json` 带 `app_id` 绑定；与当前 App 不一致或旧文件未绑定时，**一律拒绝使用**（即使 access 仍有效）。迁移：`feishu-cli auth token --bind-legacy-app --as user`（不更换 token；不可与 `--as bot` / `--user-access-token` 同时用）或重新 `auth login`
 - `auth token --as bot` 走官方 Accounts OAuth v3 `client_credentials`；不可与 `--user-access-token` 同时使用
 - `offline_access` 由 CLI 自动追加，无需手动声明
 - Token 优先级：`--user-access-token` 参数 > `FEISHU_USER_ACCESS_TOKEN` 环境变量 > `token.json` > `config.yaml`

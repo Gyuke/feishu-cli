@@ -9,10 +9,11 @@
 ### 修复 — 认证 / Token / SDK 传输安全
 
 - SDK client 用 SHA-256 指纹检测 App Secret 变化：同长度轮换也会重建 client，进程内不保存 secret 明文。
-- `auth token --as bot` 改为官方 Accounts OAuth v3 `POST /oauth/v3/token`（`grant_type=client_credentials`，form 编码），带超时、响应体大小限制、HTTP 与业务错误校验。
+- `auth token --as bot` 改为官方 Accounts OAuth v3 `POST /oauth/v3/token`（`grant_type=client_credentials`，form 编码），带超时、响应体大小限制、HTTP 与业务错误校验。官方 Open API 上 SDK 的旧 `tenant_access_token/internal` 换票由传输桥接到同一 v3 端点，业务请求不再把 App Secret 发到旧 Open host；`doctor` 的 bot_identity 复用 v3 fetcher。
+- `auth token --as auto` 仅在「自然未配置 User Token」时回退 Bot；App mismatch / 文件损坏 / 刷新失败 fail closed。
 - 显式 `--user-access-token` 与 `--as bot` 同时出现时直接报错，不再静默忽略其中一方。
 - `token.json` 改为 0600 临时文件 + fsync + rename 原子写入；刷新在跨进程文件锁下执行 reload → check → refresh → commit，写失败保留旧文件。
-- `token.json` 增加 `app_id` 绑定：与当前选中 App 不一致时 fail closed。旧版无绑定文件在 **access 仍有效时可读**；**刷新前**必须显式 `feishu-cli auth token --bind-legacy-app`（或重新 `auth login`），不会静默换主体。
+- `token.json` 增加 `app_id` 绑定：与当前选中 App 不一致，或旧文件未绑定，一律 fail closed（即使 access 仍有效）。显式迁移：`feishu-cli auth token --bind-legacy-app --as user`（不可与 `--as bot` / `--user-access-token` 同时使用）或重新 `auth login`。
 - `base_url` 默认只允许官方 HTTPS（`open.feishu.cn` / `open.larksuite.com`）；loopback HTTP 仅用于本机开发/测试。自定义远端 host、非 loopback HTTP、HTTPS→HTTP 或带 body 的跨源重定向必须分别设置 `FEISHU_ALLOW_CUSTOM_BASE_URL` / `FEISHU_ALLOW_INSECURE_HTTP` / `FEISHU_ALLOW_CROSS_ORIGIN_REDIRECT`（或对应配置项）。跨源重定向会剥离 `Authorization`，避免 App Secret 被外送。
 
 ## [v1.36.0] - 2026-07-22
