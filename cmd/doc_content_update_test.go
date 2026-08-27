@@ -787,3 +787,72 @@ func TestValidateNoColumnWidthDirective(t *testing.T) {
 		}
 	}
 }
+
+// TestFindByTitle_RejectsAmbiguousNestedMatch 验证模糊标题选择器同时命中父子标题时
+// fail-closed，而不是静默替换父范围。
+//
+// 回归防护：不带级别的 "部署" 会同时命中 H1「部署总览」[0,6) 与 H2「部署检查」[2,4)。
+// doReplaceAll 逆序 block_replace 时外层范围吞掉内层与其后未匹配的兄弟章节——
+// 实测 7 块文档一次替换后只剩 2 块，无关的「其它章节」被销毁，
+// 而命令报告"成功替换 2 处"且 exit 0。
+func TestFindByTitle_RejectsAmbiguousNestedMatch(t *testing.T) {
+	children := []*larkdocx.Block{
+		makeHeadingBlock("h1", 1, "部署总览"),
+		makeTextBlock("t1", "总览正文。"),
+		makeHeadingBlock("h2a", 2, "部署检查"),
+		makeTextBlock("t2", "检查正文。"),
+		makeHeadingBlock("h2b", 2, "其它章节"),
+		makeTextBlock("t3", "其它正文。"),
+	}
+
+	// 模糊选择器命中 H1 + H2（父含子）→ 必须报错
+	_, err := findByTitle(children, "部署")
+	if err == nil {
+		t.Fatal("模糊选择器同时命中父子标题时应 fail-closed")
+	}
+	for _, want := range []string{"歧义", "部署"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误信息应包含 %q，得到: %v", want, err)
+		}
+	}
+
+	// 带级别的精确选择器只命中一个范围 → 正常返回
+	got, err := findByTitle(children, "## 部署检查")
+	if err != nil {
+		t.Fatalf("精确选择器应正常工作: %v", err)
+	}
+	if len(got) != 1 || got[0].startIndex != 2 || got[0].endIndex != 4 {
+		t.Errorf("精确选择器范围 = %+v，want [{2 4}]", got)
+	}
+
+	// 同级多处匹配（互不包含）→ 正常返回多个范围
+	siblings := []*larkdocx.Block{
+		makeHeadingBlock("sa", 2, "部署 A"),
+		makeTextBlock("ta", "a"),
+		makeHeadingBlock("sb", 2, "部署 B"),
+		makeTextBlock("tb", "b"),
+	}
+	got, err = findByTitle(siblings, "## 部署")
+	if err != nil {
+		t.Fatalf("同级多处匹配应正常工作: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("同级匹配应返回 2 个范围，得到 %+v", got)
+	}
+}
+
+// TestFirstNestedPair 单测嵌套检测本身
+func TestFirstNestedPair(t *testing.T) {
+	if _, _, ok := firstNestedPair([]blockRange{{0, 6}, {2, 4}}); !ok {
+		t.Error("父含子应判为嵌套")
+	}
+	if _, _, ok := firstNestedPair([]blockRange{{0, 2}, {2, 4}}); ok {
+		t.Error("相邻不重叠不应判为嵌套")
+	}
+	if _, _, ok := firstNestedPair([]blockRange{{0, 4}}); ok {
+		t.Error("单个范围不应判为嵌套")
+	}
+	if _, _, ok := firstNestedPair(nil); ok {
+		t.Error("空输入不应判为嵌套")
+	}
+}

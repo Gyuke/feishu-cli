@@ -261,6 +261,19 @@ func (b *Bus) ReleaseConsumer(pid int, eventKey string) (lastForKey bool, err er
 	return lastForKey, err
 }
 
+// CountEventKeyConsumers 返回当前该 eventKey 下存活 consumer 的数量。
+// 用于 last-consumer 注销后的复检：注销是锁外的网络调用，期间可能有新 consumer
+// 完成注册并订阅，必须复检以免把它的订阅误抹掉。
+func (b *Bus) CountEventKeyConsumers(eventKey string) (int, error) {
+	n := 0
+	err := b.withLock(func(state *BusState) error {
+		pruneDeadConsumers(state)
+		n = countEventKey(state, eventKey)
+		return b.save(state)
+	})
+	return n, err
+}
+
 // Unregister 从 bus.json 移除指定 (PID, EventKey)；幂等。
 func (b *Bus) Unregister(pid int, eventKey string) error {
 	return b.withLock(func(state *BusState) error {

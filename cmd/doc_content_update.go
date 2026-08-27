@@ -343,7 +343,38 @@ func findByTitle(children []*larkdocx.Block, title string) ([]blockRange, error)
 	if len(ranges) == 0 {
 		return nil, fmt.Errorf("未找到匹配的标题: %q", title)
 	}
+	if outer, inner, ok := firstNestedPair(ranges); ok {
+		return nil, fmt.Errorf("标题选择器 %q 同时命中父标题与其子标题（父范围块 %d-%d 完整包含子范围块 %d-%d），"+
+			"替换父范围会连带删除其中未匹配的兄弟章节，意图存在歧义；"+
+			"请用带级别的选择器精确定位（如 \"# %s\" 或 \"## %s\"），或改用 --mode replace_range 逐个处理",
+			title, outer.startIndex, outer.endIndex, inner.startIndex, inner.endIndex, text, text)
+	}
 	return ranges, nil
+}
+
+// firstNestedPair 找出第一对「一个范围完整包含另一个」的组合。
+//
+// 不带级别的选择器（如 "部署"）会同时命中 H1「部署总览」与其子节 H2「部署检查」，
+// 而 H1 的范围按定义包含 H2 及其后所有兄弟子节。doReplaceAll 逆序逐个
+// block_replace 时，外层范围会连带吞掉内层与外层之间**未匹配**的章节：
+// 实测 7 块文档一次 `replace_all --selection-by-title 部署` 后只剩 2 块，
+// 明确无关的「其它章节」被销毁，而命令报告"成功替换 2 处"且 exit 0。
+//
+// 这种命中下用户意图本身是歧义的（要替父节还是子节？），任何静默选择都可能毁数据，
+// 因此 fail-closed 要求用户用带级别的选择器或 replace_range 明确表达。
+func firstNestedPair(ranges []blockRange) (outer, inner blockRange, ok bool) {
+	for i, a := range ranges {
+		for j, b := range ranges {
+			if i == j {
+				continue
+			}
+			if a.startIndex <= b.startIndex && a.endIndex >= b.endIndex &&
+				(a.startIndex != b.startIndex || a.endIndex != b.endIndex) {
+				return a, b, true
+			}
+		}
+	}
+	return blockRange{}, blockRange{}, false
 }
 
 // parseTitleSelector 解析标题选择器，如 "## 标题" → (2, "标题")

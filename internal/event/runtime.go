@@ -136,8 +136,18 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 					fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 从 bus.json 移除失败: %v\n", relErr)
 					return
 				}
-				if def.UnsubscribePath != "" && last && weSubscribed {
-					r.unregisterSubscriptions(def)
+				if def.UnsubscribePath == "" || !last || !weSubscribed {
+					return
+				}
+				r.unregisterSubscriptions(def)
+				// 注销是锁外的网络调用，期间可能有新 consumer 完成注册并订阅。
+				// 复检：若此刻已有存活 consumer，说明我们刚把它的服务端订阅抹掉了，
+				// 必须补回去——否则它仍在运行且已 ready，却静默收不到任何事件。
+				if n, cntErr := r.opts.Bus.CountEventKeyConsumers(r.opts.EventKey); cntErr == nil && n > 0 {
+					fmt.Fprintf(r.opts.ErrOut, "[event] 注销后检测到 %d 个新 consumer，正在恢复服务端订阅\n", n)
+					if subErr := r.registerSubscriptions(context.Background(), def); subErr != nil {
+						fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 恢复订阅失败，存活 consumer 可能收不到事件: %v\n", subErr)
+					}
 				}
 			}()
 		}
