@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/cobra"
@@ -287,12 +288,6 @@ var vcBotEventsCmd = &cobra.Command{
 			pageSize = 20
 		}
 
-		// dry-run 与实调共用同一条身份解析：非法 --as / --as user 缺 Token 在预览阶段就失败。
-		token, identity, err := resolveVCBotEventsIdentity(cmd)
-		if err != nil {
-			return err
-		}
-
 		req := client.VCBotEventsReq{
 			MeetingID:    meetingID,
 			StartTimeSec: startSec,
@@ -302,6 +297,10 @@ var vcBotEventsCmd = &cobra.Command{
 		}
 
 		if dryRun {
+			identity, err := peekVCBotEventsIdentity(cmd)
+			if err != nil {
+				return err
+			}
 			// 预览只放真实请求会带上的参数（与 client 端 set 逻辑一致：空值不发）。
 			query := map[string]any{
 				"meeting_id": req.MeetingID,
@@ -322,6 +321,11 @@ var vcBotEventsCmd = &cobra.Command{
 				"query":  query,
 				"as":     identity,
 			})
+		}
+
+		token, _, err := resolveVCBotEventsIdentity(cmd)
+		if err != nil {
+			return err
 		}
 
 		data, err := client.VCBotMeetingEvents(req, token)
@@ -384,13 +388,39 @@ func init() {
 	mustMarkFlagRequired(vcBotEventsCmd, "meeting-id")
 }
 
-// resolveVCBotEventsIdentity 解析 meeting-events 身份。fail-closed：非法 --as 与
-// --as user 缺 Token 直接报错；--as bot 即使环境里有 User Token 也走 Bot。
+// peekVCBotEventsIdentity 供 dry-run：只静态探测身份，不刷新、不联网、不写 token。
+func peekVCBotEventsIdentity(cmd *cobra.Command) (identity string, err error) {
+	as, _ := cmd.Flags().GetString("as")
+	switch strings.ToLower(strings.TrimSpace(as)) {
+	case "", "auto":
+		flagToken, _ := cmd.Flags().GetString("user-access-token")
+		if auth.HasUserTokenConfigured(flagToken, config.Get().UserAccessToken) {
+			return "user", nil
+		}
+		return "bot", nil
+	case "bot", "tenant", "app":
+		return "bot", nil
+	case "user":
+		flagToken, _ := cmd.Flags().GetString("user-access-token")
+		if !auth.HasUserTokenConfigured(flagToken, config.Get().UserAccessToken) {
+			return "", fmt.Errorf("--as user 需要 User Access Token（请先 `feishu-cli auth login`，或改用 --as bot）")
+		}
+		return "user", nil
+	default:
+		return "", fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", as)
+	}
+}
+
+// resolveVCBotEventsIdentity 解析 meeting-events 实调身份。
+// --as auto 走 resolveAutoUserToken：未配置 User 才回落 Bot；刷新/读 token 失败 fail-closed，禁止静默切 Bot。
 func resolveVCBotEventsIdentity(cmd *cobra.Command) (token string, identity string, err error) {
 	as, _ := cmd.Flags().GetString("as")
 	switch strings.ToLower(strings.TrimSpace(as)) {
 	case "", "auto":
-		token = resolveOptionalUserTokenWithFallback(cmd)
+		token, err = resolveAutoUserToken(cmd)
+		if err != nil {
+			return "", "", err
+		}
 		if token != "" {
 			return token, "user", nil
 		}

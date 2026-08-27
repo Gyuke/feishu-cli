@@ -1,15 +1,19 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -303,19 +307,23 @@ func TestVCBotEventsInvalidAsFailClosed(t *testing.T) {
 }
 
 func TestVCBotEventsDryRunIncludesResolvedIdentity(t *testing.T) {
-	isolateMsgTokenTestEnv(t)
+	isolateVCBotEventsIdentityEnv(t)
 	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
 	cmd := newVCBotEventsTestCmd()
 	mustSetFlag(t, cmd, "meeting-id", "m1")
 	mustSetFlag(t, cmd, "as", "bot")
 	mustSetFlag(t, cmd, "dry-run", "true")
-	if err := vcBotEventsCmd.RunE(cmd, nil); err != nil {
+	out, err := captureVCBotStdout(t, func() error { return vcBotEventsCmd.RunE(cmd, nil) })
+	if err != nil {
 		t.Fatalf("dry-run --as bot 不应请求网络: %v", err)
+	}
+	if !strings.Contains(out, `"as": "bot"`) {
+		t.Fatalf("dry-run --as bot 预览应含 as=bot，实际:\n%s", out)
 	}
 }
 
 func TestResolveVCBotEventsIdentity(t *testing.T) {
-	isolateMsgTokenTestEnv(t)
+	isolateVCBotEventsIdentityEnv(t)
 	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
 	cmd := newVCBotEventsTestCmd()
 	mustSetFlag(t, cmd, "as", "bot")
@@ -328,6 +336,276 @@ func TestResolveVCBotEventsIdentity(t *testing.T) {
 	if err != nil || token != "u-env-token" || identity != "user" {
 		t.Fatalf("--as auto 已登录应为 user, token=%q identity=%q err=%v", token, identity, err)
 	}
+	mustSetFlag(t, cmd, "as", "user")
+	token, identity, err = resolveVCBotEventsIdentity(cmd)
+	if err != nil || token != "u-env-token" || identity != "user" {
+		t.Fatalf("--as user 有 Token 应为 user, token=%q identity=%q err=%v", token, identity, err)
+	}
+	mustSetFlag(t, cmd, "as", "nobody")
+	if _, _, err = resolveVCBotEventsIdentity(cmd); err == nil || !strings.Contains(err.Error(), "bot|user|auto") {
+		t.Fatalf("非法 --as 应失败，实际: %v", err)
+	}
+}
+
+func isolateVCBotEventsIdentityEnv(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FEISHU_PROFILE", "")
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+	t.Setenv("FEISHU_BASE_URL", "")
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+	cfgFile := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("app_id: cli_test\napp_secret: secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	return home
+}
+
+func writeExpiredUserTokenFile(t *testing.T, home, refreshToken string) string {
+	t.Helper()
+	tokenDir := filepath.Join(home, ".feishu-cli")
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(tokenDir, "token.json")
+	store := auth.TokenStore{
+		AccessToken:      "expired-access-token",
+		RefreshToken:     refreshToken,
+		TokenType:        "Bearer",
+		ExpiresAt:        time.Now().Add(-1 * time.Hour),
+		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		Scope:            "vc:meeting.meetingevent:read",
+	}
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return tokenFile
+}
+
+func captureVCBotStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if readErr != nil {
+		t.Fatalf("读取 stdout 失败: %v", readErr)
+	}
+	return string(out), runErr
+}
+
+func TestVCBotEventsAutoFailClosedOnRefreshError(t *testing.T) {
+	home := isolateVCBotEventsIdentityEnv(t)
+	writeExpiredUserTokenFile(t, home, "broken-refresh-token")
+
+	var bizRequests int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/open-apis/authen/v2/oauth/token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"refresh token is invalid"}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/open-apis/vc/v1/bots/events") {
+			atomic.AddInt32(&bizRequests, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"success","data":{"meeting_event_list":[],"has_more":false,"page_token":""}}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			t.Errorf("User refresh 失败时不应请求 tenant access token 尝试切 Bot")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-fake","expire":7200}`)
+			return
+		}
+	})
+	defer cleanup()
+
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "auto")
+	err := vcBotEventsCmd.RunE(cmd, nil)
+	if err == nil {
+		t.Fatal("--as auto 刷新失败应 fail-closed，实际返回 nil")
+	}
+	if !strings.Contains(err.Error(), "刷新") && !strings.Contains(err.Error(), "refresh") && !strings.Contains(err.Error(), "token") {
+		t.Fatalf("错误应说明刷新/token 失败，实际: %v", err)
+	}
+	if hits := atomic.LoadInt32(&bizRequests); hits != 0 {
+		t.Fatalf("刷新失败不得以 Bot 身份打业务端点，实际 %d 次", hits)
+	}
+}
+
+func TestVCBotEventsAutoFailClosedOnTokenFileError(t *testing.T) {
+	home := isolateVCBotEventsIdentityEnv(t)
+	tokenDir := filepath.Join(home, ".feishu-cli")
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "token.json"), []byte("{not-json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var bizRequests int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/open-apis/vc/v1/bots/events") ||
+			strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			atomic.AddInt32(&bizRequests, 1)
+		}
+		http.Error(w, "token 文件损坏时不应发请求", http.StatusInternalServerError)
+	})
+	defer cleanup()
+
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "auto")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err == nil {
+		t.Fatal("token.json 损坏时应 fail-closed，不得静默切 Bot")
+	}
+	if hits := atomic.LoadInt32(&bizRequests); hits != 0 {
+		t.Fatalf("token 文件错误不得发业务/Bot 请求，实际 %d 次", hits)
+	}
+}
+
+func TestVCBotEventsAutoNoUserFallsBackToBot(t *testing.T) {
+	isolateVCBotEventsIdentityEnv(t)
+
+	var capturedAuth string
+	cleanup := stubCmdFeishuServer(t, tenantTokenHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open-apis/vc/v1/bots/events" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"success","data":{"meeting_event_list":[],"has_more":false,"page_token":""}}`)
+	}))
+	defer cleanup()
+
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "auto")
+	token, identity, err := resolveVCBotEventsIdentity(cmd)
+	if err != nil || token != "" || identity != "bot" {
+		t.Fatalf("未配置 User 时 auto 应回落 Bot, token=%q identity=%q err=%v", token, identity, err)
+	}
+	if err := vcBotEventsCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("未登录 --as auto 应走 Bot 成功，实际: %v", err)
+	}
+	if capturedAuth != testTenantAuth {
+		t.Fatalf("Authorization = %q, want %q", capturedAuth, testTenantAuth)
+	}
+}
+
+func TestVCBotEventsAsUserUsesUserToken(t *testing.T) {
+	isolateVCBotEventsIdentityEnv(t)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
+
+	var capturedAuth string
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			http.Error(w, "不应请求 tenant_access_token", http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Path != "/open-apis/vc/v1/bots/events" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"success","data":{"meeting_event_list":[],"has_more":false,"page_token":""}}`)
+	})
+	defer cleanup()
+
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "user")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("meeting-events --as user 返回错误: %v", err)
+	}
+	if capturedAuth != "Bearer u-env-token" {
+		t.Fatalf("Authorization = %q, want Bearer u-env-token", capturedAuth)
+	}
+}
+
+func TestVCBotEventsDryRunStaticIdentityNoNetworkNoTokenWrite(t *testing.T) {
+	home := isolateVCBotEventsIdentityEnv(t)
+	tokenFile := writeExpiredUserTokenFile(t, home, "valid-refresh-token")
+	hashBefore, err := fileSHA256(tokenFile)
+	if err != nil {
+		t.Fatalf("计算 token.json hash 失败: %v", err)
+	}
+
+	var serverHits int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&serverHits, 1)
+		http.Error(w, "dry-run 不应调用任何服务端接口", http.StatusInternalServerError)
+	})
+	defer cleanup()
+
+	cases := []struct {
+		as   string
+		want string
+	}{
+		{"auto", "user"},
+		{"user", "user"},
+		{"bot", "bot"},
+	}
+	for _, tc := range cases {
+		t.Run("as="+tc.as, func(t *testing.T) {
+			cmd := newVCBotEventsTestCmd()
+			mustSetFlag(t, cmd, "meeting-id", "m1")
+			mustSetFlag(t, cmd, "as", tc.as)
+			mustSetFlag(t, cmd, "dry-run", "true")
+			out, runErr := captureVCBotStdout(t, func() error { return vcBotEventsCmd.RunE(cmd, nil) })
+			if runErr != nil {
+				t.Fatalf("dry-run --as %s 失败: %v", tc.as, runErr)
+			}
+			want := fmt.Sprintf(`"as": %q`, tc.want)
+			if !strings.Contains(out, want) {
+				t.Fatalf("dry-run --as %s 预览应含 %s，实际:\n%s", tc.as, want, out)
+			}
+			if hits := atomic.LoadInt32(&serverHits); hits != 0 {
+				t.Errorf("--dry-run 不应触发网络请求，得到 %d 次", hits)
+			}
+			hashAfter, err := fileSHA256(tokenFile)
+			if err != nil {
+				t.Fatalf("计算 token.json hash 失败: %v", err)
+			}
+			if hashBefore != hashAfter {
+				t.Errorf("token.json 被改写: before=%s after=%s", hashBefore, hashAfter)
+			}
+		})
+	}
+
+	t.Run("as=invalid", func(t *testing.T) {
+		cmd := newVCBotEventsTestCmd()
+		mustSetFlag(t, cmd, "meeting-id", "m1")
+		mustSetFlag(t, cmd, "as", "nobody")
+		mustSetFlag(t, cmd, "dry-run", "true")
+		if err := vcBotEventsCmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "bot|user|auto") {
+			t.Fatalf("非法 --as 在 dry-run 也应失败，实际: %v", err)
+		}
+		if hits := atomic.LoadInt32(&serverHits); hits != 0 {
+			t.Errorf("非法 --as dry-run 不应联网，得到 %d 次", hits)
+		}
+	})
 }
 
 // TestVCBotEventsDefaultsToUserToken 验证 --as auto（默认）在已登录时走 User Token。

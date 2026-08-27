@@ -107,10 +107,10 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		return "error", err
 	}
 
-	// 先 Claim bus，再按 first-consumer 注册服务端订阅。审批无 UnsubscribePath（持久关系）；
-	// VC 等会话级订阅由 last-consumer 在退出时注销，避免两个同 key consume 时先退出者打断后者。
+	// 每个 consumer 都幂等 POST subscribe（服务端幂等），ready 前必须订阅成功。
+	// 不能「first 才 subscribe」：first 的 subscribe 阻塞/失败时 second 会跳过并提前 ready。
+	// 注销仍只由 last-consumer 执行，避免先退出者打断同伴。
 	pid := r.consumerPID()
-	firstForKey := true
 	weSubscribed := false
 	if r.opts.Bus != nil {
 		entry := ConsumerEntry{
@@ -122,21 +122,19 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 			MaxEvents:  r.opts.MaxEvents,
 			TimeoutSec: int(r.opts.Timeout.Seconds()),
 		}
-		first, claimErr := r.opts.Bus.ClaimConsumer(entry)
-		if claimErr != nil {
+		if _, claimErr := r.opts.Bus.ClaimConsumer(entry); claimErr != nil {
 			if def.SubscribePath != "" || def.UnsubscribePath != "" {
 				return "error", fmt.Errorf("注册到 bus.json 失败: %w", claimErr)
 			}
 			fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 注册到 bus.json 失败: %v\n", claimErr)
 		} else {
-			firstForKey = first
 			defer func() {
 				last, relErr := r.opts.Bus.ReleaseConsumer(pid, r.opts.EventKey)
 				if relErr != nil {
 					fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 从 bus.json 移除失败: %v\n", relErr)
 					return
 				}
-				if def.UnsubscribePath != "" && last && (weSubscribed || !firstForKey) {
+				if def.UnsubscribePath != "" && last && weSubscribed {
 					r.unregisterSubscriptions(def)
 				}
 			}()
@@ -150,14 +148,10 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 	}
 
 	if def.SubscribePath != "" {
-		if firstForKey {
-			if err := r.registerSubscriptions(ctx, def); err != nil {
-				return "error", err
-			}
-			weSubscribed = true
-		} else {
-			fmt.Fprintf(r.opts.ErrOut, "[event] 已有同 EventKey 的 consumer，跳过服务端订阅注册: %s\n", def.Key)
+		if err := r.registerSubscriptions(ctx, def); err != nil {
+			return "error", err
 		}
+		weSubscribed = true
 	}
 
 	// 准备输出目录

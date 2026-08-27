@@ -52,7 +52,7 @@ event consume <EventKey>
 | **stdout** | 每条事件一行 JSON（NDJSON），适合 jq / 脚本管道 |
 | **stderr** | 诊断日志；pre-consume 与 WebSocket 握手都完成后一行 `[event] ready event_key=<key>` |
 
-> **AI Agent 推荐**：父进程把 consume 跑后台（`run_in_background=true`），先阻塞 stderr 等到 `[event] ready` 那一行再开始读 stdout。ready 发出前握手未完成，不要靠额外 sleep 猜。VC EventKey 还需 User Token 做服务端订阅；同 key 多个 consume 时只有第一个注册订阅、最后一个人退出才注销。
+> **AI Agent 推荐**：父进程把 consume 跑后台（`run_in_background=true`），先阻塞 stderr 等到 `[event] ready` 那一行再开始读 stdout。ready 发出前握手未完成，不要靠额外 sleep 猜。VC EventKey 还需 User Token 做服务端订阅；同 key 每个 consume 都幂等 POST subscribe，确认订阅成功后才发 ready，最后一个人退出才注销。
 
 ### 退出码与退出 reason
 
@@ -215,7 +215,7 @@ feishu-cli event consume approval.instance.status_changed_v4
 
 ### VC 事件的服务端订阅（User pre-consume，last-consumer 注销）
 
-`vc.meeting.participant_meeting_*` / `vc.note.generated_v1` / `vc.recording.*` 必须用 User Token 在 consume 启动前 POST 对应 `.../subscription`（body `{"event_type": "<key>"}`）。同一 EventKey 多个 consume 并存时，只有第一个注册服务端订阅；最后一个人退出才 POST `.../unsubscription`（5s timeout），避免先退出者打断后者。
+`vc.meeting.participant_meeting_*` / `vc.note.generated_v1` / `vc.recording.*` 必须用 User Token 在 consume 启动前 POST 对应 `.../subscription`（body `{"event_type": "<key>"}`）。同一 EventKey 多个 consume 并存时，**每个 consumer 都幂等 POST subscribe**，自己的订阅成功后才发 ready（避免 first 的 subscribe 阻塞/失败时 second 跳过订阅并提前 ready）。最后一个人退出才 POST `.../unsubscription`（5s timeout），避免先退出者打断后者。
 
 ## 权限与开放平台配置
 

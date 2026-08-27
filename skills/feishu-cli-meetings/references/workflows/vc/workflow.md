@@ -125,7 +125,7 @@ feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --start 2026-0
 | `meeting-events` | `GET /open-apis/vc/v1/bots/events` | `--as bot\|user\|auto`（默认 auto） | `--meeting-id`（必填）、`--as`、`--start`、`--end`、`--page-size`（20-100，默认 20）、`--page-token`、`--dry-run`、`-o json` |
 
 > 三个子命令均支持 `--dry-run`（只打印将要发送的请求参数/请求体，不实际调用）与 `-o json`（输出原始响应）。
-> 身份细节（`meeting-join/leave` 默认 Bot/Tenant 且仅认 `--user-access-token` flag、`meeting-events` 必须显式 `--as` 且 dry-run/实调同一套解析）见「注意事项」的「Token 身份分三档」。
+> 身份细节（`meeting-join/leave` 默认 Bot/Tenant 且仅认 `--user-access-token` flag、`meeting-events` 必须显式 `--as`；实调 auto fail-closed，dry-run 静态探测不联网）见「注意事项」的「Token 身份分三档」。
 > `meeting-events` 的 `--page-size` 取值范围是 **20-100**（与 `vc search` 的 1-30 不同）；传 0 或不传走默认 20，传 1-19 会被拒。
 
 ### 7. 聚合会议详情 → note_id + minute_token（vc detail）
@@ -313,7 +313,7 @@ feishu-cli minutes download --minute-tokens <minute_token> --output ./media
 - **Token 身份分三档**：
   - **必须 User Token**：`vc search/notes/recording/detail`、`vc note detail/transcript`、`minutes get/search/apply-permission/download`。未登录会中文报错并引导 `feishu-cli auth login`。
   - **默认 Bot/Tenant**：`vc bot meeting-join` / `vc bot meeting-leave`，仅需 App ID + App Secret，无需登录；只有显式传 `--user-access-token` flag 才切到 User 身份（用 `resolveFlagUserToken`，**不读** `FEISHU_USER_ACCESS_TOKEN` 环境变量）。
-  - **显式 `--as`**：`vc bot meeting-events` 支持 `--as bot|user|auto`（默认 auto）。`--as user` 缺 Token 失败；`--as bot` 即使已登录也走 Bot；`--as auto` 已登录用 User、未登录用 Bot。dry-run 与实调走同一解析，预览 JSON 含 `"as"`。身份必须与 `meeting_id` 来源一致。
+  - **显式 `--as`**：`vc bot meeting-events` 支持 `--as bot|user|auto`（默认 auto）。`--as user` 缺 Token 失败；`--as bot` 即使已登录也走 Bot；`--as auto` 已登录用 User、未登录用 Bot，刷新或 token 文件错误 fail-closed（禁止静默切 Bot）。dry-run 只做静态身份探测（不刷新、不联网、不写 token），预览 JSON 含 `"as"`。身份必须与 `meeting_id` 来源一致。
 - **时间格式**：`vc search --start/--end` 接受 `YYYY-MM-DD` / `YYYY-MM-DD HH:MM:SS` / RFC3339，均按本地时区解析；纯日期的 `--end` 自动对齐到 23:59:59。
 - **批量上限**：所有 CSV 类入参统一 50 条上限，超出直接报错。
 - **minute_token 格式**：字母数字组合，长度≥5；命令会前置校验。

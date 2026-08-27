@@ -156,7 +156,7 @@ func startVCConsumer(t *testing.T, srvURL string, bus *Bus, pid int, ready *byte
 	return cancel, errCh
 }
 
-func TestSequentialConsumersSubscribeOnceUnsubscribeOnLast(t *testing.T) {
+func TestSequentialConsumersSubscribeEachUnsubscribeOnLast(t *testing.T) {
 	stubConsumerAlive(t)
 	bus := setupBus(t)
 
@@ -181,8 +181,8 @@ func TestSequentialConsumersSubscribeOnceUnsubscribeOnLast(t *testing.T) {
 	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
 	unsubCount := countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
 	mu.Unlock()
-	if subCount != 1 {
-		t.Fatalf("顺序第二个 consumer 不应再 subscribe，subscribe=%d paths=%v", subCount, paths)
+	if subCount != 2 {
+		t.Fatalf("每个 consumer 都必须幂等 subscribe，subscribe=%d paths=%v", subCount, paths)
 	}
 	if unsubCount != 0 {
 		t.Fatalf("两人还在跑时不得 unsubscribe，unsub=%d", unsubCount)
@@ -212,12 +212,12 @@ func TestSequentialConsumersSubscribeOnceUnsubscribeOnLast(t *testing.T) {
 	subCount = countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
 	unsubCount = countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
 	mu.Unlock()
-	if subCount != 1 || unsubCount != 1 {
-		t.Fatalf("最后一人退出才 unsubscribe，subscribe=%d unsub=%d paths=%v", subCount, unsubCount, paths)
+	if subCount != 2 || unsubCount != 1 {
+		t.Fatalf("每人 subscribe、最后一人退出才 unsubscribe，subscribe=%d unsub=%d paths=%v", subCount, unsubCount, paths)
 	}
 }
 
-func TestConcurrentConsumersSubscribeOnceUnsubscribeOnce(t *testing.T) {
+func TestConcurrentConsumersSubscribeEachUnsubscribeOnce(t *testing.T) {
 	stubConsumerAlive(t)
 	bus := setupBus(t)
 
@@ -271,8 +271,8 @@ func TestConcurrentConsumersSubscribeOnceUnsubscribeOnce(t *testing.T) {
 	mu.Lock()
 	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
 	mu.Unlock()
-	if subCount != 1 {
-		t.Fatalf("并发启动也只能 subscribe 一次，subscribe=%d paths=%v", subCount, paths)
+	if subCount != 2 {
+		t.Fatalf("并发启动时每个 consumer 都必须 subscribe，subscribe=%d paths=%v", subCount, paths)
 	}
 
 	cancels[0]()
@@ -290,6 +290,227 @@ func TestConcurrentConsumersSubscribeOnceUnsubscribeOnce(t *testing.T) {
 	if unsubCount != 1 {
 		t.Fatalf("并发退出只能 unsubscribe 一次，unsub=%d paths=%v", unsubCount, paths)
 	}
+}
+
+func assertNeverReady(t *testing.T, ready *bytes.Buffer, when string) {
+	t.Helper()
+	if strings.Contains(ready.String(), "[event] ready") {
+		t.Fatalf("%s 时不得 ready，实际: %q", when, ready.String())
+	}
+}
+
+func TestFirstSubscribeBlocksSecondStillSubscribesBeforeReady(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+
+	firstSubscribeStarted := make(chan struct{})
+	blockFirst, unblockFirst := context.WithCancel(context.Background())
+	t.Cleanup(unblockFirst)
+
+	var mu sync.Mutex
+	var paths []string
+	var subSeq int
+	var firstStartWS, secondStartWS bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		isSub := r.URL.Path == "/open-apis/vc/v1/meetings/subscription"
+		n := 0
+		if isSub {
+			subSeq++
+			n = subSeq
+		}
+		mu.Unlock()
+		if isSub && n == 1 {
+			close(firstSubscribeStarted)
+			<-blockFirst.Done()
+		}
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	var ready1, ready2 bytes.Buffer
+	cancel1, done1 := startVCConsumerWithStartWS(t, srv.URL, bus, 701, &ready1, func() {
+		mu.Lock()
+		firstStartWS = true
+		mu.Unlock()
+	})
+	defer cancel1()
+	select {
+	case <-firstSubscribeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subscribe 未发出")
+	}
+	assertNeverReady(t, &ready1, "first subscribe 仍阻塞")
+	mu.Lock()
+	if firstStartWS {
+		mu.Unlock()
+		t.Fatal("subscribe 未完成前不得启动 WebSocket")
+	}
+	mu.Unlock()
+
+	cancel2, done2 := startVCConsumerWithStartWS(t, srv.URL, bus, 702, &ready2, func() {
+		mu.Lock()
+		secondStartWS = true
+		mu.Unlock()
+	})
+	defer cancel2()
+	waitRuntimeReady(t, &ready2, "vc.meeting.participant_meeting_started_v1")
+	assertNeverReady(t, &ready1, "second 已 ready 但 first subscribe 仍阻塞")
+	mu.Lock()
+	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
+	gotSecondWS := secondStartWS
+	gotFirstWS := firstStartWS
+	mu.Unlock()
+	if subCount < 2 {
+		t.Fatalf("second 必须自己 subscribe，不得因 first 阻塞而跳过，subscribe=%d paths=%v", subCount, paths)
+	}
+	if !gotSecondWS {
+		t.Fatal("second 自己 subscribe 成功后才应握手")
+	}
+	if gotFirstWS {
+		t.Fatal("first subscribe 仍阻塞时不得握手")
+	}
+
+	unblockFirst()
+	waitRuntimeReady(t, &ready1, "vc.meeting.participant_meeting_started_v1")
+
+	cancel1()
+	cancel2()
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer1 未退出")
+	}
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer2 未退出")
+	}
+	mu.Lock()
+	unsubCount := countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if unsubCount != 1 {
+		t.Fatalf("last-consumer 才 unsubscribe，unsub=%d paths=%v", unsubCount, paths)
+	}
+}
+
+func TestFirstSubscribeFailsSecondStillSubscribesBeforeReady(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+
+	firstSubscribeStarted := make(chan struct{})
+	failGate, releaseFail := context.WithCancel(context.Background())
+	t.Cleanup(releaseFail)
+
+	var mu sync.Mutex
+	var paths []string
+	var subSeq int
+	var firstStartWS bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		isSub := r.URL.Path == "/open-apis/vc/v1/meetings/subscription"
+		n := 0
+		if isSub {
+			subSeq++
+			n = subSeq
+		}
+		mu.Unlock()
+		if isSub && n == 1 {
+			close(firstSubscribeStarted)
+			<-failGate.Done()
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"code":1,"msg":"subscribe fail"}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	var ready1, ready2 bytes.Buffer
+	_, done1 := startVCConsumerWithStartWS(t, srv.URL, bus, 801, &ready1, func() {
+		mu.Lock()
+		firstStartWS = true
+		mu.Unlock()
+	})
+	select {
+	case <-firstSubscribeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subscribe 未发出")
+	}
+
+	cancel2, done2 := startVCConsumerWithStartWS(t, srv.URL, bus, 802, &ready2, nil)
+	defer cancel2()
+	waitRuntimeReady(t, &ready2, "vc.meeting.participant_meeting_started_v1")
+	assertNeverReady(t, &ready1, "first subscribe 尚未失败返回、second 已 ready")
+
+	releaseFail()
+	select {
+	case err := <-done1:
+		if err == nil {
+			t.Fatal("first subscribe 失败应返回 error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subscribe 失败后 Run 未返回")
+	}
+	assertNeverReady(t, &ready1, "first subscribe 失败")
+	mu.Lock()
+	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
+	gotFirstWS := firstStartWS
+	mu.Unlock()
+	if subCount < 2 {
+		t.Fatalf("second 必须自己 subscribe，不得因 first 失败而跳过，subscribe=%d paths=%v", subCount, paths)
+	}
+	if gotFirstWS {
+		t.Fatal("first subscribe 失败后不得启动 WebSocket / ready")
+	}
+	if !strings.Contains(ready2.String(), "[event] ready event_key=vc.meeting.participant_meeting_started_v1") {
+		t.Fatalf("second 自己 subscribe 成功后应 ready，实际: %q", ready2.String())
+	}
+
+	cancel2()
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer2 未退出")
+	}
+	mu.Lock()
+	unsubCount := countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if unsubCount != 1 {
+		t.Fatalf("成功订阅的 last-consumer 才 unsubscribe，unsub=%d paths=%v", unsubCount, paths)
+	}
+}
+
+func startVCConsumerWithStartWS(t *testing.T, srvURL string, bus *Bus, pid int, ready *bytes.Buffer, onStartWS func()) (context.CancelFunc, <-chan error) {
+	t.Helper()
+	r := NewRuntime(ConsumeOptions{
+		AppID:           "cli_test",
+		AppSecret:       "secret",
+		EventKey:        "vc.meeting.participant_meeting_started_v1",
+		BaseURL:         srvURL,
+		UserAccessToken: "u-test",
+		ErrOut:          io.Discard,
+		ReadyOut:        ready,
+		Bus:             bus,
+		ConsumerPID:     pid,
+		StartWS: func(ctx context.Context, onHandshake func()) error {
+			if onStartWS != nil {
+				onStartWS()
+			}
+			onHandshake()
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := r.Run(ctx)
+		errCh <- err
+	}()
+	return cancel, errCh
 }
 
 func countPath(paths []string, want string) int {
