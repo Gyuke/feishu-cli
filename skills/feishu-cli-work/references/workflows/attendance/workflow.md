@@ -90,8 +90,10 @@ feishu-cli attendance user-task query \
     --start 20260501 --end 20260518 \
     --need-overtime -o json
 
-# 查本人 5 月日度统计
+# 查本人 5 月日度统计（user-stats query 的 --user-ids 必填，不支持留空自查；
+# 「留空查本人」是 user-task query 的能力，见上文）
 feishu-cli attendance user-stats query \
+    --employee-type employee_no --user-ids <本人工号> \
     --stats-type daily --start 2026-05-01 --end 2026-05-31
 
 # 查指定工号月度统计 + JSON
