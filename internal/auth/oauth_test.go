@@ -216,3 +216,18 @@ func TestRefreshAccessToken_PropagatesHTTPError(t *testing.T) {
 		t.Fatal("期望 HTTP 500 触发失败")
 	}
 }
+
+func TestRefreshAccessToken_RedactsSecretsInHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","access_token":"u-should-hide","refresh_token":"r-should-hide"}`))
+	}))
+	t.Cleanup(srv.Close)
+	_, err := RefreshAccessToken(&TokenStore{RefreshToken: "x"}, "aid", "sec", srv.URL)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "u-should-hide") || strings.Contains(err.Error(), "r-should-hide") {
+		t.Fatalf("错误预览泄漏 token: %v", err)
+	}
+}

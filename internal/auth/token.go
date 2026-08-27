@@ -56,23 +56,34 @@ func LoadToken() (*TokenStore, error) {
 }
 
 // LoadTokenFrom 从指定路径加载 token.json，文件不存在返回 nil, nil。
+// 若主文件缺失，尝试恢复同目录的 .bak（Windows 原子替换中断时可能只留下备份）。
 func LoadTokenFrom(path string) (*TokenStore, error) {
 	if path == "" {
 		return nil, nil
 	}
+	t, err := loadTokenFile(path)
+	if err == nil {
+		return t, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+	bak, bakErr := loadTokenFile(path + ".bak")
+	if bakErr == nil && bak != nil {
+		return bak, nil
+	}
+	return nil, nil
+}
+
+func loadTokenFile(path string) (*TokenStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("读取 token 文件失败: %w", err)
+		return nil, err
 	}
-
 	var t TokenStore
 	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("解析 token 文件失败: %w", err)
 	}
-
 	return &t, nil
 }
 
@@ -139,17 +150,19 @@ func (t *TokenStore) CheckAppMismatch(appID string) error {
 	return nil
 }
 
-// RequireBoundApp 刷新或消耗 refresh_token 前必须已绑定且匹配当前应用。
+// RequireBoundApp 使用 token.json 前必须已绑定且匹配当前应用。
+// 未绑定不得因 access_token 仍有效而静默沿用。
 func (t *TokenStore) RequireBoundApp(appID string) error {
 	if t == nil {
 		return fmt.Errorf("缺少 token")
 	}
-	if appID == "" {
-		return fmt.Errorf("缺少当前 app_id，无法校验 token 绑定")
-	}
 	if t.AppID == "" {
-		return fmt.Errorf("%w：拒绝用当前应用 %s 静默接管该 User Token。请先执行 `feishu-cli auth token --bind-legacy-app` 绑定到当前应用，或重新 `feishu-cli auth login`",
-			ErrUnboundToken, appID)
+		cur := appID
+		if cur == "" {
+			cur = "当前应用"
+		}
+		return fmt.Errorf("%w：拒绝用 %s 静默接管该 User Token。请先执行 `feishu-cli auth token --bind-legacy-app` 绑定到当前应用，或重新 `feishu-cli auth login`",
+			ErrUnboundToken, cur)
 	}
 	return t.CheckAppMismatch(appID)
 }

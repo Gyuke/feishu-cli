@@ -289,6 +289,7 @@ func writeFakeUserToken(t *testing.T, accessToken string) {
 		ExpiresAt:        time.Now().Add(time.Hour),
 		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
 		Scope:            "im:message:readonly",
+		AppID:            "test_app_id",
 	}); err != nil {
 		t.Fatalf("写假 token.json 失败: %v", err)
 	}

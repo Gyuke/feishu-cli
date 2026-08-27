@@ -55,7 +55,11 @@ func HasUserTokenConfigured(flagValue, configValue string) bool {
 func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL string) (string, error) {
 	// 1. 命令行参数
 	if flagValue != "" {
-		if refreshed, ok := refreshIfStaleLocalToken(flagValue, appID, appSecret, baseURL); ok {
+		refreshed, err := refreshIfStaleLocalToken(flagValue, appID, appSecret, baseURL)
+		if err != nil {
+			return "", err
+		}
+		if refreshed != "" {
 			return refreshed, nil
 		}
 		return flagValue, nil
@@ -63,20 +67,24 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 
 	// 2. 环境变量
 	if envToken := os.Getenv("FEISHU_USER_ACCESS_TOKEN"); envToken != "" {
-		if refreshed, ok := refreshIfStaleLocalToken(envToken, appID, appSecret, baseURL); ok {
+		refreshed, err := refreshIfStaleLocalToken(envToken, appID, appSecret, baseURL)
+		if err != nil {
+			return "", err
+		}
+		if refreshed != "" {
 			return refreshed, nil
 		}
 		return envToken, nil
 	}
 
-	// 3. token.json
+	// 3. token.json：任何使用都必须已绑定当前 App，未绑定不得因 access 仍有效而静默沿用。
 	var tokenFileExpired bool
 	token, err := LoadToken()
 	if err != nil {
 		return "", fmt.Errorf("读取本地 token 文件失败: %w", err)
 	}
 	if token != nil {
-		if err := token.CheckAppMismatch(appID); err != nil {
+		if err := token.RequireBoundApp(appID); err != nil {
 			return "", err
 		}
 		if token.IsAccessTokenValid() {
@@ -85,9 +93,6 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 
 		// access_token 过期，尝试刷新（跨进程锁：reload → check → refresh → commit）
 		if token.IsRefreshTokenValid() {
-			if err := token.RequireBoundApp(appID); err != nil {
-				return "", err
-			}
 			logf("[自动刷新] Access Token 已过期，正在刷新...")
 			newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
 			if refreshErr != nil {
@@ -113,45 +118,39 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 	return "", ErrNoUserTokenConfigured
 }
 
-// refreshIfStaleLocalToken 当显式传入的 token 等于 token.json 里已过期的 access_token 时，
-// 触发自动刷新并写回 token.json。这是为了支持「脚本从 token.json 读 access_token 后传 flag」
-// 这种常见用法——既保留显式传入 token 的契约，又解决了过期场景。
+// refreshIfStaleLocalToken 当显式传入的 token 等于 token.json 的 access_token 时，
+// 按本地绑定/刷新规则处理。仅当显式值与本地 access_token 不同（外部无关 token）时，
+// 才绕过本地绑定，让调用方原样使用显式值。
 //
 // 返回值:
-//   - (newToken, true): 已成功刷新并保存
-//   - ("", false): 不匹配本地 token，或不需要刷新，调用方应使用原始 token
-func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (string, bool) {
+//   - (newToken, nil): 已成功刷新，调用方使用新 token
+//   - ("", nil): 与本地无关或本地仍有效，调用方使用原始显式 token
+//   - ("", err): 显式值匹配 token.json，但绑定校验或刷新失败，必须 fail closed
+func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (string, error) {
 	local, err := LoadToken()
-	if err != nil || local == nil {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("读取本地 token 文件失败: %w", err)
 	}
-	// 必须确认 explicitToken 就是 token.json 的 access_token，否则不能擅自 refresh
-	if local.AccessToken != explicitToken {
-		return "", false
-	}
-	if err := local.CheckAppMismatch(appID); err != nil {
-		return "", false
-	}
-	// 已经有效，不需要刷新
-	if local.IsAccessTokenValid() {
-		return "", false
-	}
-	// access 过期但 refresh 失效，无能为力
-	if !local.IsRefreshTokenValid() {
-		return "", false
+	if local == nil || local.AccessToken != explicitToken {
+		return "", nil
 	}
 	if err := local.RequireBoundApp(appID); err != nil {
-		logf("[自动刷新] %v", err)
-		return "", false
+		return "", err
+	}
+	if local.IsAccessTokenValid() {
+		return "", nil
+	}
+	if !local.IsRefreshTokenValid() {
+		return "", fmt.Errorf("显式传入的 access_token 匹配本地 token.json，但 refresh_token 已失效。请重新 `feishu-cli auth login`")
 	}
 	logf("[自动刷新] 显式传入的 access_token 已过期且匹配本地 token.json，正在刷新...")
 	newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
 	if refreshErr != nil {
 		logf("[自动刷新] 刷新失败: %v", refreshErr)
-		return "", false
+		return "", fmt.Errorf("自动刷新 Access Token 失败: %w", refreshErr)
 	}
 	logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
-	return newToken.AccessToken, true
+	return newToken.AccessToken, nil
 }
 
 // ForceRefreshLocalToken 强制刷新 token.json 中的 access_token，

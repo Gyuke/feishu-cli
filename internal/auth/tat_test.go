@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -25,6 +26,10 @@ func TestDefaultTATEndpoint_LoopbackOverrideOnly(t *testing.T) {
 	t.Setenv("FEISHU_TAT_ENDPOINT", "https://evil.example/oauth/v3/token")
 	if got := DefaultTATEndpoint(""); got != "https://accounts.feishu.cn/oauth/v3/token" {
 		t.Fatalf("远端覆盖必须忽略，得到 %s", got)
+	}
+	t.Setenv("FEISHU_TAT_ENDPOINT", "ftp://127.0.0.1:21/oauth/v3/token")
+	if got := DefaultTATEndpoint(""); got != "https://accounts.feishu.cn/oauth/v3/token" {
+		t.Fatalf("非 http(s) loopback 覆盖必须忽略，得到 %s", got)
 	}
 	t.Setenv("FEISHU_TAT_ENDPOINT", "http://127.0.0.1:9/oauth/v3/token")
 	if got := DefaultTATEndpoint(""); got != "http://127.0.0.1:9/oauth/v3/token" {
@@ -128,4 +133,41 @@ func TestFetchTenantAccessToken_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("超时应返回错误")
 	}
+}
+
+func TestFetchTenantAccessToken_RedactsSecretsAndRejectsOversize(t *testing.T) {
+	t.Run("redact", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"access_token=u-leak client_secret=s-leak"}`))
+		}))
+		t.Cleanup(srv.Close)
+		orig := TATEndpointFunc
+		TATEndpointFunc = func(string) string { return srv.URL }
+		t.Cleanup(func() { TATEndpointFunc = orig })
+		_, err := FetchTenantAccessToken("cli_app", "secret_x", "https://open.feishu.cn")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if strings.Contains(err.Error(), "u-leak") || strings.Contains(err.Error(), "s-leak") {
+			t.Fatalf("错误预览泄漏 secret: %v", err)
+		}
+		if !strings.Contains(err.Error(), "[REDACTED]") {
+			t.Fatalf("应脱敏: %v", err)
+		}
+	})
+	t.Run("oversize", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(bytes.Repeat([]byte("x"), maxAuthResponseBytes+1))
+		}))
+		t.Cleanup(srv.Close)
+		orig := TATEndpointFunc
+		TATEndpointFunc = func(string) string { return srv.URL }
+		t.Cleanup(func() { TATEndpointFunc = orig })
+		_, err := FetchTenantAccessToken("cli_app", "secret_x", "https://open.feishu.cn")
+		if err == nil || !strings.Contains(err.Error(), "1MiB") {
+			t.Fatalf("超过 1MiB 必须报错: %v", err)
+		}
+	})
 }

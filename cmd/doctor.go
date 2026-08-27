@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -284,52 +282,12 @@ func checkBotIdentity(ctx context.Context) checkResult {
 		return checkFail("bot_identity", "应用身份未就绪：缺少 app_id/app_secret",
 			"配置 FEISHU_APP_ID/FEISHU_APP_SECRET 或运行 feishu-cli config init")
 	}
-	code, msg, err := probeTenantAccessToken(ctx, cfg.BaseURL, cfg.AppID, cfg.AppSecret)
+	_, err := auth.FetchTenantAccessTokenContext(ctx, cfg.AppID, cfg.AppSecret, cfg.BaseURL)
 	if err != nil {
 		return checkFail("bot_identity", "应用身份换取 tenant_access_token 失败: "+err.Error(),
-			"检查网络 / 代理设置后重试")
-	}
-	if code != 0 {
-		return checkFail("bot_identity", fmt.Sprintf("应用身份未就绪：换取 tenant_access_token 失败（code=%d, msg=%s）", code, msg),
-			"核对 app_id/app_secret 是否正确、应用是否已启用")
+			"核对 app_id/app_secret 是否正确、应用是否已启用，并检查网络 / 代理")
 	}
 	return checkPass("bot_identity", "应用身份就绪：App ID/Secret 可换取 tenant_access_token")
-}
-
-// probeTenantAccessToken 调用 tenant_access_token/internal 端点验证应用凭证。
-// 返回业务 code（0 表示成功）、msg 与传输层 error；不返回 token 本体，避免泄露。
-func probeTenantAccessToken(ctx context.Context, baseURL, appID, appSecret string) (int, string, error) {
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
-	}
-	endpoint := strings.TrimRight(baseURL, "/") + "/open-apis/auth/v3/tenant_access_token/internal"
-	payload, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return 0, "", err
-	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return 0, "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var parsed struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return 0, "", fmt.Errorf("解析响应失败: %w", err)
-	}
-	return parsed.Code, parsed.Msg, nil
 }
 
 func checkEndpoints(ctx context.Context, only map[string]bool) []checkResult {

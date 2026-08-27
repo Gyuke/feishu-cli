@@ -46,7 +46,14 @@ var authTokenCmd = &cobra.Command{
 			return fmt.Errorf("不能同时使用 --as bot 与 --user-access-token：前者要求 App/Tenant 身份，后者是显式 User Token。请去掉其中一个")
 		}
 
-		if bindLegacy, _ := cmd.Flags().GetBool("bind-legacy-app"); bindLegacy {
+		bindLegacy, _ := cmd.Flags().GetBool("bind-legacy-app")
+		if bindLegacy {
+			if as == "bot" || as == "tenant" || as == "app" {
+				return fmt.Errorf("不能同时使用 --bind-legacy-app 与 --as bot：绑定的是 User Token 文件，与 App 身份无关")
+			}
+			if flagUserToken != "" {
+				return fmt.Errorf("不能同时使用 --bind-legacy-app 与 --user-access-token：绑定只针对本地 token.json")
+			}
 			cfg := config.Get()
 			if err := auth.BindLegacyToken(cfg.AppID); err != nil {
 				return err
@@ -72,8 +79,12 @@ var authTokenCmd = &cobra.Command{
 			return nil
 
 		case "", "auto":
-			if t := resolveOptionalUserTokenWithFallback(cmd); t != "" {
-				fmt.Println(t)
+			userToken, err := resolveAutoUserToken(cmd)
+			if err != nil {
+				return err
+			}
+			if userToken != "" {
+				fmt.Println(userToken)
 				return nil
 			}
 			token, err := fetchTenantAccessToken()

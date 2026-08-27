@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -65,13 +66,13 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBytes))
+	respBody, err := readLimitedAuthBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token 端点返回 HTTP %d: %s", resp.StatusCode, truncateAuthBody(respBody))
+		return nil, fmt.Errorf("token 端点返回 HTTP %d: %s", resp.StatusCode, authBodyPreview(respBody))
 	}
 
 	var tokenResp tokenResponse
@@ -118,6 +119,23 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 	return newStore, nil
 }
 
+var authSecretPreview = regexp.MustCompile(`(?i)(access_token|refresh_token|client_secret|app_secret|tenant_access_token|user_access_token)(["'\s:=]+)([^&"' \t\r\n,}]+)`)
+
+func readLimitedAuthBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, int64(maxAuthResponseBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxAuthResponseBytes {
+		return nil, fmt.Errorf("响应体超过 1MiB")
+	}
+	return body, nil
+}
+
+func redactAuthPreview(s string) string {
+	return authSecretPreview.ReplaceAllString(s, `${1}${2}[REDACTED]`)
+}
+
 func truncateAuthBody(body []byte) string {
 	const max = 200
 	s := strings.TrimSpace(string(body))
@@ -125,4 +143,8 @@ func truncateAuthBody(body []byte) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func authBodyPreview(body []byte) string {
+	return truncateAuthBody([]byte(redactAuthPreview(string(body))))
 }

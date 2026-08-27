@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,21 +40,40 @@ func TestResolveUserAccessToken_TokenFile(t *testing.T) {
 	tokenPathFunc = func() (string, error) { return tokenFile, nil }
 	defer func() { tokenPathFunc = originalTokenPath }()
 
-	// Save a valid token
 	store := &TokenStore{
 		AccessToken: "file-token",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
+		AppID:       "cli_file",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)
 	}
 
-	token, err := ResolveUserAccessToken("", "", "", "", "")
+	token, err := ResolveUserAccessToken("", "", "cli_file", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if token != "file-token" {
 		t.Errorf("got %q, want %q", token, "file-token")
+	}
+}
+
+func TestResolveUserAccessToken_UnboundStoredTokenFailsClosed(t *testing.T) {
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+
+	if err := SaveToken(&TokenStore{
+		AccessToken: "u-legacy",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolveUserAccessToken("", "", "cli_now", "sec", "")
+	if err == nil || !errors.Is(err, ErrUnboundToken) {
+		t.Fatalf("未绑定 token.json 即使 access 有效也必须 fail closed: %v", err)
 	}
 }
 
@@ -96,24 +116,25 @@ func TestResolveUserAccessToken_Priority(t *testing.T) {
 	store := &TokenStore{
 		AccessToken: "file-token",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
+		AppID:       "cli_file",
 	}
 	_ = SaveToken(store)
 
 	// Flag wins
-	token, _ := ResolveUserAccessToken("flag-token", "config-token", "", "", "")
+	token, _ := ResolveUserAccessToken("flag-token", "config-token", "cli_file", "", "")
 	if token != "flag-token" {
 		t.Errorf("got %q, want flag-token", token)
 	}
 
 	// Env wins when no flag
-	token, _ = ResolveUserAccessToken("", "config-token", "", "", "")
+	token, _ = ResolveUserAccessToken("", "config-token", "cli_file", "", "")
 	if token != "env-token" {
 		t.Errorf("got %q, want env-token", token)
 	}
 
 	// File wins when no flag/env
 	os.Unsetenv("FEISHU_USER_ACCESS_TOKEN")
-	token, _ = ResolveUserAccessToken("", "config-token", "", "", "")
+	token, _ = ResolveUserAccessToken("", "config-token", "cli_file", "", "")
 	if token != "file-token" {
 		t.Errorf("got %q, want file-token", token)
 	}
@@ -139,9 +160,13 @@ func TestRefreshIfStaleLocalToken_NotMatchingLocal(t *testing.T) {
 		t.Fatalf("SaveToken error: %v", err)
 	}
 
-	got, ok := refreshIfStaleLocalToken("some-other-token", "aid", "sec", "https://example.com")
-	if ok {
-		t.Errorf("expected ok=false when explicit token doesn't match local, got ok=true (got=%q)", got)
+	if _, err := refreshIfStaleLocalToken("local-access", "aid", "sec", "https://example.com"); err == nil || !errors.Is(err, ErrUnboundToken) {
+		t.Fatalf("匹配本地未绑定 token 必须报错: %v", err)
+	}
+
+	got, err := refreshIfStaleLocalToken("some-other-token", "aid", "sec", "https://example.com")
+	if err != nil {
+		t.Fatalf("无关显式 token 应绕过本地绑定: %v", err)
 	}
 	if got != "" {
 		t.Errorf("expected empty string when not matching, got %q", got)
@@ -160,14 +185,15 @@ func TestRefreshIfStaleLocalToken_AccessStillValid(t *testing.T) {
 		RefreshToken:     "rt",
 		ExpiresAt:        time.Now().Add(1 * time.Hour),
 		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		AppID:            "aid",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)
 	}
 
-	got, ok := refreshIfStaleLocalToken("still-valid", "aid", "sec", "https://example.com")
-	if ok {
-		t.Errorf("expected ok=false when access token still valid, got ok=true (got=%q)", got)
+	got, err := refreshIfStaleLocalToken("still-valid", "aid", "sec", "https://example.com")
+	if err != nil {
+		t.Fatalf("仍有效的已绑定 token 不应报错: %v", err)
 	}
 	if got != "" {
 		t.Errorf("expected empty string when not refreshing, got %q", got)
@@ -186,14 +212,18 @@ func TestRefreshIfStaleLocalToken_RefreshExpired(t *testing.T) {
 		RefreshToken:     "rt",
 		ExpiresAt:        time.Now().Add(-1 * time.Hour),
 		RefreshExpiresAt: time.Now().Add(-1 * time.Hour),
+		AppID:            "aid",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)
 	}
 
-	got, ok := refreshIfStaleLocalToken("stale", "aid", "sec", "https://example.com")
-	if ok {
-		t.Errorf("expected ok=false when both tokens expired, got ok=true (got=%q)", got)
+	got, err := refreshIfStaleLocalToken("stale", "aid", "sec", "https://example.com")
+	if err == nil {
+		t.Fatal("匹配本地且 refresh 失效时必须报错，不能沿用过期显式 token")
+	}
+	if got != "" {
+		t.Errorf("失败时不应返回 token, got %q", got)
 	}
 }
 
@@ -223,9 +253,9 @@ func TestRefreshIfStaleLocalToken_Success(t *testing.T) {
 		"scope":         "old:scope",
 	})
 
-	got, ok := refreshIfStaleLocalToken("stale-access", "aid", "sec", srv.URL)
-	if !ok {
-		t.Fatalf("expected ok=true on successful refresh, got ok=false")
+	got, err := refreshIfStaleLocalToken("stale-access", "aid", "sec", srv.URL)
+	if err != nil {
+		t.Fatalf("expected successful refresh, got %v", err)
 	}
 	if got != "fresh-access" {
 		t.Errorf("expected fresh-access, got %q", got)
@@ -263,9 +293,9 @@ func TestRefreshIfStaleLocalToken_RefreshEndpointFails(t *testing.T) {
 		"error": "server_error",
 	})
 
-	got, ok := refreshIfStaleLocalToken("stale-access", "aid", "sec", srv.URL)
-	if ok {
-		t.Errorf("expected ok=false on refresh failure, got ok=true (got=%q)", got)
+	got, err := refreshIfStaleLocalToken("stale-access", "aid", "sec", srv.URL)
+	if err == nil {
+		t.Fatal("刷新 5xx 必须传播错误，不能沿用过期显式 token")
 	}
 	if got != "" {
 		t.Errorf("expected empty string on failure, got %q", got)

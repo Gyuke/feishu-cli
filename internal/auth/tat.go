@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,7 +32,9 @@ var TATEndpointFunc = DefaultTATEndpoint
 // FEISHU_TAT_ENDPOINT 仅在 loopback 时生效，供本地 mock；远端覆盖会被忽略以免外送凭证。
 func DefaultTATEndpoint(baseURL string) string {
 	if ep := strings.TrimSpace(os.Getenv("FEISHU_TAT_ENDPOINT")); ep != "" {
-		if u, err := url.Parse(ep); err == nil && config.IsLoopbackHost(u.Hostname()) {
+		if u, err := url.Parse(ep); err == nil &&
+			(strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")) &&
+			config.IsLoopbackHost(u.Hostname()) {
 			return ep
 		}
 	}
@@ -80,7 +81,7 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBytes))
+	body, err := readLimitedAuthBody(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("读取 tenant token 响应失败: %w", err)
 	}
@@ -88,7 +89,7 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 	var result tatResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		if resp.StatusCode >= 400 {
-			return "", fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", resp.StatusCode, truncateAuthBody(body))
+			return "", fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", resp.StatusCode, authBodyPreview(body))
 		}
 		return "", fmt.Errorf("解析 tenant token 响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
@@ -103,7 +104,7 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 			desc = result.Msg
 		}
 		return "", fmt.Errorf("tenant token 端点暂时失败（HTTP %d, code=%d, error=%s）: %s",
-			resp.StatusCode, result.Code, result.Error, desc)
+			resp.StatusCode, result.Code, result.Error, redactAuthPreview(desc))
 	}
 
 	return "", classifyTATFailure(resp.StatusCode, body)
@@ -123,6 +124,7 @@ func classifyTATFailure(status int, body []byte) error {
 			if desc == "" {
 				desc = "未知错误"
 			}
+			desc = redactAuthPreview(desc)
 			if result.Error != "" {
 				return fmt.Errorf("获取 tenant_access_token 失败: HTTP %d error=%s code=%d %s",
 					status, result.Error, result.Code, desc)
@@ -133,5 +135,10 @@ func classifyTATFailure(status int, body []byte) error {
 			return fmt.Errorf("tenant token 响应缺少 access_token（HTTP %d）", status)
 		}
 	}
-	return fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", status, truncateAuthBody(body))
+	return fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", status, authBodyPreview(body))
+}
+
+// FetchTenantAccessTokenContext 与 FetchTenantAccessToken 相同，但使用调用方 context。
+func FetchTenantAccessTokenContext(ctx context.Context, appID, appSecret, baseURL string) (string, error) {
+	return fetchTenantAccessToken(ctx, config.NewHTTPClient(tatHTTPTimeout), appID, appSecret, baseURL)
 }

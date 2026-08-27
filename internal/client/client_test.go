@@ -2,10 +2,17 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/viper"
 )
@@ -19,6 +26,7 @@ func resetClient() {
 	lastCfg.secretFingerprint = ""
 	lastCfg.baseURL = ""
 	lastCfg.debug = false
+	sdkTestTransport = nil
 }
 
 // resetConfig 重置配置状态
@@ -402,5 +410,105 @@ app_secret: "test_app_secret"
 	// 等待所有 goroutine 完成
 	for i := 0; i < 10; i++ {
 		<-done
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestGetClient_HonorsLongerCallerContext(t *testing.T) {
+	resetClient()
+	resetConfig()
+	delay := 80 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t-slow","expire":7200}`))
+	}))
+	t.Cleanup(srv.Close)
+	setupTestConfig(t, srv.URL)
+
+	cli, err := GetClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = cli.GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
+		AppID: "test_app", AppSecret: "test_secret",
+	})
+	if err != nil {
+		t.Fatalf("调用方 context 长于任何注入墙钟超时应成功: %v", err)
+	}
+	if time.Since(start) < delay {
+		t.Fatal("请求未等到服务端延迟，测试无效")
+	}
+}
+
+func TestGetClient_OfficialBotNeverSendsSecretToLegacyOpenHost(t *testing.T) {
+	resetClient()
+	resetConfig()
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+
+	var v3Hits int
+	var v3Body string
+	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v3Hits++
+		b, _ := io.ReadAll(r.Body)
+		v3Body = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"access_token":"t-from-v3","expires_in":7200}`))
+	}))
+	t.Cleanup(accounts.Close)
+	orig := auth.TATEndpointFunc
+	auth.TATEndpointFunc = func(string) string { return accounts.URL }
+	t.Cleanup(func() { auth.TATEndpointFunc = orig })
+
+	var leakedLegacy int
+	sdkTestTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		if strings.Contains(req.URL.Path, "tenant_access_token/internal") || strings.Contains(string(body), "app_secret") {
+			leakedLegacy++
+			return nil, fmt.Errorf("legacy internal token 外送: %s", req.URL)
+		}
+		return nil, fmt.Errorf("unexpected %s", req.URL)
+	})
+	t.Cleanup(func() { sdkTestTransport = nil })
+
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.yaml"
+	if err := os.WriteFile(configFile, []byte("app_id: \"cli_prod\"\napp_secret: \"secret_prod\"\nbase_url: \"https://open.feishu.cn\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(configFile); err != nil {
+		t.Fatal(err)
+	}
+
+	cli, err := GetClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := cli.GetTenantAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltTenantAccessTokenReq{
+		AppID: "cli_prod", AppSecret: "secret_prod",
+	})
+	if err != nil {
+		t.Fatalf("官方模式下应由 v3 桥接换票: %v", err)
+	}
+	if resp == nil || resp.TenantAccessToken != "t-from-v3" {
+		t.Fatalf("未翻译为 SDK 兼容响应: %+v", resp)
+	}
+	if leakedLegacy != 0 {
+		t.Fatal("App Secret 被发到旧 Open host")
+	}
+	if v3Hits != 1 {
+		t.Fatalf("v3 hits=%d", v3Hits)
+	}
+	if !strings.Contains(v3Body, "grant_type=client_credentials") {
+		t.Fatalf("v3 body=%s", v3Body)
 	}
 }

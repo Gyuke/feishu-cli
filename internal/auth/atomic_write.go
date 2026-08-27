@@ -44,8 +44,23 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("提交 token 文件失败: %w", err)
 	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("fsync 目录失败: %w", err)
+	}
 	success = true
 	return nil
+}
+
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 func replaceFile(tmp, dest string) error {

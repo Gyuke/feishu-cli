@@ -234,6 +234,9 @@ func CheckRequestURL(u *url.URL) error {
 	if u.Scheme == "" || u.Hostname() == "" {
 		return fmt.Errorf("请求 URL 必须包含 scheme 与 host")
 	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("请求 URL 只支持 http/https，得到 %s", u.Scheme)
+	}
 	if err := rejectRemoteHTTP(u); err != nil {
 		return err
 	}
@@ -243,9 +246,6 @@ func CheckRequestURL(u *url.URL) error {
 	}
 	if (IsOfficialOpenHost(host) || IsOfficialAccountsHost(host)) && officialHTTPSPortOK(u) {
 		return nil
-	}
-	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
-		return fmt.Errorf("请求 URL 只支持 http/https，得到 %s", u.Scheme)
 	}
 	return rejectCustomHost(u, false)
 }

@@ -58,8 +58,7 @@ func GetClient() (*lark.Client, error) {
 	if configChanged {
 		opts := []lark.ClientOptionFunc{
 			lark.WithOpenBaseUrl(cfg.BaseURL),
-			lark.WithReqTimeout(defaultTimeout),
-			lark.WithHttpClient(config.NewHTTPClient(defaultTimeout)),
+			lark.WithHttpClient(wrapSDKHTTPClient()),
 		}
 		if cfg.Debug {
 			opts = append(opts, lark.WithLogLevel(larkcore.LogLevelDebug))

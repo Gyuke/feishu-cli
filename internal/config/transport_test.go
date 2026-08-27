@@ -25,6 +25,7 @@ func TestCheckBaseURL_OfficialAndLoopback(t *testing.T) {
 		{"loopback http", "http://127.0.0.1:1234", false},
 		{"localhost http", "http://localhost:8080", false},
 		{"ipv6 loopback", "http://[::1]:9", false},
+		{"loopback ftp", "ftp://127.0.0.1:21", true},
 		{"custom https", "https://private.example.com", true},
 		{"remote http", "http://evil.example.com", true},
 		{"official http downgrade", "http://open.feishu.cn", true},
@@ -134,6 +135,14 @@ func TestRedirectPolicy_RejectsCrossOriginPOSTBody(t *testing.T) {
 	}
 	if req.Header.Get("Authorization") != "" {
 		t.Fatal("拒绝前仍应剥离 Authorization")
+	}
+}
+
+func TestCheckRequestURL_RequiresHTTPSchemeEvenOnLoopback(t *testing.T) {
+	resetConfig()
+	u, _ := url.Parse("ftp://127.0.0.1/secret")
+	if err := CheckRequestURL(u); err == nil {
+		t.Fatal("loopback 也必须先校验 http/https scheme")
 	}
 }
 

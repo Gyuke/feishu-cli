@@ -13,9 +13,17 @@ const defaultRedirectLimit = 10
 // NewHTTPClient 返回带超时与重定向凭证策略的 HTTP 客户端。
 // 调用方仍须用 LimitReader 限制响应体大小。
 func NewHTTPClient(timeout time.Duration) *http.Client {
-	var base http.RoundTripper = http.DefaultTransport
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		base = t.Clone()
+	return NewHTTPClientWithTransport(nil, timeout)
+}
+
+// NewHTTPClientWithTransport 使用指定底层 Transport；timeout=0 表示不设客户端墙钟超时，改由请求 context 控制。
+func NewHTTPClientWithTransport(base http.RoundTripper, timeout time.Duration) *http.Client {
+	if base == nil {
+		if t, ok := http.DefaultTransport.(*http.Transport); ok {
+			base = t.Clone()
+		} else {
+			base = http.DefaultTransport
+		}
 	}
 	return &http.Client{
 		Transport:     &policyTransport{base: base},

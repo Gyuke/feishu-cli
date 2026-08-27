@@ -78,8 +78,8 @@ func TestBindLegacyTokenAndMismatch(t *testing.T) {
 	}
 
 	_, err := ResolveUserAccessToken("", "", "cli_new", "sec", "")
-	if err != nil {
-		t.Fatalf("未过期的未绑定 token 应仍可读: %v", err)
+	if err == nil || !errors.Is(err, ErrUnboundToken) {
+		t.Fatalf("未绑定 token 即使 access 有效也必须 fail closed: %v", err)
 	}
 
 	expired := unbound
@@ -171,5 +171,22 @@ func TestConcurrentRefreshCommitsOnce(t *testing.T) {
 	}
 	if stored.AccessToken != "fresh-once" || stored.AppID != "aid" {
 		t.Fatalf("落盘 token 不正确: %+v", stored)
+	}
+}
+
+func TestLoadTokenFrom_RecoversWindowsBak(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token.json")
+	bak := &TokenStore{AccessToken: "from-bak", RefreshToken: "r", AppID: "cli_a"}
+	raw, _ := json.Marshal(bak)
+	if err := os.WriteFile(path+".bak", raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadTokenFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.AccessToken != "from-bak" {
+		t.Fatalf("应恢复 .bak，得到 %+v", got)
 	}
 }
