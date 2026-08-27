@@ -270,7 +270,7 @@ func TestParseDocsAIMarkdownContent_FailClosed(t *testing.T) {
 		{name: "missing content", raw: `{"document":{}}`, wantErr: "document.content"},
 		{name: "null content", raw: `{"document":{"content":null}}`, wantErr: "document.content"},
 		{name: "non-string content", raw: `{"document":{"content":123}}`, wantErr: "document.content"},
-		{name: "empty string content is valid", raw: `{"document":{"content":""}}`, want: ""},
+		{name: "empty string content", raw: `{"document":{"content":""}}`, wantErr: "document.content"},
 		{name: "ok", raw: `{"document":{"content":"# hi"}}`, want: "# hi"},
 	}
 	for _, tc := range tests {
@@ -315,6 +315,19 @@ func TestFetchDocxMarkdownContent_MissingContentFailClosed(t *testing.T) {
 	_, err := FetchDocxMarkdownContent("doxcnMissingContent", "u-test-token")
 	if err == nil || !strings.Contains(err.Error(), "document.content") {
 		t.Fatalf("expected missing document.content, got %v", err)
+	}
+}
+
+func TestFetchDocxMarkdownContent_EmptyContentFailClosed(t *testing.T) {
+	_, cleanup := stubFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"document":{"content":""}}}`)
+	})
+	defer cleanup()
+
+	_, err := FetchDocxMarkdownContent("doxcnEmptyContent", "u-test-token")
+	if err == nil || !strings.Contains(err.Error(), "document.content") {
+		t.Fatalf("expected empty document.content to fail closed, got %v", err)
 	}
 }
 

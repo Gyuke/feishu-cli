@@ -521,7 +521,7 @@ func parseDocsAIMarkdownContent(data json.RawMessage) (string, error) {
 		return "", fmt.Errorf("docs_ai fetch 响应缺少 document 对象")
 	}
 	content, ok := doc["content"].(string)
-	if !ok {
+	if !ok || content == "" {
 		return "", fmt.Errorf("docs_ai fetch 响应缺少 document.content")
 	}
 	return content, nil
