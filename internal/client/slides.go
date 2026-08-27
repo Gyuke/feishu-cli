@@ -4,16 +4,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
+// isOfficePresentation 判定演示文稿 token 是否为导入的 Office deck。
+// 识别规则（对齐官方 lark-cli / slides 规范）：
+// 1. 兼容 legacy 前缀: "fake_office_" 或 "local_office_"
+// 2. 官方 28 字符交织标记: 长度恰好为 28，且在下标 5, 10, 15, 20, 25 处依次为 'O', 'F', 'L', '0', 'X'
+func isOfficePresentation(token string) bool {
+	if strings.HasPrefix(token, "fake_office_") || strings.HasPrefix(token, "local_office_") {
+		return true
+	}
+	if len(token) == 28 &&
+		token[5] == 'O' &&
+		token[10] == 'F' &&
+		token[15] == 'L' &&
+		token[20] == '0' &&
+		token[25] == 'X' {
+		return true
+	}
+	return false
+}
+
 // slidesMediaParentType 根据演示文稿 token 返回上传 media 时使用的 parent_type。
-// 原生 Slides 演示文稿使用 "slide_file"，导入型 Office deck（token 以 "fake_office_" 开头）使用 "office_slide_file"。
+// 导入型 Office deck 使用 "office_slide_file"，原生 Slides 演示文稿使用 "slide_file"。
 // 同时只接受单分片 upload_all 接口（最大 20 MB），upload_prepare 不支持。
 func slidesMediaParentType(presentationToken string) string {
-	if strings.HasPrefix(presentationToken, "fake_office_") {
+	if isOfficePresentation(presentationToken) {
 		return "office_slide_file"
 	}
 	return "slide_file"
@@ -135,10 +155,12 @@ func GetSlides(presentationID string, revisionID int, userAccessToken ...string)
 		return nil, err
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/slides_ai/v1/xml_presentations/%s", presentationID)
-	if revisionID != 0 {
-		apiPath += fmt.Sprintf("?revision_id=%d", revisionID)
+	reqRevisionID := revisionID
+	if reqRevisionID == 0 {
+		reqRevisionID = -1
 	}
+
+	apiPath := fmt.Sprintf("/open-apis/slides_ai/v1/xml_presentations/%s?revision_id=%d", url.PathEscape(presentationID), reqRevisionID)
 
 	tokenType := larkcore.AccessTokenTypeTenant
 	var reqOpts []larkcore.RequestOptionFunc
@@ -171,6 +193,10 @@ func GetSlides(presentationID string, revisionID int, userAccessToken ...string)
 	}
 	if apiResp.Code != 0 {
 		return nil, fmt.Errorf("读取 slides 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+
+	if strings.TrimSpace(apiResp.Data.XmlPresentation.Content) == "" {
+		return nil, fmt.Errorf("读取 slides 失败: 返回的演示文稿内容为空")
 	}
 
 	presID := apiResp.Data.XmlPresentation.PresentationID

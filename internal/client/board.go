@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func GetBoardImage(whiteboardID string, outputPath string, userAccessToken ...st
 	}
 
 	// 使用通用 HTTP 请求方式
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/download_as_image", whiteboardID)
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/download_as_image", url.PathEscape(whiteboardID))
 
 	tokenType := larkcore.AccessTokenTypeTenant
 	var opts []larkcore.RequestOptionFunc
@@ -144,7 +145,7 @@ func ExportWhiteboardSVG(whiteboardID string, userAccessToken ...string) (*Expor
 	if err != nil {
 		return nil, err
 	}
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/export", whiteboardID)
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/export", url.PathEscape(whiteboardID))
 	body := map[string]any{"export_type": "svg"}
 
 	tokenType := larkcore.AccessTokenTypeTenant
@@ -306,7 +307,7 @@ func ImportDiagram(whiteboardID string, source string, opts ImportDiagramOptions
 	}
 
 	// 正确的 API 路径是 /nodes/plantuml
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes/plantuml", whiteboardID)
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes/plantuml", url.PathEscape(whiteboardID))
 
 	tokenType := larkcore.AccessTokenTypeTenant
 	var reqOpts []larkcore.RequestOptionFunc
@@ -395,10 +396,13 @@ func CreateBoardNodes(whiteboardID string, nodesJSON string, opts CreateBoardNot
 		reqBody["overwrite"] = true
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes?user_id_type=%s", whiteboardID, opts.UserIDType)
+	q := url.Values{}
+	q.Set("user_id_type", opts.UserIDType)
 	if opts.ClientToken != "" {
-		apiPath += "&client_token=" + opts.ClientToken
+		q.Set("client_token", opts.ClientToken)
 	}
+
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes?%s", url.PathEscape(whiteboardID), q.Encode())
 
 	tokenType := larkcore.AccessTokenTypeTenant
 	var reqOpts []larkcore.RequestOptionFunc
@@ -477,7 +481,7 @@ func GetBoardNodes(whiteboardID string, userAccessToken ...string) (json.RawMess
 		return nil, err
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes", whiteboardID)
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes", url.PathEscape(whiteboardID))
 
 	tokenType := larkcore.AccessTokenTypeTenant
 	var reqOpts []larkcore.RequestOptionFunc
@@ -522,7 +526,7 @@ func DeleteBoardNodes(whiteboardID string, nodeIDs []string, userAccessToken ...
 		return err
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes/batch_delete", whiteboardID)
+	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes/batch_delete", url.PathEscape(whiteboardID))
 	tokenType := larkcore.AccessTokenTypeTenant
 	var reqOpts []larkcore.RequestOptionFunc
 	if token := firstString(userAccessToken); token != "" {

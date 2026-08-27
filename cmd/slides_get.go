@@ -56,7 +56,7 @@ var slidesGetCmd = &cobra.Command{
 
 func init() {
 	slidesCmd.AddCommand(slidesGetCmd)
-	slidesGetCmd.Flags().Int("revision-id", 0, "演示文稿版本号（0 或未指定表示最新版本）")
+	slidesGetCmd.Flags().Int("revision-id", -1, "演示文稿版本号（默认 -1 表示最新版本）")
 	slidesGetCmd.Flags().StringP("output", "o", "", "输出格式 (json)")
 	slidesGetCmd.Flags().String("user-access-token", "", "User Access Token")
 }

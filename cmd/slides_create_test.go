@@ -43,8 +43,11 @@ func TestSlidesCreateFlags(t *testing.T) {
 }
 
 func TestSlidesGetFlags(t *testing.T) {
-	if slidesGetCmd.Flag("revision-id") == nil {
+	flag := slidesGetCmd.Flag("revision-id")
+	if flag == nil {
 		t.Error("slides get 缺少 --revision-id flag")
+	} else if flag.DefValue != "-1" {
+		t.Errorf("slides get --revision-id 默认值应为 -1，实际为 %q", flag.DefValue)
 	}
 	if slidesGetCmd.Flag("output") == nil {
 		t.Error("slides get 缺少 --output flag")

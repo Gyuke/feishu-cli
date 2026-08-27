@@ -35,26 +35,51 @@ func TestBuildPresentationXML_NamespaceHTTPS(t *testing.T) {
 	}
 }
 
-// TestSlidesMediaParentType 覆盖 slides media parent_type 选择：
-// 普通 slides 用 slide_file，导入型 office deck (fake_office_ 前缀) 用 office_slide_file。
-func TestSlidesMediaParentType(t *testing.T) {
+// TestIsOfficePresentation_Contract 覆盖官方 isOfficePresentation 契约的全部正例与负例。
+func TestIsOfficePresentation_Contract(t *testing.T) {
+	// 标准 28 字符交织 marker：位置 5, 10, 15, 20, 25 分别为 O, F, L, 0, X
+	// 索引: 01234 5 6789 10 11121314 15 16171819 20 21222324 25 2627
+	valid28Marker := "aaaaaObbbbFccccLdddd0eeeeXff" // len=28
+
 	cases := []struct {
 		name  string
 		token string
-		want  string
+		want  bool
 	}{
-		{"原生 slides presentation_id", "zTqAwsEb4clrjOLd3drAcNZabcef", "slide_file"},
-		{"普通 short token", "sldcnABC123", "slide_file"},
-		{"导入 office deck token", "fake_office_ppt_123456", "office_slide_file"},
-		{"仅 fake_office_ 前缀", "fake_office_", "office_slide_file"},
-		{"前缀在中间不匹配", "my_fake_office_deck", "slide_file"},
-		{"空 token 兜底 slide_file", "", "slide_file"},
+		// --- 正例 ---
+		{"legacy fake_office_ 前缀", "fake_office_ppt_123456", true},
+		{"legacy fake_office_ 前缀自身", "fake_office_", true},
+		{"legacy local_office_ 前缀", "local_office_deck_888", true},
+		{"legacy local_office_ 前缀自身", "local_office_", true},
+		{"官方标准 28 字符交织 OFL0X marker", valid28Marker, true},
+		{"真实格式 28 字符交织 marker", "abcdeOfghiFjklmLmnop0qrstXuv", true},
+
+		// --- 负例 ---
+		{"普通原生 slides 28 字符 token (无 marker)", "zTqAwsEb4clrjOLd3drAcNZabcef", false},
+		{"短 marker (长度 27 字符)", "aaaaaObbbbFccccLdddd0eeeeXf", false},
+		{"长 marker (长度 29 字符)", "aaaaaObbbbFccccLdddd0eeeeXfff", false},
+		{"错位 marker: 提前 1 位 (位置 4,9,14,19,24)", "aaaaObbbbFccccLdddd0eeeeXfff", false},
+		{"错位 marker: 滞后 1 位 (位置 6,11,16,21,26)", "aaaaaaObbbbFccccLdddd0eeeeXf", false},
+		{"小写 marker 不匹配 (ofl0x)", "aaaaaobbbbfccccldddd0eeeexff", false},
+		{"部分字符不匹配 (第 25 位不是 X 而是 Y)", "aaaaaObbbbFccccLdddd0eeeeYff", false},
+		{"前缀出现在中间不匹配", "prefix_fake_office_123", false},
+		{"普通短 token", "sldcnABC123", false},
+		{"空 token", "", false},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := slidesMediaParentType(tc.token)
+			got := isOfficePresentation(tc.token)
 			if got != tc.want {
-				t.Errorf("slidesMediaParentType(%q) = %q, want %q", tc.token, got, tc.want)
+				t.Errorf("isOfficePresentation(%q) = %v, want %v", tc.token, got, tc.want)
+			}
+			// 验证 slidesMediaParentType 与 isOfficePresentation 结果严格对齐
+			parentType := slidesMediaParentType(tc.token)
+			if tc.want && parentType != "office_slide_file" {
+				t.Errorf("slidesMediaParentType(%q) = %q, want office_slide_file", tc.token, parentType)
+			}
+			if !tc.want && parentType != "slide_file" {
+				t.Errorf("slidesMediaParentType(%q) = %q, want slide_file", tc.token, parentType)
 			}
 		})
 	}
@@ -101,7 +126,7 @@ func TestUploadSlidesMedia_ParentTypeSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. 原生 Slides deck 上传
+	// 1. 原生 Slides deck 上传 -> slide_file
 	gotParentType = ""
 	gotParentNode = ""
 	token, err := UploadSlidesMedia(imgPath, "test.png", "zTqAwsEb4clrjOLd3drAcNZabcef", "u-test")
@@ -118,7 +143,7 @@ func TestUploadSlidesMedia_ParentTypeSelection(t *testing.T) {
 		t.Errorf("parent_node 不符: %s", gotParentNode)
 	}
 
-	// 2. 导入型 Office deck 上传
+	// 2. 导入型 Office deck (legacy fake_office_) 上传 -> office_slide_file
 	gotParentType = ""
 	gotParentNode = ""
 	token, err = UploadSlidesMedia(imgPath, "test.png", "fake_office_deck_999", "u-test")
@@ -131,13 +156,31 @@ func TestUploadSlidesMedia_ParentTypeSelection(t *testing.T) {
 	if gotParentNode != "fake_office_deck_999" {
 		t.Errorf("parent_node 不符: %s", gotParentNode)
 	}
+
+	// 3. 导入型 Office deck (28 字符 OFL0X marker) 上传 -> office_slide_file
+	markerToken := "abcdeOfghiFjklmLmnop0qrstXuv"
+	gotParentType = ""
+	gotParentNode = ""
+	token, err = UploadSlidesMedia(imgPath, "test.png", markerToken, "u-test")
+	if err != nil {
+		t.Fatalf("UploadSlidesMedia 失败: %v", err)
+	}
+	if gotParentType != "office_slide_file" {
+		t.Errorf("28 字符 marker Office deck parent_type 应为 office_slide_file，实际为 %s", gotParentType)
+	}
+	if gotParentNode != markerToken {
+		t.Errorf("parent_node 不符: %s", gotParentNode)
+	}
 }
 
-// TestGetSlides 验证 GetSlides 读取演示文稿 XML。
+// TestGetSlides 验证 GetSlides 读取演示文稿 XML、path escape 与 revision_id 默认值。
 func TestGetSlides(t *testing.T) {
-	var gotPath string
+	var gotEscapedPath string
+	var gotQuery string
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		gotEscapedPath = r.URL.EscapedPath()
+		gotQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
 			"code": 0,
@@ -154,12 +197,16 @@ func TestGetSlides(t *testing.T) {
 	t.Cleanup(srv.Close)
 	setupTestConfig(t, srv.URL)
 
+	// 1. 默认 revision_id (0) -> 传递 -1 (最新版本)
 	res, err := GetSlides("pres_123", 0, "u-test")
 	if err != nil {
 		t.Fatalf("GetSlides 意外报错: %v", err)
 	}
-	if gotPath != "/open-apis/slides_ai/v1/xml_presentations/pres_123" {
-		t.Errorf("请求路径不符: %s", gotPath)
+	if gotEscapedPath != "/open-apis/slides_ai/v1/xml_presentations/pres_123" {
+		t.Errorf("请求路径不符: %s", gotEscapedPath)
+	}
+	if gotQuery != "revision_id=-1" {
+		t.Errorf("默认 query 应为 revision_id=-1，实际得到: %s", gotQuery)
 	}
 	if res.XmlPresentationID != "pres_123" {
 		t.Errorf("presentation_id 不符: %s", res.XmlPresentationID)
@@ -169,6 +216,52 @@ func TestGetSlides(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "My Presentation") {
 		t.Errorf("content 不符: %s", res.Content)
+	}
+
+	// 2. 指定 revision_id (10)
+	res, err = GetSlides("pres_123", 10, "u-test")
+	if err != nil {
+		t.Fatalf("GetSlides 指定版本意外报错: %v", err)
+	}
+	if gotQuery != "revision_id=10" {
+		t.Errorf("query 应为 revision_id=10，实际得到: %s", gotQuery)
+	}
+
+	// 3. Path 转义测试（含特殊字符）
+	_, err = GetSlides("pres/special token", 0, "u-test")
+	if err != nil {
+		t.Fatalf("GetSlides path 转义意外报错: %v", err)
+	}
+	if gotEscapedPath != "/open-apis/slides_ai/v1/xml_presentations/pres%2Fspecial%20token" {
+		t.Errorf("Path 应被转义，实际得到: %s", gotEscapedPath)
+	}
+}
+
+// TestGetSlides_EmptyContentFailClosed 验证 xml_presentation.content 为空时 fail closed 报错。
+func TestGetSlides_EmptyContentFailClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"code": 0,
+			"msg": "ok",
+			"data": {
+				"xml_presentation": {
+					"content": "   ",
+					"presentation_id": "pres_123",
+					"revision_id": 1
+				}
+			}
+		}`)
+	}))
+	t.Cleanup(srv.Close)
+	setupTestConfig(t, srv.URL)
+
+	_, err := GetSlides("pres_123", 0, "u-test")
+	if err == nil {
+		t.Fatal("content 为空时 GetSlides 应报错")
+	}
+	if !strings.Contains(err.Error(), "内容为空") {
+		t.Errorf("错误信息不符: %v", err)
 	}
 }
 

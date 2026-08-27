@@ -141,13 +141,55 @@ func TestCreateBoardNodes_ClientTokenValidation(t *testing.T) {
 	}
 }
 
+// TestBoardURLConstruction_PathAndQuerySafety 验证 Board 所有 API 的 Path 转义和 Query 编码防注入。
+func TestBoardURLConstruction_PathAndQuerySafety(t *testing.T) {
+	var gotEscapedPath string
+	var gotQuery string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"ids":["node_1"]}}`)
+	}))
+	t.Cleanup(srv.Close)
+	setupTestConfig(t, srv.URL)
+
+	// 特殊字符 whiteboardID 和包含 query 注入字符的 client_token
+	specialBoardID := "wb/special id & test"
+	injectionToken := "token_val&injected=1=2#hash"
+
+	_, err := CreateBoardNodes(specialBoardID, `[{"type":"sticky_note"}]`, CreateBoardNotesOptions{
+		UserAccessToken: "u-test",
+		ClientToken:     injectionToken,
+		UserIDType:      "open_id",
+	})
+	if err != nil {
+		t.Fatalf("CreateBoardNodes 意外报错: %v", err)
+	}
+
+	// 验证 Path 是否被正确转义 (url.PathEscape)
+	wantPath := "/open-apis/board/v1/whiteboards/wb%2Fspecial%20id%20&%20test/nodes"
+	if gotEscapedPath != wantPath {
+		t.Errorf("Path 转义不符: got %s, want %s", gotEscapedPath, wantPath)
+	}
+
+	// 验证 Query 是否被 url.Values 正确编码（防止 injection）
+	if !strings.Contains(gotQuery, "client_token=token_val%26injected%3D1%3D2%23hash") {
+		t.Errorf("client_token 未正确 url encode，得到 query: %s", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "user_id_type=open_id") {
+		t.Errorf("user_id_type 缺失或错误: %s", gotQuery)
+	}
+}
+
 // TestGetBoardNodes_FailClosedOnBusinessCode 验证 GetBoardNodes 在 HTTP 200 但业务 code != 0 时 fail closed。
 func TestGetBoardNodes_FailClosedOnBusinessCode(t *testing.T) {
 	// 业务错误场景
 	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"code":99991663,"msg":"whiteboard not found"}`)
+		_, _ = io.WriteString(w, `{"code":1254030,"msg":"whiteboard not found"}`)
 	}))
 	t.Cleanup(srvErr.Close)
 	setupTestConfig(t, srvErr.URL)
@@ -156,7 +198,7 @@ func TestGetBoardNodes_FailClosedOnBusinessCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("业务 code != 0 时 GetBoardNodes 应报错 fail closed")
 	}
-	if !strings.Contains(err.Error(), "99991663") || !strings.Contains(err.Error(), "whiteboard not found") {
+	if !strings.Contains(err.Error(), "1254030") || !strings.Contains(err.Error(), "whiteboard not found") {
 		t.Errorf("错误信息不符合预期: %v", err)
 	}
 
@@ -201,10 +243,10 @@ func TestGetBoardImage_FailClosedOnBusinessCode(t *testing.T) {
 // TestImportDiagram_ParseModeAndOverwrite 验证 ImportDiagram 传递 parse_mode 与 overwrite。
 func TestImportDiagram_ParseModeAndOverwrite(t *testing.T) {
 	var gotBody string
-	var gotPath string
+	var gotEscapedPath string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		gotEscapedPath = r.URL.EscapedPath()
 		bodyBytes, _ := io.ReadAll(r.Body)
 		gotBody = string(bodyBytes)
 
@@ -215,7 +257,7 @@ func TestImportDiagram_ParseModeAndOverwrite(t *testing.T) {
 	setupTestConfig(t, srv.URL)
 
 	diagramCode := "graph TD\nA-->B"
-	res, _, err := ImportDiagram("wb_test_123", diagramCode, ImportDiagramOptions{
+	res, _, err := ImportDiagram("wb/test 123", diagramCode, ImportDiagramOptions{
 		SourceType:      "content",
 		Syntax:          "mermaid",
 		DiagramType:     "flowchart",
@@ -230,8 +272,8 @@ func TestImportDiagram_ParseModeAndOverwrite(t *testing.T) {
 	if res.TicketID != "plantuml_node_1" {
 		t.Errorf("TicketID 不符: %s", res.TicketID)
 	}
-	if gotPath != "/open-apis/board/v1/whiteboards/wb_test_123/nodes/plantuml" {
-		t.Errorf("路径不符: %s", gotPath)
+	if gotEscapedPath != "/open-apis/board/v1/whiteboards/wb%2Ftest%20123/nodes/plantuml" {
+		t.Errorf("路径 PathEscape 不符: %s", gotEscapedPath)
 	}
 
 	var reqData struct {
