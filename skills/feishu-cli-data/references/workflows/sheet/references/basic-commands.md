@@ -182,15 +182,9 @@ feishu-cli sheet image list <token> <sheet_id>
 feishu-cli sheet image delete <token> <sheet_id> <float_image_id>
 ```
 
-## 工作表保护
+## 工作表保护（已废弃 / unsupported）
 
-```bash
-feishu-cli sheet protect <token> <sheet_id> --dimension ROWS --start 0 --end 5
-feishu-cli sheet protect <token> <sheet_id> --dimension COLUMNS --start 0 --end 3
-feishu-cli sheet unprotect <token> <protect_id>
-```
-
-> 已知问题：V2 API 可能返回 "invalid operation"。
+> 注意：飞书 Sheets 保护范围 API 已经被官方废弃且暂无替代 OpenAPI，`protect` / `unprotect` 命令当前为 unsupported（执行直接返回错误）。
 
 ## User Access Token 支持
 

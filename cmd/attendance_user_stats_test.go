@@ -54,9 +54,9 @@ func TestAttendanceUserStatsQueryFlags(t *testing.T) {
 	}
 }
 
-// TestAttendanceUserStatsQueryRequiredFlags 校验 required flag 注解
+// TestAttendanceUserStatsQueryRequiredFlags 校验 required flag 注解（start/end 必填，user-ids 支持自查留空）
 func TestAttendanceUserStatsQueryRequiredFlags(t *testing.T) {
-	for _, name := range []string{"user-ids", "start", "end"} {
+	for _, name := range []string{"start", "end"} {
 		flag := attendanceUserStatsQueryCmd.Flags().Lookup(name)
 		if flag == nil {
 			t.Errorf("--%s flag missing", name)
@@ -66,6 +66,14 @@ func TestAttendanceUserStatsQueryRequiredFlags(t *testing.T) {
 		if len(anno) != 1 || anno[0] != "true" {
 			t.Errorf("--%s should be marked required, got %#v", name, flag.Annotations)
 		}
+	}
+	userIDsFlag := attendanceUserStatsQueryCmd.Flags().Lookup("user-ids")
+	if userIDsFlag == nil {
+		t.Fatal("--user-ids flag missing")
+	}
+	anno := userIDsFlag.Annotations["cobra_annotation_bash_completion_one_required_flag"]
+	if len(anno) > 0 && anno[0] == "true" {
+		t.Error("--user-ids should not be marked required to support self query")
 	}
 }
 

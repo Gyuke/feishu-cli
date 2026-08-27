@@ -1,12 +1,13 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
-
-	larkattendance "github.com/larksuite/oapi-sdk-go/v3/service/attendance/v1"
 )
 
 // AttendanceUserTask 单个用户某天的打卡任务（聚合上下班两次打卡）
@@ -91,12 +92,11 @@ func ParseAttendanceDate(s string) (int, error) {
 // QueryAttendanceUserTasks 查询用户考勤打卡记录
 //
 // 对应 OpenAPI: POST /open-apis/attendance/v1/user_tasks/query
-// 权限要求: tenant_access_token（应用需获得 attendance:task:readonly 权限）
+// 权限要求: attendance:task:readonly 或 attendance:task
+// 支持 User Access Token 和 Tenant Access Token
 //
-// 注：larksuite/oapi-sdk-go v3.5.3 中该接口 SupportedAccessTokenTypes 仅含 Tenant，
-// SDK 在 validateTokenType 会拒绝 user_access_token，故本函数走默认 tenant token。
-//
-// employeeType 取值：employee_id（默认）/ open_id / user_id / employee_no
+// employeeType 取值：employee_id（默认）/ employee_no
+// 当 employeeType 为 employee_no 且 userIDs 为空时走官方本人自查路径
 // userIDs 长度 ≤ 50，dateFrom/dateTo 为 yyyyMMdd
 func QueryAttendanceUserTasks(
 	employeeType string,
@@ -106,6 +106,7 @@ func QueryAttendanceUserTasks(
 	needOvertime bool,
 	ignoreInvalidUsers bool,
 	includeTerminatedUser bool,
+	userAccessToken ...string,
 ) (*AttendanceQueryUserTaskResult, error) {
 	cli, err := GetClient()
 	if err != nil {
@@ -116,65 +117,103 @@ func QueryAttendanceUserTasks(
 		employeeType = "employee_id"
 	}
 	if len(userIDs) == 0 {
-		return nil, fmt.Errorf("user_ids 不能为空")
+		if employeeType != "employee_no" {
+			return nil, fmt.Errorf("employee_type 为 %s 时 user_ids 不能为空（查询本人请使用 employee_no 且留空 user_ids）", employeeType)
+		}
 	}
 	if dateFrom == 0 || dateTo == 0 {
 		return nil, fmt.Errorf("check_date_from / check_date_to 必填")
 	}
 
-	body := larkattendance.NewQueryUserTaskReqBodyBuilder().
-		UserIds(userIDs).
-		CheckDateFrom(dateFrom).
-		CheckDateTo(dateTo).
-		NeedOvertimeResult(needOvertime).
-		Build()
+	q := url.Values{}
+	q.Set("employee_type", employeeType)
+	q.Set("ignore_invalid_users", fmt.Sprintf("%v", ignoreInvalidUsers))
+	q.Set("include_terminated_user", fmt.Sprintf("%v", includeTerminatedUser))
 
-	reqBuilder := larkattendance.NewQueryUserTaskReqBuilder().
-		EmployeeType(employeeType).
-		IgnoreInvalidUsers(ignoreInvalidUsers).
-		IncludeTerminatedUser(includeTerminatedUser).
-		Body(body)
+	apiPath := "/open-apis/attendance/v1/user_tasks/query?" + q.Encode()
 
-	resp, err := cli.Attendance.UserTask.Query(Context(), reqBuilder.Build())
+	sendUserIDs := userIDs
+	if sendUserIDs == nil {
+		sendUserIDs = []string{}
+	}
+
+	body := map[string]any{
+		"user_ids":             sendUserIDs,
+		"check_date_from":      dateFrom,
+		"check_date_to":        dateTo,
+		"need_overtime_result": needOvertime,
+	}
+
+	uat := firstString(userAccessToken)
+	tokenType, opts := resolveTokenOpts(uat)
+
+	resp, err := cli.Post(Context(), apiPath, body, tokenType, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("查询考勤打卡记录失败: %w", err)
 	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("查询考勤打卡记录失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("查询考勤打卡记录 HTTP 状态异常 %d: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
-	out := &AttendanceQueryUserTaskResult{}
-	if resp.Data == nil {
-		return out, nil
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			UserTaskResults []struct {
+				ResultID     string `json:"result_id"`
+				UserID       string `json:"user_id"`
+				EmployeeName string `json:"employee_name"`
+				Day          int    `json:"day"`
+				GroupID      string `json:"group_id"`
+				ShiftID      string `json:"shift_id"`
+				Records      []struct {
+					CheckInRecordID          string `json:"check_in_record_id"`
+					CheckOutRecordID         string `json:"check_out_record_id"`
+					CheckInResult            string `json:"check_in_result"`
+					CheckOutResult           string `json:"check_out_result"`
+					CheckInResultSupplement  string `json:"check_in_result_supplement"`
+					CheckOutResultSupplement string `json:"check_out_result_supplement"`
+					CheckInShiftTime         string `json:"check_in_shift_time"`
+					CheckOutShiftTime        string `json:"check_out_shift_time"`
+					TaskShiftType            int    `json:"task_shift_type"`
+				} `json:"records"`
+			} `json:"user_task_results"`
+			InvalidUserIDs      []string `json:"invalid_user_ids"`
+			UnauthorizedUserIDs []string `json:"unauthorized_user_ids"`
+		} `json:"data"`
 	}
-	out.InvalidUserIDs = resp.Data.InvalidUserIds
-	out.UnauthorizedUserIDs = resp.Data.UnauthorizedUserIds
-	for _, t := range resp.Data.UserTaskResults {
-		if t == nil {
-			continue
-		}
+
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析考勤打卡记录响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("查询考勤打卡记录失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+
+	out := &AttendanceQueryUserTaskResult{
+		InvalidUserIDs:      apiResp.Data.InvalidUserIDs,
+		UnauthorizedUserIDs: apiResp.Data.UnauthorizedUserIDs,
+	}
+	for _, t := range apiResp.Data.UserTaskResults {
 		task := &AttendanceUserTask{
-			ResultID:     StringVal(t.ResultId),
-			UserID:       StringVal(t.UserId),
-			EmployeeName: StringVal(t.EmployeeName),
-			Day:          IntVal(t.Day),
-			GroupID:      StringVal(t.GroupId),
-			ShiftID:      StringVal(t.ShiftId),
+			ResultID:     t.ResultID,
+			UserID:       t.UserID,
+			EmployeeName: t.EmployeeName,
+			Day:          t.Day,
+			GroupID:      t.GroupID,
+			ShiftID:      t.ShiftID,
 		}
 		for _, r := range t.Records {
-			if r == nil {
-				continue
-			}
 			task.Records = append(task.Records, &AttendanceTaskRecord{
-				CheckInRecordID:          StringVal(r.CheckInRecordId),
-				CheckOutRecordID:         StringVal(r.CheckOutRecordId),
-				CheckInResult:            StringVal(r.CheckInResult),
-				CheckOutResult:           StringVal(r.CheckOutResult),
-				CheckInResultSupplement:  StringVal(r.CheckInResultSupplement),
-				CheckOutResultSupplement: StringVal(r.CheckOutResultSupplement),
-				CheckInShiftTime:         StringVal(r.CheckInShiftTime),
-				CheckOutShiftTime:        StringVal(r.CheckOutShiftTime),
-				TaskShiftType:            IntVal(r.TaskShiftType),
+				CheckInRecordID:          r.CheckInRecordID,
+				CheckOutRecordID:         r.CheckOutRecordID,
+				CheckInResult:            r.CheckInResult,
+				CheckOutResult:           r.CheckOutResult,
+				CheckInResultSupplement:  r.CheckInResultSupplement,
+				CheckOutResultSupplement: r.CheckOutResultSupplement,
+				CheckInShiftTime:         r.CheckInShiftTime,
+				CheckOutShiftTime:        r.CheckOutShiftTime,
+				TaskShiftType:            r.TaskShiftType,
 			})
 		}
 		out.UserTaskResults = append(out.UserTaskResults, task)
@@ -185,11 +224,10 @@ func QueryAttendanceUserTasks(
 // QueryAttendanceUserStats 查询用户考勤统计数据
 //
 // 对应 OpenAPI: POST /open-apis/attendance/v1/user_stats_datas/query
-// 权限要求: tenant_access_token（应用需获得 attendance:task:readonly 权限）
+// 权限要求: attendance:task:readonly
+// 支持 User Access Token 和 Tenant Access Token
 //
-// 注：larksuite/oapi-sdk-go v3.5.3 中该接口 SupportedAccessTokenTypes 仅含 Tenant，
-// SDK 在 validateTokenType 会拒绝 user_access_token，故本函数走默认 tenant token。
-//
+// employeeType 取值：employee_id（默认）/ employee_no
 // statsType: daily（日度）/ month（月度）
 // userID 是发起人的用户 ID（同 查询统计设置 中的 user_id）
 // startDate/endDate 间隔不超过 31 天
@@ -203,6 +241,7 @@ func QueryAttendanceUserStats(
 	locale string,
 	needHistory bool,
 	currentGroupOnly bool,
+	userAccessToken ...string,
 ) (*AttendanceQueryUserStatsResult, error) {
 	cli, err := GetClient()
 	if err != nil {
@@ -219,57 +258,84 @@ func QueryAttendanceUserStats(
 		return nil, fmt.Errorf("start_date / end_date 必填")
 	}
 	if len(userIDs) == 0 {
-		return nil, fmt.Errorf("user_ids 不能为空")
+		if employeeType != "employee_no" {
+			return nil, fmt.Errorf("employee_type 为 %s 时 user_ids 不能为空（查询本人请使用 employee_no 且留空 user_ids）", employeeType)
+		}
 	}
 
-	bodyBuilder := larkattendance.NewQueryUserStatsDataReqBodyBuilder().
-		StatsType(statsType).
-		StartDate(startDate).
-		EndDate(endDate).
-		UserIds(userIDs).
-		NeedHistory(needHistory).
-		CurrentGroupOnly(currentGroupOnly)
+	q := url.Values{}
+	q.Set("employee_type", employeeType)
 
+	apiPath := "/open-apis/attendance/v1/user_stats_datas/query?" + q.Encode()
+
+	sendUserIDs := userIDs
+	if sendUserIDs == nil {
+		sendUserIDs = []string{}
+	}
+
+	body := map[string]any{
+		"stats_type":         statsType,
+		"start_date":         startDate,
+		"end_date":           endDate,
+		"user_ids":           sendUserIDs,
+		"need_history":       needHistory,
+		"current_group_only": currentGroupOnly,
+	}
 	if locale != "" {
-		bodyBuilder.Locale(locale)
+		body["locale"] = locale
 	}
 	if currentUserID != "" {
-		bodyBuilder.UserId(currentUserID)
+		body["user_id"] = currentUserID
 	}
 
-	reqBuilder := larkattendance.NewQueryUserStatsDataReqBuilder().
-		EmployeeType(employeeType).
-		Body(bodyBuilder.Build())
+	uat := firstString(userAccessToken)
+	tokenType, opts := resolveTokenOpts(uat)
 
-	resp, err := cli.Attendance.UserStatsData.Query(Context(), reqBuilder.Build())
+	resp, err := cli.Post(Context(), apiPath, body, tokenType, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("查询考勤统计失败: %w", err)
 	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("查询考勤统计失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("查询考勤统计 HTTP 状态异常 %d: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
-	out := &AttendanceQueryUserStatsResult{}
-	if resp.Data == nil {
-		return out, nil
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			UserDatas []struct {
+				Name   string `json:"name"`
+				UserID string `json:"user_id"`
+				Datas  []struct {
+					Code  string `json:"code"`
+					Title string `json:"title"`
+					Value string `json:"value"`
+				} `json:"datas"`
+			} `json:"user_datas"`
+			InvalidUserList []string `json:"invalid_user_list"`
+		} `json:"data"`
 	}
-	out.InvalidUserList = resp.Data.InvalidUserList
-	for _, u := range resp.Data.UserDatas {
-		if u == nil {
-			continue
-		}
+
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析考勤统计响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("查询考勤统计失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+
+	out := &AttendanceQueryUserStatsResult{
+		InvalidUserList: apiResp.Data.InvalidUserList,
+	}
+	for _, u := range apiResp.Data.UserDatas {
 		us := &AttendanceUserStats{
-			Name:   StringVal(u.Name),
-			UserID: StringVal(u.UserId),
+			Name:   u.Name,
+			UserID: u.UserID,
 		}
 		for _, c := range u.Datas {
-			if c == nil {
-				continue
-			}
 			us.Datas = append(us.Datas, &AttendanceUserStatsCell{
-				Code:  StringVal(c.Code),
-				Title: StringVal(c.Title),
-				Value: StringVal(c.Value),
+				Code:  c.Code,
+				Title: c.Title,
+				Value: c.Value,
 			})
 		}
 		out.UserDatas = append(out.UserDatas, us)

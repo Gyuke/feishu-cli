@@ -73,18 +73,18 @@ Folders / labels 查询:
 			return nil
 		}
 
-		// 有 --query 时走专用 search 端点；其他场景走 messages 列表过滤
+		// 有 --query 时走专用 search 端点；其他场景走 messages 列表过滤（无 label 默认 INBOX）
 		var data json.RawMessage
 		if query != "" {
 			filter := map[string]any{}
 			if folder != "" {
-				filter["folder_id"] = folder
+				filter["folder"] = []string{folder}
 			}
 			if label != "" {
-				filter["label_id"] = label
+				filter["label"] = []string{label}
 			}
 			if unreadOnly {
-				filter["only_unread"] = true
+				filter["is_unread"] = true
 			}
 			if pageSize > 0 {
 				filter["page_size"] = pageSize
@@ -94,6 +94,9 @@ Folders / labels 查询:
 			}
 			data, err = client.SearchMailMessages(mailbox, query, filter, token)
 		} else {
+			if folder == "" && label == "" {
+				folder = "INBOX"
+			}
 			params := client.ListMailMessagesParams{
 				MailboxID:  mailbox,
 				FolderID:   folder,

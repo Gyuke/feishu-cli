@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -130,7 +132,7 @@ func GetMailMessage(mailboxID, messageID, format, userAccessToken string) (json.
 	return callMailAPI(http.MethodGet, apiPath, nil, userAccessToken)
 }
 
-// BatchGetMailMessages 批量获取邮件
+// BatchGetMailMessages 批量获取邮件（单批最多 20 条，自动分块并保序）
 // API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/messages/batch_get
 func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -139,14 +141,63 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 	if format == "" {
 		format = "full"
 	}
-	body := map[string]any{
-		"message_ids": messageIDs,
-		"format":      format,
+	if len(messageIDs) == 0 {
+		return json.Marshal(map[string]any{"messages": []any{}})
 	}
-	return callMailAPI(http.MethodPost, mailboxPath(mailboxID, "messages", "batch_get"), body, userAccessToken)
+
+	const batchSize = 20
+	var allCollected []json.RawMessage
+	for i := 0; i < len(messageIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(messageIDs) {
+			end = len(messageIDs)
+		}
+		chunk := messageIDs[i:end]
+		body := map[string]any{
+			"message_ids": chunk,
+			"format":      format,
+		}
+		data, err := callMailAPI(http.MethodPost, mailboxPath(mailboxID, "messages", "batch_get"), body, userAccessToken)
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("解析 batch_get 响应失败: %w", err)
+		}
+		allCollected = append(allCollected, resp.Messages...)
+	}
+
+	// 保证按照请求的 messageIDs 顺序保序
+	type idHolder struct {
+		MessageID string `json:"message_id"`
+	}
+	msgMap := make(map[string]json.RawMessage, len(allCollected))
+	for _, raw := range allCollected {
+		var holder idHolder
+		if err := json.Unmarshal(raw, &holder); err == nil && holder.MessageID != "" {
+			msgMap[holder.MessageID] = raw
+		}
+	}
+
+	ordered := make([]json.RawMessage, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		if raw, ok := msgMap[id]; ok {
+			ordered = append(ordered, raw)
+		}
+	}
+	if len(ordered) == 0 && len(allCollected) > 0 {
+		ordered = allCollected
+	}
+
+	return json.Marshal(map[string]any{
+		"messages": ordered,
+	})
 }
 
-// GetMailThread 获取线程
+// GetMailThread 获取线程并按时间升序实际排序
 // API: GET /open-apis/mail/v1/user_mailboxes/{mailbox_id}/threads/{thread_id}
 func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -156,7 +207,57 @@ func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.Ra
 		format = "full"
 	}
 	apiPath := mailboxPath(mailboxID, "threads", threadID) + "?format=" + url.QueryEscape(format)
-	return callMailAPI(http.MethodGet, apiPath, nil, userAccessToken)
+	data, err := callMailAPI(http.MethodGet, apiPath, nil, userAccessToken)
+	if err != nil {
+		return nil, err
+	}
+	return sortThreadMessages(data)
+}
+
+func sortThreadMessages(data json.RawMessage) (json.RawMessage, error) {
+	var parsed struct {
+		Thread struct {
+			ID          string            `json:"id,omitempty"`
+			BodyPreview string            `json:"body_preview,omitempty"`
+			Messages    []json.RawMessage `json:"messages,omitempty"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return data, nil
+	}
+	if len(parsed.Thread.Messages) <= 1 {
+		return data, nil
+	}
+	type msgItem struct {
+		raw  json.RawMessage
+		date int64
+	}
+	items := make([]msgItem, len(parsed.Thread.Messages))
+	for i, raw := range parsed.Thread.Messages {
+		var d struct {
+			InternalDate any `json:"internal_date"`
+		}
+		_ = json.Unmarshal(raw, &d)
+		var dateVal int64
+		switch v := d.InternalDate.(type) {
+		case string:
+			dateVal, _ = strconv.ParseInt(v, 10, 64)
+		case float64:
+			dateVal = int64(v)
+		case json.Number:
+			dateVal, _ = v.Int64()
+		}
+		items[i] = msgItem{raw: raw, date: dateVal}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].date < items[j].date
+	})
+	sortedMsgs := make([]json.RawMessage, len(items))
+	for i, it := range items {
+		sortedMsgs[i] = it.raw
+	}
+	parsed.Thread.Messages = sortedMsgs
+	return json.Marshal(parsed)
 }
 
 // ListMailMessagesParams 邮件列表参数
@@ -171,7 +272,7 @@ type ListMailMessagesParams struct {
 	BeforeTime int64 // Unix 毫秒
 }
 
-// ListMailMessages 列出邮件（按 folder/label/未读过滤）
+// ListMailMessages 列出邮件（按 folder/label/未读过滤；无 label 默认 INBOX）
 // API: GET /open-apis/mail/v1/user_mailboxes/{mailbox_id}/messages
 // 关键词搜索请使用 SearchMailMessages（走专用 /search 端点）
 func ListMailMessages(params ListMailMessagesParams, userAccessToken string) (json.RawMessage, error) {
@@ -179,9 +280,13 @@ func ListMailMessages(params ListMailMessagesParams, userAccessToken string) (js
 	if mailboxID == "" {
 		mailboxID = "me"
 	}
+	folderID := params.FolderID
+	if folderID == "" && params.LabelID == "" {
+		folderID = "INBOX"
+	}
 	q := url.Values{}
-	if params.FolderID != "" {
-		q.Set("folder_id", params.FolderID)
+	if folderID != "" {
+		q.Set("folder_id", folderID)
 	}
 	if params.LabelID != "" {
 		q.Set("label_id", params.LabelID)
@@ -296,18 +401,76 @@ func extractMailDraftID(data json.RawMessage) string {
 // ==================== 文件夹和标签 ====================
 
 // SearchMailMessages 通过专用 search 端点搜索邮件
-// API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/search
-// body: {"query": "关键词", "filter": {...}}
+// API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/search?page_size=xx&page_token=yy
+// body: {"query": "关键词", "filter": {"folder": ["INBOX"], "label": ["xxx"], "is_unread": true}}
 // 用于 mail triage --query 的真实搜索（不同于 ListMailMessages 的列表过滤）
 func SearchMailMessages(mailboxID, query string, filter map[string]any, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
 		mailboxID = "me"
 	}
-	body := map[string]any{"query": query}
-	if len(filter) > 0 {
-		body["filter"] = filter
+	q := url.Values{}
+	normalizedFilter := make(map[string]any)
+	for k, v := range filter {
+		switch k {
+		case "page_size":
+			q.Set("page_size", fmt.Sprintf("%v", v))
+		case "page_token":
+			if s := fmt.Sprintf("%v", v); s != "" {
+				q.Set("page_token", s)
+			}
+		case "folder", "folder_id":
+			switch val := v.(type) {
+			case string:
+				if val != "" {
+					normalizedFilter["folder"] = []string{val}
+				}
+			case []string:
+				normalizedFilter["folder"] = val
+			case []any:
+				var arr []string
+				for _, item := range val {
+					arr = append(arr, fmt.Sprintf("%v", item))
+				}
+				normalizedFilter["folder"] = arr
+			default:
+				normalizedFilter["folder"] = v
+			}
+		case "label", "label_id":
+			switch val := v.(type) {
+			case string:
+				if val != "" {
+					normalizedFilter["label"] = []string{val}
+				}
+			case []string:
+				normalizedFilter["label"] = val
+			case []any:
+				var arr []string
+				for _, item := range val {
+					arr = append(arr, fmt.Sprintf("%v", item))
+				}
+				normalizedFilter["label"] = arr
+			default:
+				normalizedFilter["label"] = v
+			}
+		case "only_unread", "is_unread":
+			if b, ok := v.(bool); ok {
+				normalizedFilter["is_unread"] = b
+			} else if s := fmt.Sprintf("%v", v); s == "true" {
+				normalizedFilter["is_unread"] = true
+			}
+		default:
+			normalizedFilter[k] = v
+		}
 	}
-	return callMailAPI(http.MethodPost, mailboxPath(mailboxID, "search"), body, userAccessToken)
+	body := map[string]any{"query": query}
+	if len(normalizedFilter) > 0 {
+		body["filter"] = normalizedFilter
+	}
+	apiPath := mailboxPath(mailboxID, "search")
+	if encoded := q.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	return callMailAPI(http.MethodPost, apiPath, body, userAccessToken)
 }
 
 // ListMailSignatures 列出邮箱签名

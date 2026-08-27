@@ -28,9 +28,9 @@
     {
       "id": 4,
       "workflows": ["attendance"],
-      "prompt": "用 open_id 查询 ou_aaa,ou_bbb 在 2026-07-01 到 2026-07-07 的打卡记录，包含加班班段并输出 JSON。是否需要 auth login？单次最多能查多少人？",
-      "expected_output": "使用 attendance user-task query，Tenant Token，无需登录，并说明 50 人上限。",
-      "expectations": ["命令使用 attendance user-task query 和 --employee-type open_id", "命令包含 --user-ids ou_aaa,ou_bbb、日期范围、--need-overtime 和 --output json", "明确只使用 Tenant Token 且无需 auth login", "明确 user-task 单次最多 50 人"],
+      "prompt": "查询 28470001,28470002 在 2026-07-01 到 2026-07-07 的打卡记录，包含加班班段并输出 JSON。单次最多能查多少人？",
+      "expected_output": "使用 attendance user-task query，支持 User/Tenant Token，并说明 50 人上限。",
+      "expectations": ["命令使用 attendance user-task query 和 --employee-type employee_id", "命令包含 --user-ids 28470001,28470002、日期范围、--need-overtime 和 --output json", "支持 User/Tenant Token", "明确 user-task 单次最多 50 人"],
       "files": []
     },
     {

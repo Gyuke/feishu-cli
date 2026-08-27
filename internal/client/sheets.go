@@ -629,30 +629,11 @@ func ReadCellsBatch(ctx context.Context, spreadsheetToken string, ranges []strin
 	return apiResp.Data.ValueRanges, nil
 }
 
-// WriteCells 写入单元格数据 (V2 API)
+// WriteCells 写入单元格数据 (V2 API，保持 bool 为 JSON Boolean)
 func WriteCells(ctx context.Context, spreadsheetToken, rangeStr string, values [][]any, userAccessToken ...string) (*CellRange, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
-	}
-
-	// 转换不支持的类型（布尔值转为字符串）
-	convertedValues := make([][]any, len(values))
-	for i, row := range values {
-		convertedValues[i] = make([]any, len(row))
-		for j, cell := range row {
-			switch v := cell.(type) {
-			case bool:
-				// API 不支持布尔类型，转换为字符串
-				if v {
-					convertedValues[i][j] = "TRUE"
-				} else {
-					convertedValues[i][j] = "FALSE"
-				}
-			default:
-				convertedValues[i][j] = cell
-			}
-		}
 	}
 
 	path := fmt.Sprintf("/open-apis/sheets/v2/spreadsheets/%s/values", spreadsheetToken)
@@ -660,7 +641,7 @@ func WriteCells(ctx context.Context, spreadsheetToken, rangeStr string, values [
 	reqBody := map[string]any{
 		"valueRange": map[string]any{
 			"range":  rangeStr,
-			"values": convertedValues,
+			"values": values,
 		},
 	}
 
@@ -732,29 +713,11 @@ func WriteCellsBatch(ctx context.Context, spreadsheetToken string, valueRanges [
 	return nil
 }
 
-// AppendCells 追加数据 (V2 API)
+// AppendCells 追加数据 (V2 API，保持 bool 为 JSON Boolean)
 func AppendCells(ctx context.Context, spreadsheetToken, rangeStr string, values [][]any, insertDataOption string, userAccessToken ...string) (*CellRange, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
-	}
-
-	// 转换不支持的类型（布尔值转为字符串）
-	convertedValues := make([][]any, len(values))
-	for i, row := range values {
-		convertedValues[i] = make([]any, len(row))
-		for j, cell := range row {
-			switch v := cell.(type) {
-			case bool:
-				if v {
-					convertedValues[i][j] = "TRUE"
-				} else {
-					convertedValues[i][j] = "FALSE"
-				}
-			default:
-				convertedValues[i][j] = cell
-			}
-		}
 	}
 
 	path := fmt.Sprintf("/open-apis/sheets/v2/spreadsheets/%s/values_append", spreadsheetToken)
@@ -766,7 +729,7 @@ func AppendCells(ctx context.Context, spreadsheetToken, rangeStr string, values 
 	reqBody := map[string]any{
 		"valueRange": map[string]any{
 			"range":  rangeStr,
-			"values": convertedValues,
+			"values": values,
 		},
 	}
 
@@ -1609,108 +1572,16 @@ func QueryFloatImages(ctx context.Context, spreadsheetToken, sheetID string, use
 
 // ==================== 保护范围相关 (V2 API) ====================
 
-// CreateProtectedRange 创建保护范围 (V2 API)
+// CreateProtectedRange 创建保护范围
+// 注意：飞书 Sheets 保护范围 API 已经被官方废弃且暂无替代 OpenAPI，该功能为 unsupported。
 func CreateProtectedRange(ctx context.Context, spreadsheetToken string, ranges []*ProtectedRange, userAccessToken ...string) ([]string, error) {
-	client, err := GetClient()
-	if err != nil {
-		return nil, err
-	}
-
-	uat := firstString(userAccessToken)
-
-	path := fmt.Sprintf("/open-apis/sheets/v2/spreadsheets/%s/protected_dimension", spreadsheetToken)
-
-	var addProtected []map[string]any
-	for _, r := range ranges {
-		item := map[string]any{
-			"dimension": map[string]any{
-				"sheetId":        r.SheetID,
-				"majorDimension": r.Dimension.MajorDimension,
-				"startIndex":     r.Dimension.StartIndex,
-				"endIndex":       r.Dimension.EndIndex,
-			},
-		}
-		if r.LockInfo != "" {
-			item["lockInfo"] = r.LockInfo
-		}
-		if r.Editors != nil {
-			item["editors"] = r.Editors
-		}
-		addProtected = append(addProtected, item)
-	}
-
-	reqBody := map[string]any{
-		"addProtectedDimension": addProtected,
-	}
-
-	respBody, err := v2APICallWithToken(client, ctx, "POST", path, reqBody, uat)
-	if err != nil {
-		return nil, fmt.Errorf("创建保护范围失败: %w", err)
-	}
-
-	var apiResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			AddProtectedDimension []struct {
-				Dimension struct {
-					SheetID   string `json:"sheetId"`
-					ProtectID string `json:"protectId"`
-				} `json:"dimension"`
-			} `json:"addProtectedDimension"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-
-	if apiResp.Code != 0 {
-		return nil, fmt.Errorf("创建保护范围失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
-	}
-
-	var protectIDs []string
-	for _, item := range apiResp.Data.AddProtectedDimension {
-		protectIDs = append(protectIDs, item.Dimension.ProtectID)
-	}
-
-	return protectIDs, nil
+	return nil, fmt.Errorf("sheet protect 接口已被飞书官方废弃且暂无替代 OpenAPI (unsupported)")
 }
 
-// DeleteProtectedRange 删除保护范围 (V2 API)
+// DeleteProtectedRange 删除保护范围
+// 注意：飞书 Sheets 保护范围 API 已经被官方废弃且暂无替代 OpenAPI，该功能为 unsupported。
 func DeleteProtectedRange(ctx context.Context, spreadsheetToken string, protectIDs []string, userAccessToken ...string) error {
-	client, err := GetClient()
-	if err != nil {
-		return err
-	}
-
-	uat := firstString(userAccessToken)
-
-	path := fmt.Sprintf("/open-apis/sheets/v2/spreadsheets/%s/protected_range_batch_del", spreadsheetToken)
-
-	reqBody := map[string]any{
-		"protectIds": protectIDs,
-	}
-
-	respBody, err := v2APICallWithToken(client, ctx, "DELETE", path, reqBody, uat)
-	if err != nil {
-		return fmt.Errorf("删除保护范围失败: %w", err)
-	}
-
-	var apiResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
-	}
-
-	if apiResp.Code != 0 {
-		return fmt.Errorf("删除保护范围失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
-	}
-
-	return nil
+	return fmt.Errorf("sheet unprotect 接口已被飞书官方废弃且暂无替代 OpenAPI (unsupported)")
 }
 
 // ==================== V3 新版单元格 API ====================

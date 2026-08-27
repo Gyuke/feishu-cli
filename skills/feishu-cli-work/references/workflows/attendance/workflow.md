@@ -6,16 +6,14 @@
 
 ## 核心概念
 
-### Tenant Token 限制（关键）
+### 身份与权限支持
 
-- **全部命令走 `tenant_access_token`**（应用身份），**无需** `feishu-cli auth login`。
-- `larksuite/oapi-sdk-go v3.5.3` 中 `Attendance.UserTask.Query` 与
-  `Attendance.UserStatsData.Query` 的 `SupportedAccessTokenTypes` 仅含 `Tenant`，
-  传入 User Access Token **会被 SDK 直接拒绝**。
-- 权限通过飞书开放平台「应用权限管理」页面授予应用：
+- **支持 User Access Token 与 Tenant Access Token**。
+- 使用 User Token 时支持**本人自查路径**：`--employee-type employee_no` 且无需传 `--user-ids`，系统自动返回当前登录用户本人的打卡/统计记录。
+- 权限范围（User 或 Tenant 级别）：
   - `attendance:task:readonly`（推荐，仅查询打卡和统计数据，不可写入修改）
   - `attendance:task`（含写入）
-- 应用身份起跑前提：`FEISHU_APP_ID` + `FEISHU_APP_SECRET`（环境变量或 `~/.feishu-cli/config.yaml`）。
+- 应用身份起跑前提：`FEISHU_APP_ID` + `FEISHU_APP_SECRET`（环境变量或 `~/.feishu-cli/config.yaml`）。用户身份通过 `feishu-cli auth login` 或 `--user-access-token` 提供。
 
 ### 日期格式
 
@@ -40,13 +38,14 @@ feishu-cli attendance user-task query \
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `--employee-type` | string | - | 用户 ID 类型：`employee_id` (默认) / `open_id` / `user_id` / `employee_no` |
-| `--user-ids` | CSV | ✓ | 用户 ID 列表，逗号分隔，**最多 50 个** |
+| `--employee-type` | string | - | 用户 ID 类型：`employee_id` (默认) / `employee_no` |
+| `--user-ids` | CSV | - | 用户 ID 列表，逗号分隔，**最多 50 个**（留空则走 employee_no 自查本人）|
 | `--start` | string | ✓ | 起始工作日（YYYY-MM-DD 或 YYYYMMDD）|
 | `--end` | string | ✓ | 结束工作日（YYYY-MM-DD 或 YYYYMMDD）|
 | `--need-overtime` | bool | - | 是否包含加班班段打卡结果（默认 false）|
 | `--ignore-invalid-users` | bool | - | 忽略无效/无权限用户（默认 true）|
 | `--include-terminated` | bool | - | 包含离职员工数据（默认 false）|
+| `--user-access-token` | string | - | User Access Token（覆盖登录态）|
 | `-o, --output` | string | - | `text`（默认）/ `json` |
 
 ### 2. 查询考勤统计 `user-stats query`
@@ -61,45 +60,48 @@ feishu-cli attendance user-stats query \
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `--employee-type` | string | - | 用户 ID 类型（同上，默认 `employee_id`）|
+| `--employee-type` | string | - | 用户 ID 类型：`employee_id` (默认) / `employee_no` |
 | `--stats-type` | string | - | `daily`（日度，默认）/ `month`（月度）|
-| `--user-ids` | CSV | ✓ | 查询的用户 ID 列表，**最多 200 个** |
+| `--user-ids` | CSV | - | 查询的用户 ID 列表，**最多 200 个**（留空则走 employee_no 自查本人）|
 | `--current-user-id` | string | - | 发起请求的用户 ID（新系统用户必填，对应「查询统计设置」`user_id`）|
 | `--start` | string | ✓ | 起始日期 |
 | `--end` | string | ✓ | 结束日期（跨度 ≤ 31 天）|
 | `--locale` | string | - | 语言：`zh` / `en` / `ja` |
 | `--need-history` | bool | - | 是否返回历史数据（默认 false）|
 | `--current-group-only` | bool | - | 仅展示当前考勤组（默认 false）|
+| `--user-access-token` | string | - | User Access Token（覆盖登录态）|
 | `-o, --output` | string | - | `text`（默认）/ `json` |
 
 ## 使用示例
 
 ```bash
-# 查询本人最近一周打卡
+# 查询本人最近打卡（自动走 employee_no 本人自查路径）
 feishu-cli attendance user-task query \
-    --employee-type open_id --user-ids ou_xxxxxxxx \
+    --start 2026-05-01 --end 2026-05-18
+
+# 按员工工号查询打卡
+feishu-cli attendance user-task query \
+    --employee-type employee_no --user-ids 10001,10002 \
     --start 2026-05-01 --end 2026-05-18
 
 # 多人 + 加班 + JSON
 feishu-cli attendance user-task query \
-    --employee-type open_id \
-    --user-ids ou_aaa,ou_bbb \
+    --employee-type employee_id \
+    --user-ids 2847xxxx,2848xxxx \
     --start 20260501 --end 20260518 \
     --need-overtime -o json
 
 # 查本人 5 月日度统计
 feishu-cli attendance user-stats query \
-    --employee-type open_id \
-    --user-ids ou_xxxxxxxx --current-user-id ou_xxxxxxxx \
     --stats-type daily --start 2026-05-01 --end 2026-05-31
 
-# 查月度统计 + JSON
+# 查指定工号月度统计 + JSON
 feishu-cli attendance user-stats query \
-    --employee-type open_id --user-ids ou_xxx --current-user-id ou_xxx \
+    --employee-type employee_no --user-ids 10001 \
     --stats-type month --start 2026-05-01 --end 2026-05-31 -o json
 
 # 兼容 alias：att 等价 attendance
-feishu-cli att user-task query --user-ids ou_xxx --start 2026-05-01 --end 2026-05-18
+feishu-cli att user-task query --start 2026-05-01 --end 2026-05-18
 ```
 
 ## 输出字段
@@ -152,17 +154,17 @@ JSON 模式直出归一化结构体（`AttendanceQueryUserTaskResult` / `Attenda
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `unsupported access token type, only support: Tenant` | 误传了 User Token | 移除 `--user-access-token` / `FEISHU_USER_ACCESS_TOKEN`；本模块只走 Tenant |
+| `--employee-type 为 employee_id 时必须指定 --user-ids` | 查他人未传 `--user-ids` | 传 `--user-ids` 指定员工 ID；若查本人请改用 `--employee-type employee_no` 且无需传 `--user-ids` |
 | `--user-ids 单次最多 50 个 / 200 个` | 超过本地预校验上限 | user-task ≤ 50，user-stats ≤ 200，超出请分批 |
 | `--start 到 --end 跨度不能超过 31 天` | **仅 user-stats** 有此本地预校验（`cmd/attendance_user_stats.go`），user-task 不限制 | user-stats 拆成多次查询，每次 ≤ 31 天；user-task 不受此限 |
 | `日期 "xxx" 不是 YYYYMMDD 8 位数字` | 日期格式不对 | 用 `YYYY-MM-DD` 或纯 8 位数字 `YYYYMMDD` |
-| `99991663` / `attendance:task` 权限错误 | 应用未开通考勤 scope | 飞书开放平台 → 应用权限管理 → 申请 `attendance:task:readonly` 并发布新版本 |
+| `99991663` / `attendance:task` 权限错误 | 应用或用户未开通考勤 scope | 飞书开放平台 → 应用权限管理 → 申请 `attendance:task:readonly` 并发布新版本 |
 | `current_user_id is invalid`（user-stats） | 新系统用户未传 `--current-user-id` | 补上 `--current-user-id`，值与 user-ids 中目标用户保持同源 |
 | `invalid_user_ids` / `unauthorized_user_ids` 非空 | 部分 user-id 不存在或应用对该用户无权限 | 核对 user-id 类型与应用可见范围设置 |
 
 ## 权限要求
 
-| 命令 | 必需 scope（tenant 级）|
+| 命令 | 必需 scope |
 |------|------------------------|
 | `attendance user-task query` | `attendance:task:readonly`（推荐）或 `attendance:task` |
 | `attendance user-stats query` | `attendance:task:readonly`（推荐）或 `attendance:task` |

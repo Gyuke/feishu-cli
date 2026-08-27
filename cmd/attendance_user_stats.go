@@ -32,31 +32,30 @@ var attendanceUserStatsQueryCmd = &cobra.Command{
 	Long: `查询日度或月度的考勤统计数据。
 
 对应 OpenAPI: POST /open-apis/attendance/v1/user_stats_datas/query
-权限要求: tenant_access_token；应用需获得 attendance:task:readonly 权限
-（larksuite/oapi-sdk-go v3.5.3 该接口仅支持 tenant token）
+权限要求: attendance:task:readonly
+支持 User Access Token 与 Tenant Access Token。
 
 参数:
-  --employee-type      用户 ID 类型 employee_id|open_id|user_id|employee_no（默认 employee_id）
+  --employee-type      用户 ID 类型：employee_id | employee_no（默认 employee_id）
   --stats-type         统计类型：daily（日度）/ month（月度），默认 daily
-  --user-ids           查询的用户 ID 列表，逗号分隔，最多 200 个（必填）
+  --user-ids           查询的用户 ID 列表，逗号分隔，最多 200 个（留空则按 employee_no 查询本人）
   --current-user-id    发起请求的用户 ID（新系统用户必填，同【查询统计设置】的 user_id）
   --start              起始日期（必填，YYYY-MM-DD 或 YYYYMMDD）
   --end                结束日期（必填，YYYY-MM-DD 或 YYYYMMDD，跨度 ≤ 31 天）
   --locale             语言：zh / en / ja
   --need-history       是否返回历史数据（默认 false）
   --current-group-only 仅展示当前考勤组（默认 false）
+  --user-access-token  User Access Token（覆盖登录态）
   --output, -o         输出格式：text（默认）/ json
 
 示例:
   # 查本人 5 月日度统计
   feishu-cli attendance user-stats query \
-      --employee-type open_id \
-      --user-ids ou_xxxxxxxx --current-user-id ou_xxxxxxxx \
       --stats-type daily --start 2026-05-01 --end 2026-05-31
 
-  # 查月度统计 + JSON
+  # 查指定员工月度统计 + JSON
   feishu-cli attendance user-stats query \
-      --employee-type open_id --user-ids ou_xxx --current-user-id ou_xxx \
+      --employee-type employee_no --user-ids 10001 \
       --stats-type month --start 2026-05-01 --end 2026-05-31 -o json`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -78,6 +77,9 @@ var attendanceUserStatsQueryCmd = &cobra.Command{
 		if err := validateEnum(statsType, "stats-type", []string{"daily", "month"}); err != nil {
 			return err
 		}
+		if err := validateEnum(employeeType, "employee-type", []string{"employee_id", "employee_no"}); err != nil {
+			return err
+		}
 
 		userIDs := splitAndTrim(userIDsRaw)
 		// 局部去重（不改公共 helper splitAndTrim，避免影响其他模块）
@@ -90,9 +92,16 @@ var attendanceUserStatsQueryCmd = &cobra.Command{
 			}
 		}
 		userIDs = unique
+
+		// 官方本人自查路径：未传 user-ids 时使用 employee_no + 空 user_ids
 		if len(userIDs) == 0 {
-			return fmt.Errorf("--user-ids 不能为空")
+			if !cmd.Flags().Changed("employee-type") {
+				employeeType = "employee_no"
+			} else if employeeType != "employee_no" {
+				return fmt.Errorf("--employee-type 为 %s 时必须指定 --user-ids（如需查询本人请使用 --employee-type employee_no 且无需指定 --user-ids）", employeeType)
+			}
 		}
+
 		if len(userIDs) > 200 {
 			return fmt.Errorf("--user-ids 单次最多 200 个，当前 %d 个", len(userIDs))
 		}
@@ -115,6 +124,8 @@ var attendanceUserStatsQueryCmd = &cobra.Command{
 			return fmt.Errorf("--start 到 --end 跨度不能超过 31 天（当前 %.0f 天，请缩短范围或多次查询）", tEnd.Sub(tStart).Hours()/24)
 		}
 
+		token := resolveOptionalUserTokenWithFallback(cmd)
+
 		result, err := client.QueryAttendanceUserStats(
 			employeeType,
 			statsType,
@@ -125,6 +136,7 @@ var attendanceUserStatsQueryCmd = &cobra.Command{
 			locale,
 			needHistory,
 			currentGroupOnly,
+			token,
 		)
 		if err != nil {
 			return err
@@ -175,16 +187,17 @@ func init() {
 	attendanceCmd.AddCommand(attendanceUserStatsCmd)
 	attendanceUserStatsCmd.AddCommand(attendanceUserStatsQueryCmd)
 
-	attendanceUserStatsQueryCmd.Flags().String("employee-type", "employee_id", "用户 ID 类型：employee_id | open_id | user_id | employee_no")
+	attendanceUserStatsQueryCmd.Flags().String("employee-type", "employee_id", "用户 ID 类型：employee_id | employee_no（默认 employee_id）")
 	attendanceUserStatsQueryCmd.Flags().String("stats-type", "daily", "统计类型：daily（日度） | month（月度）")
-	attendanceUserStatsQueryCmd.Flags().String("user-ids", "", "查询的用户 ID 列表（逗号分隔，最多 200 个，必填）")
+	attendanceUserStatsQueryCmd.Flags().String("user-ids", "", "查询的用户 ID 列表（逗号分隔，最多 200 个；留空则按 employee_no 查询本人）")
 	attendanceUserStatsQueryCmd.Flags().String("current-user-id", "", "发起请求的用户 ID（新系统用户必填，对应【查询统计设置】user_id）")
 	attendanceUserStatsQueryCmd.Flags().String("start", "", "起始日期（YYYY-MM-DD 或 YYYYMMDD，必填）")
 	attendanceUserStatsQueryCmd.Flags().String("end", "", "结束日期（YYYY-MM-DD 或 YYYYMMDD，必填；跨度 ≤ 31 天）")
 	attendanceUserStatsQueryCmd.Flags().String("locale", "", "语言：zh / en / ja")
 	attendanceUserStatsQueryCmd.Flags().Bool("need-history", false, "是否返回历史数据")
 	attendanceUserStatsQueryCmd.Flags().Bool("current-group-only", false, "仅展示当前考勤组")
+	attendanceUserStatsQueryCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	attendanceUserStatsQueryCmd.Flags().StringP("output", "o", "text", "输出格式：text | json")
 
-	mustMarkFlagRequired(attendanceUserStatsQueryCmd, "user-ids", "start", "end")
+	mustMarkFlagRequired(attendanceUserStatsQueryCmd, "start", "end")
 }

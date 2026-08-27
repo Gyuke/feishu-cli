@@ -292,7 +292,7 @@ feishu-cli okr cycle {list|detail} ... ; feishu-cli okr progress {list|get|creat
 | Mermaid par 语法 | 飞书不支持 | 用 `Note over X` 替代 |
 | Mermaid 复杂度 | 10+ participant + 2+ alt + 30+ 长标签 | 重试后降级 |
 | sheet filter | 需完整 col+condition | API 限制 |
-| sheet protect | V2 返回 "invalid operation" | 待修复 |
+| sheet protect | 官方已废弃且无公开替代 OpenAPI | unsupported（fail-closed） |
 | 图片插入 | 素材上传 + Image 块引用 | 失败时创建占位块 |
 | shell 转义 | zsh 中 `!` 转义为 `\!` | 已在代码中处理 |
 

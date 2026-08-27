@@ -993,11 +993,12 @@ feishu-cli user list --department-id DEPT_ID
 feishu-cli dept get <department_id>
 feishu-cli dept children <department_id>
 
-# 考勤（tenant token）
-feishu-cli attendance user-task query --employee-type open_id --user-ids ou_xxx \
+# 考勤（支持 User/Tenant Token，未传 --user-ids 自动走本人自查）
+feishu-cli attendance user-task query --start 2026-03-01 --end 2026-03-31
+feishu-cli attendance user-task query --employee-type employee_id --user-ids 2847xxxx \
   --start 2026-03-01 --end 2026-03-31
-feishu-cli attendance user-stats query --employee-type open_id --user-ids ou_xxx \
-  --current-user-id ou_xxx --start 2026-03-01 --end 2026-03-31
+feishu-cli attendance user-stats query --employee-type employee_no --user-ids 10001 \
+  --start 2026-03-01 --end 2026-03-31
 
 # OKR
 feishu-cli okr cycle list
