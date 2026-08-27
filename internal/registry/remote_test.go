@@ -52,10 +52,11 @@ func seedCache(t *testing.T, dir, name, version, brand string) {
 	if err := os.MkdirAll(cDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cDir, "remote_meta.json"), testRegistryJSON(name, version), 0644); err != nil {
+	payload := testRegistryJSON(name, version)
+	if err := os.WriteFile(filepath.Join(cDir, "remote_meta.json"), payload, 0644); err != nil {
 		t.Fatal(err)
 	}
-	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: version, Brand: brand})
+	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: version, Brand: brand, Digest: payloadDigest(payload)})
 	if err := os.WriteFile(filepath.Join(cDir, "remote_meta.meta.json"), meta, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +272,7 @@ func TestCorruptedCache_FailClosed(t *testing.T) {
 	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: "9.0.0", Brand: brandFeishu})
 	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.meta.json"), meta, 0644)
 
-	_, err := loadCachedMerged()
+	_, _, err := loadCachedMerged()
 	if err == nil {
 		t.Fatal("损坏 cache 应报错")
 	}
@@ -481,9 +482,15 @@ func TestCacheVersionMismatchNotOverlayed(t *testing.T) {
 	t.Setenv("FEISHU_CLI_META_TTL", "3600")
 	cDir := filepath.Join(tmp, "cache")
 	_ = os.MkdirAll(cDir, 0700)
-	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.json"), testRegistryJSON("mismatch_svc", "9.0.0"), 0644)
-	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: "8.0.0", Brand: brandFeishu})
+	payload := testRegistryJSON("mismatch_svc", "9.0.0")
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.json"), payload, 0644)
+	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: "8.0.0", Brand: brandFeishu, Digest: payloadDigest(payload)})
 	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.meta.json"), meta, 0644)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
 	Init()
 	if _, ok := mergedServices["mismatch_svc"]; ok {
 		t.Fatal("meta.Version 与 JSON version 不一致时不得 overlay")
@@ -518,6 +525,114 @@ func TestPartialAtomicPairNextProcessNotOverlay(t *testing.T) {
 	Init()
 	if _, ok := mergedServices["partial_svc"]; ok {
 		t.Fatal("残缺 cache pair 下一进程不得 overlay")
+	}
+}
+
+func TestPartialMetaWriteSameVersionOldMetaNotOverlay(t *testing.T) {
+	tmp := isolateRemote(t)
+	seedCache(t, tmp, "old_svc", "9.0.0", brandFeishu)
+	atomicWriteFn = func(path string, data []byte, perm os.FileMode) error {
+		if strings.HasSuffix(path, "remote_meta.meta.json") {
+			return errors.New("meta write fail")
+		}
+		return atomicWriteFile(path, data, perm)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeJSON("new_svc", "9.0.0"))
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	t.Setenv("FEISHU_CLI_META_TTL", "0")
+	Init()
+	waitBackgroundRefresh()
+	payload, err := os.ReadFile(cachePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "new_svc") {
+		t.Fatal("data 应已换成 new_svc")
+	}
+	metaRaw, err := os.ReadFile(cacheMetaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cm CacheMeta
+	if err := json.Unmarshal(metaRaw, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Digest == payloadDigest(payload) {
+		t.Fatal("meta 写入失败时应仍是旧 digest")
+	}
+	atomicWriteFn = atomicWriteFile
+	reinitKeepingHooks()
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	Init()
+	if _, ok := mergedServices["new_svc"]; ok {
+		t.Fatal("同 version 旧 meta 不得让被替换的 data 被 overlay")
+	}
+	if _, ok := mergedServices["old_svc"]; ok {
+		t.Fatal("data 已不是 old_svc，也不得 overlay 旧内容")
+	}
+}
+
+func TestInterleavingCacheDigestMismatchNotOverlay(t *testing.T) {
+	tmp := isolateRemote(t)
+	seedCache(t, tmp, "orig_svc", "9.0.0", brandFeishu)
+	if err := os.WriteFile(filepath.Join(tmp, "cache", "remote_meta.json"), testRegistryJSON("interleaved_svc", "9.0.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeJSON("refreshed_svc", "9.1.0"))
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	if _, ok := mergedServices["interleaved_svc"]; ok {
+		t.Fatal("digest 不匹配的 interleaved data 不得 overlay")
+	}
+	if _, ok := mergedServices["orig_svc"]; ok {
+		t.Fatal("被替换掉的 orig_svc 不得 overlay")
+	}
+	waitBackgroundRefresh()
+	if hits == 0 {
+		t.Fatal("digest 不匹配应触发 refresh")
+	}
+	reinitKeepingHooks()
+	Init()
+	if _, ok := mergedServices["refreshed_svc"]; !ok {
+		t.Fatal("refresh 成功后下一进程应 overlay 新 pair")
+	}
+}
+
+func TestLegacyMetaWithoutDigestSkipsOverlayAndRefreshes(t *testing.T) {
+	tmp := isolateRemote(t)
+	cDir := filepath.Join(tmp, "cache")
+	_ = os.MkdirAll(cDir, 0700)
+	payload := testRegistryJSON("legacy_svc", "9.0.0")
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.json"), payload, 0644)
+	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: "9.0.0", Brand: brandFeishu})
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.meta.json"), meta, 0644)
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeJSON("legacy_refreshed", "9.1.0"))
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	if _, ok := mergedServices["legacy_svc"]; ok {
+		t.Fatal("无 digest 的旧 meta 不得 overlay")
+	}
+	waitBackgroundRefresh()
+	if hits == 0 {
+		t.Fatal("无 digest 的旧 meta 应 refresh")
 	}
 }
 

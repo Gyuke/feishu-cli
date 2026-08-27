@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,10 +30,12 @@ const (
 )
 
 // CacheMeta 描述 remote_meta.json 旁路的版本/品牌/检查时间。
+// Digest 是 cached payload 的 SHA-256 hex；缺 digest 的旧 meta 不得 overlay。
 type CacheMeta struct {
 	LastCheckAt int64  `json:"last_check_at"`
 	Version     string `json:"version,omitempty"`
 	Brand       string `json:"brand,omitempty"`
+	Digest      string `json:"digest,omitempty"`
 }
 
 type remoteResponse struct {
@@ -312,26 +316,32 @@ func saveCacheMeta(cm CacheMeta) error {
 	return atomicWriteFn(cacheMetaPath(), data, 0644)
 }
 
-func loadCachedMerged() (*MergedRegistry, error) {
+func payloadDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func loadCachedMerged() (payload []byte, reg *MergedRegistry, err error) {
 	path := cachePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var reg MergedRegistry
-	if err := json.Unmarshal(data, &reg); err != nil {
+	var parsed MergedRegistry
+	if err := json.Unmarshal(data, &parsed); err != nil {
 		// 损坏 cache fail-closed：删除后回退 embedded
 		_ = os.Remove(path)
 		_ = os.Remove(cacheMetaPath())
-		return nil, err
+		return nil, nil, err
 	}
-	return &reg, nil
+	return data, &parsed, nil
 }
 
 func saveCachedMerged(data []byte, cm CacheMeta) error {
 	if err := os.MkdirAll(cacheDir(), 0700); err != nil {
 		return err
 	}
+	cm.Digest = payloadDigest(data)
 	if err := atomicWriteFn(cachePath(), data, 0644); err != nil {
 		return err
 	}
@@ -394,8 +404,14 @@ func validRemoteRegistry(reg *MergedRegistry) bool {
 	return false
 }
 
-func cachePairEligible(cm CacheMeta, cached *MergedRegistry) bool {
+func cachePairEligible(cm CacheMeta, cached *MergedRegistry, payload []byte) bool {
 	if cached == nil {
+		return false
+	}
+	if strings.TrimSpace(cm.Digest) == "" {
+		return false
+	}
+	if cm.Digest != payloadDigest(payload) {
 		return false
 	}
 	if cm.Brand != configuredBrand {
@@ -522,11 +538,20 @@ func applyRemoteOverlay() {
 		return
 	}
 
+	forceRefresh := false
 	if metaErr == nil {
-		if cached, err := loadCachedMerged(); err == nil && cachePairEligible(cm, cached) {
+		if strings.TrimSpace(cm.Digest) == "" {
+			forceRefresh = true
+		} else if payload, cached, err := loadCachedMerged(); err != nil {
+			forceRefresh = true
+		} else if cm.Digest != payloadDigest(payload) || cm.Version != cached.Version {
+			forceRefresh = true
+		} else if cachePairEligible(cm, cached, payload) {
 			overlayMergedServices(cached)
 			overlaySource = "cache"
 			runtimeVersion = cached.Version
+		} else if !validRemoteRegistry(cached) {
+			forceRefresh = true
 		}
 	}
 
@@ -534,7 +559,7 @@ func applyRemoteOverlay() {
 		doSyncFetch(embeddedVersion)
 		return
 	}
-	if shouldRefresh(cm) || metaErr != nil {
+	if shouldRefresh(cm) || metaErr != nil || forceRefresh {
 		triggerBackgroundRefresh()
 	}
 }
