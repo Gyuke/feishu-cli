@@ -13,7 +13,17 @@ import (
 	"github.com/riba2534/feishu-cli/internal/config"
 )
 
-const tatHTTPTimeout = 10 * time.Second
+const (
+	tatHTTPTimeout      = 10 * time.Second
+	minTATExpireSeconds = 1
+	maxTATExpireSeconds = 24 * 60 * 60
+)
+
+// TenantAccessToken 是 Accounts OAuth v3 client_credentials 的已校验结果。
+type TenantAccessToken struct {
+	AccessToken string
+	ExpiresIn   int
+}
 
 type tatResponse struct {
 	Code             int    `json:"code"`
@@ -43,14 +53,48 @@ func DefaultTATEndpoint(baseURL string) string {
 
 // FetchTenantAccessToken 用 client_credentials 向官方 Accounts OAuth v3 换取 tenant access token。
 func FetchTenantAccessToken(appID, appSecret, baseURL string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tatHTTPTimeout)
-	defer cancel()
+	tok, err := FetchTenantAccessTokenResult(context.Background(), appID, appSecret, baseURL)
+	if err != nil {
+		return "", err
+	}
+	return tok.AccessToken, nil
+}
+
+// FetchTenantAccessTokenContext 与 FetchTenantAccessToken 相同，但使用调用方 context。
+func FetchTenantAccessTokenContext(ctx context.Context, appID, appSecret, baseURL string) (string, error) {
+	tok, err := FetchTenantAccessTokenResult(ctx, appID, appSecret, baseURL)
+	if err != nil {
+		return "", err
+	}
+	return tok.AccessToken, nil
+}
+
+// FetchTenantAccessTokenResult 返回已校验的 token 与 expires_in（秒）。
+func FetchTenantAccessTokenResult(ctx context.Context, appID, appSecret, baseURL string) (*TenantAccessToken, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tatHTTPTimeout)
+		defer cancel()
+	}
 	return fetchTenantAccessToken(ctx, config.NewHTTPClient(tatHTTPTimeout), appID, appSecret, baseURL)
 }
 
-func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID, appSecret, baseURL string) (string, error) {
+func validateTATExpiresIn(expiresIn int) error {
+	if expiresIn < minTATExpireSeconds {
+		return fmt.Errorf("tenant token 缺少有效的 expires_in")
+	}
+	if expiresIn > maxTATExpireSeconds {
+		return fmt.Errorf("tenant token expires_in=%d 超出合理范围（1s–24h）", expiresIn)
+	}
+	return nil
+}
+
+func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID, appSecret, baseURL string) (*TenantAccessToken, error) {
 	if appID == "" || appSecret == "" {
-		return "", fmt.Errorf("缺少 app_id 或 app_secret 配置")
+		return nil, fmt.Errorf("缺少 app_id 或 app_secret 配置")
 	}
 	if httpClient == nil {
 		httpClient = config.NewHTTPClient(tatHTTPTimeout)
@@ -58,10 +102,10 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 	endpoint := TATEndpointFunc(baseURL)
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("tenant token 端点无效: %w", err)
+		return nil, fmt.Errorf("tenant token 端点无效: %w", err)
 	}
 	if err := config.CheckRequestURL(u); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	form := url.Values{}
@@ -71,31 +115,34 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("构造 tenant token 请求失败: %w", err)
+		return nil, fmt.Errorf("构造 tenant token 请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求 tenant token 失败: %w", err)
+		return nil, fmt.Errorf("请求 tenant token 失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := readLimitedAuthBody(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("读取 tenant token 响应失败: %w", err)
+		return nil, fmt.Errorf("读取 tenant token 响应失败: %w", err)
 	}
 
 	var result tatResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		if resp.StatusCode >= 400 {
-			return "", fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", resp.StatusCode, authBodyPreview(body))
+			return nil, fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", resp.StatusCode, authBodyPreview(body))
 		}
-		return "", fmt.Errorf("解析 tenant token 响应失败（HTTP %d）: %w", resp.StatusCode, err)
+		return nil, fmt.Errorf("解析 tenant token 响应失败（HTTP %d）: %w", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode < 400 && result.Code == 0 && result.AccessToken != "" && result.Error == "" {
-		return result.AccessToken, nil
+		if err := validateTATExpiresIn(result.ExpiresIn); err != nil {
+			return nil, err
+		}
+		return &TenantAccessToken{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn}, nil
 	}
 
 	if result.Error == "server_error" || result.Error == "temporarily_unavailable" || result.Error == "slow_down" || resp.StatusCode >= 500 {
@@ -103,11 +150,11 @@ func fetchTenantAccessToken(ctx context.Context, httpClient *http.Client, appID,
 		if desc == "" {
 			desc = result.Msg
 		}
-		return "", fmt.Errorf("tenant token 端点暂时失败（HTTP %d, code=%d, error=%s）: %s",
+		return nil, fmt.Errorf("tenant token 端点暂时失败（HTTP %d, code=%d, error=%s）: %s",
 			resp.StatusCode, result.Code, result.Error, redactAuthPreview(desc))
 	}
 
-	return "", classifyTATFailure(resp.StatusCode, body)
+	return nil, classifyTATFailure(resp.StatusCode, body)
 }
 
 func classifyTATFailure(status int, body []byte) error {
@@ -136,9 +183,4 @@ func classifyTATFailure(status int, body []byte) error {
 		}
 	}
 	return fmt.Errorf("获取 tenant_access_token 失败: HTTP %d %s", status, authBodyPreview(body))
-}
-
-// FetchTenantAccessTokenContext 与 FetchTenantAccessToken 相同，但使用调用方 context。
-func FetchTenantAccessTokenContext(ctx context.Context, appID, appSecret, baseURL string) (string, error) {
-	return fetchTenantAccessToken(ctx, config.NewHTTPClient(tatHTTPTimeout), appID, appSecret, baseURL)
 }

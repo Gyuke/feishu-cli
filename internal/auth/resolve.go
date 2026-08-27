@@ -94,7 +94,7 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 		// access_token 过期，尝试刷新（跨进程锁：reload → check → refresh → commit）
 		if token.IsRefreshTokenValid() {
 			logf("[自动刷新] Access Token 已过期，正在刷新...")
-			newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
+			newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false, token.RefreshToken)
 			if refreshErr != nil {
 				logf("[自动刷新] 刷新失败: %v", refreshErr)
 				return "", fmt.Errorf("自动刷新 Access Token 失败: %w", refreshErr)
@@ -129,7 +129,8 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (string, error) {
 	local, err := LoadToken()
 	if err != nil {
-		return "", fmt.Errorf("读取本地 token 文件失败: %w", err)
+		// 无法解析本地文件就不能判定“匹配”，外部显式 token 保持优先。
+		return "", nil
 	}
 	if local == nil || local.AccessToken != explicitToken {
 		return "", nil
@@ -144,7 +145,7 @@ func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (
 		return "", fmt.Errorf("显式传入的 access_token 匹配本地 token.json，但 refresh_token 已失效。请重新 `feishu-cli auth login`")
 	}
 	logf("[自动刷新] 显式传入的 access_token 已过期且匹配本地 token.json，正在刷新...")
-	newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
+	newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false, local.RefreshToken)
 	if refreshErr != nil {
 		logf("[自动刷新] 刷新失败: %v", refreshErr)
 		return "", fmt.Errorf("自动刷新 Access Token 失败: %w", refreshErr)
@@ -175,12 +176,13 @@ func ForceRefreshLocalToken(appID, appSecret, baseURL string) (*TokenStore, erro
 	if err := local.RequireBoundApp(appID); err != nil {
 		return nil, err
 	}
-	return refreshLocalTokenLocked(appID, appSecret, baseURL, true)
+	return refreshLocalTokenLocked(appID, appSecret, baseURL, true, local.RefreshToken)
 }
 
 // refreshLocalTokenLocked 在跨进程锁下 reload→check→refresh→commit。
+// expectedRefresh 是加锁前看到的 refresh_token 代际；reload 后若已轮换则直接采用，避免二次消耗。
 // 写失败时保留旧 token 文件。force 为 true 时即使 access 仍有效也刷新。
-func refreshLocalTokenLocked(appID, appSecret, baseURL string, force bool) (*TokenStore, error) {
+func refreshLocalTokenLocked(appID, appSecret, baseURL string, force bool, expectedRefresh string) (*TokenStore, error) {
 	path, err := TokenPath()
 	if err != nil {
 		return nil, err
@@ -196,6 +198,10 @@ func refreshLocalTokenLocked(appID, appSecret, baseURL string, force bool) (*Tok
 		}
 		if err := current.RequireBoundApp(appID); err != nil {
 			return err
+		}
+		if expectedRefresh != "" && current.RefreshToken != expectedRefresh {
+			result = current
+			return nil
 		}
 		if !force && current.IsAccessTokenValid() {
 			result = current

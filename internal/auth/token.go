@@ -115,6 +115,7 @@ func writeTokenUnlocked(path string, t *TokenStore) error {
 	if err := atomicWriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("写入 token 文件失败（原文件未改动）: %w", err)
 	}
+	_ = os.Remove(path + ".bak")
 
 	clearCurrentUserCacheBestEffort()
 	return nil
@@ -132,6 +133,9 @@ func DeleteToken() error {
 			if !os.IsNotExist(err) {
 				return fmt.Errorf("删除 token 文件失败: %w", err)
 			}
+		}
+		if err := os.Remove(path + ".bak"); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除 token 备份失败: %w", err)
 		}
 		clearCurrentUserCacheBestEffort()
 		return nil
@@ -156,13 +160,12 @@ func (t *TokenStore) RequireBoundApp(appID string) error {
 	if t == nil {
 		return fmt.Errorf("缺少 token")
 	}
+	if appID == "" {
+		return fmt.Errorf("缺少当前 app_id，无法校验 token 绑定。请配置 app_id 后执行 `feishu-cli auth token --bind-legacy-app` 或重新 `feishu-cli auth login`")
+	}
 	if t.AppID == "" {
-		cur := appID
-		if cur == "" {
-			cur = "当前应用"
-		}
-		return fmt.Errorf("%w：拒绝用 %s 静默接管该 User Token。请先执行 `feishu-cli auth token --bind-legacy-app` 绑定到当前应用，或重新 `feishu-cli auth login`",
-			ErrUnboundToken, cur)
+		return fmt.Errorf("%w：拒绝用当前应用 %s 静默接管该 User Token。请先执行 `feishu-cli auth token --bind-legacy-app` 绑定到当前应用，或重新 `feishu-cli auth login`",
+			ErrUnboundToken, appID)
 	}
 	return t.CheckAppMismatch(appID)
 }

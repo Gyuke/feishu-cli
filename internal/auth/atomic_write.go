@@ -7,6 +7,9 @@ import (
 	"runtime"
 )
 
+// dirSyncFn 在 rename 提交后 fsync 目录；测试可注入失败。提交后失败不得回滚已替换的文件。
+var dirSyncFn = syncDir
+
 // atomicWriteFile 将 data 以 perm 权限原子写入 path：同目录临时文件 → chmod → write → fsync → rename。
 // 写入失败时不会改动原文件。
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
@@ -44,10 +47,10 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("提交 token 文件失败: %w", err)
 	}
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("fsync 目录失败: %w", err)
-	}
 	success = true
+	if err := dirSyncFn(dir); err != nil {
+		logf("警告: token 文件已提交，但 fsync 目录失败: %v", err)
+	}
 	return nil
 }
 

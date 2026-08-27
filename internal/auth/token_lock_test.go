@@ -190,3 +190,114 @@ func TestLoadTokenFrom_RecoversWindowsBak(t *testing.T) {
 		t.Fatalf("应恢复 .bak，得到 %+v", got)
 	}
 }
+
+func TestDeleteTokenRemovesBak(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+
+	bak := &TokenStore{AccessToken: "from-bak", AppID: "cli_a"}
+	raw, _ := json.Marshal(bak)
+	if err := os.WriteFile(tokenFile+".bak", raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteToken(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadTokenFrom(tokenFile)
+	if err != nil || got != nil {
+		t.Fatalf("logout 后不得从 .bak 复活: got=%+v err=%v", got, err)
+	}
+}
+
+func TestSaveTokenRemovesStaleBak(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+	if err := os.WriteFile(tokenFile+".bak", []byte(`{"access_token":"stale-bak"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveToken(&TokenStore{AccessToken: "new", AppID: "cli_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tokenFile + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("成功 Save 后应删除陈旧 .bak: %v", err)
+	}
+}
+
+func TestAtomicWrite_DirSyncFailureAfterRenameIsNonFatal(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+	if err := SaveToken(&TokenStore{AccessToken: "old", AppID: "cli_a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := dirSyncFn
+	dirSyncFn = func(string) error { return errors.New("injected dir sync failure") }
+	t.Cleanup(func() { dirSyncFn = orig })
+
+	if err := SaveToken(&TokenStore{AccessToken: "new-committed", AppID: "cli_a"}); err != nil {
+		t.Fatalf("rename 已提交后 dir fsync 失败不得当成未改动: %v", err)
+	}
+	got, err := LoadToken()
+	if err != nil || got == nil || got.AccessToken != "new-committed" {
+		t.Fatalf("新 token 应已提交: %+v err=%v", got, err)
+	}
+}
+
+func TestConcurrentForceRefreshCommitsOnce(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		time.Sleep(80 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "force-once",
+			"refresh_token": "force-rt",
+			"expires_in":    7200,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := SaveToken(&TokenStore{
+		AccessToken:      "still-valid",
+		RefreshToken:     "shared-rt",
+		ExpiresAt:        time.Now().Add(time.Hour),
+		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		AppID:            "aid",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := ForceRefreshLocalToken("aid", "sec", srv.URL)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+	if atomic.LoadInt32(&hits) != 1 {
+		t.Fatalf("并发 force refresh 不得二次消耗新 refresh token，实际 %d 次请求", hits)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+	loaded, _ := LoadToken()
+	if loaded.AccessToken != "force-once" || loaded.RefreshToken != "force-rt" {
+		t.Fatalf("落盘 %+v", loaded)
+	}
+}

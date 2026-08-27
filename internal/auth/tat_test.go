@@ -135,6 +135,33 @@ func TestFetchTenantAccessToken_Timeout(t *testing.T) {
 	}
 }
 
+func TestFetchTenantAccessToken_RejectsInvalidExpiresIn(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing", `{"code":0,"access_token":"t-x"}`},
+		{"zero", `{"code":0,"access_token":"t-x","expires_in":0}`},
+		{"negative", `{"code":0,"access_token":"t-x","expires_in":-1}`},
+		{"too large", `{"code":0,"access_token":"t-x","expires_in":99999999}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+			orig := TATEndpointFunc
+			TATEndpointFunc = func(string) string { return srv.URL }
+			t.Cleanup(func() { TATEndpointFunc = orig })
+			_, err := FetchTenantAccessToken("cli_app", "secret_x", "https://open.feishu.cn")
+			if err == nil {
+				t.Fatal("expected expires_in validation error")
+			}
+		})
+	}
+}
+
 func TestFetchTenantAccessToken_RedactsSecretsAndRejectsOversize(t *testing.T) {
 	t.Run("redact", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

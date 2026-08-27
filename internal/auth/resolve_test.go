@@ -77,6 +77,51 @@ func TestResolveUserAccessToken_UnboundStoredTokenFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRequireBoundApp_EmptyCurrentAppID(t *testing.T) {
+	tok := &TokenStore{AccessToken: "u-x", AppID: "cli_bound"}
+	if err := tok.RequireBoundApp(""); err == nil {
+		t.Fatal("当前 appID 为空时即使 token 已绑定也必须失败")
+	}
+}
+
+func TestRefreshIfStaleLocalToken_CorruptLocalDoesNotBlockExplicit(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.json")
+	tokenPathFunc = func() (string, error) { return tokenFile, nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+	if err := os.WriteFile(tokenFile, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := refreshIfStaleLocalToken("u-external", "cli_app", "sec", "")
+	if err != nil {
+		t.Fatalf("损坏本地文件无法匹配时，显式外部 token 应可用: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("应让调用方使用原始显式 token，got %q", got)
+	}
+	tok, err := ResolveUserAccessToken("u-external", "", "cli_app", "sec", "")
+	if err != nil || tok != "u-external" {
+		t.Fatalf("Resolve 显式外部 token 应得 u-external: tok=%q err=%v", tok, err)
+	}
+}
+
+func TestRefreshIfStaleLocalToken_MatchingParseableStillFailClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenPathFunc = func() (string, error) { return filepath.Join(tmpDir, "token.json"), nil }
+	t.Cleanup(func() { tokenPathFunc = originalTokenPath })
+	if err := SaveToken(&TokenStore{
+		AccessToken: "u-local",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := refreshIfStaleLocalToken("u-local", "cli_app", "sec", "")
+	if err == nil || !errors.Is(err, ErrUnboundToken) {
+		t.Fatalf("可解析且匹配的未绑定本地 token 必须 fail closed: %v", err)
+	}
+}
+
 func TestResolveUserAccessToken_ConfigValue(t *testing.T) {
 	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
 

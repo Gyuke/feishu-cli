@@ -14,7 +14,6 @@ import (
 
 const (
 	legacyTenantTokenInternalPath = "/open-apis/auth/v3/tenant_access_token/internal"
-	legacyAppTokenInternalPath    = "/open-apis/auth/v3/app_access_token/internal"
 )
 
 // sdkTestTransport 仅测试注入：替换 SDK HTTP 客户端的底层 Transport。
@@ -49,7 +48,7 @@ func isOfficialLegacyInternalTokenRequest(req *http.Request) bool {
 		return false
 	}
 	path := strings.TrimSuffix(req.URL.Path, "/")
-	return path == legacyTenantTokenInternalPath || path == legacyAppTokenInternalPath
+	return path == legacyTenantTokenInternalPath
 }
 
 func fulfillLegacyInternalTokenViaAccountsV3(req *http.Request) (*http.Response, error) {
@@ -65,24 +64,18 @@ func fulfillLegacyInternalTokenViaAccountsV3(req *http.Request) (*http.Response,
 		}
 		_ = json.Unmarshal(body, &creds)
 	}
-	token, err := auth.FetchTenantAccessTokenContext(req.Context(), creds.AppID, creds.AppSecret, "https://"+req.URL.Hostname())
+	tok, err := auth.FetchTenantAccessTokenResult(req.Context(), creds.AppID, creds.AppSecret, "https://"+req.URL.Hostname())
 	if err != nil {
 		return sdkJSONResponse(http.StatusOK, map[string]any{
 			"code": 99991663,
 			"msg":  "换取 tenant_access_token 失败",
 		})
 	}
-	path := strings.TrimSuffix(req.URL.Path, "/")
-	payload := map[string]any{
-		"code":   0,
-		"expire": 7200,
-	}
-	if path == legacyAppTokenInternalPath {
-		payload["app_access_token"] = token
-	} else {
-		payload["tenant_access_token"] = token
-	}
-	return sdkJSONResponse(http.StatusOK, payload)
+	return sdkJSONResponse(http.StatusOK, map[string]any{
+		"code":                0,
+		"expire":              tok.ExpiresIn,
+		"tenant_access_token": tok.AccessToken,
+	})
 }
 
 func readLimitedAuthBodyFromSDK(r io.Reader) ([]byte, error) {

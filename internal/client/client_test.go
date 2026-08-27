@@ -512,3 +512,143 @@ func TestGetClient_OfficialBotNeverSendsSecretToLegacyOpenHost(t *testing.T) {
 		t.Fatalf("v3 body=%s", v3Body)
 	}
 }
+
+func TestGetClient_DoesNotInterceptAppAccessTokenInternal(t *testing.T) {
+	resetClient()
+	resetConfig()
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+
+	var v3Hits int
+	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v3Hits++
+		_, _ = w.Write([]byte(`{"code":0,"access_token":"t-tenant","expires_in":7200}`))
+	}))
+	t.Cleanup(accounts.Close)
+	orig := auth.TATEndpointFunc
+	auth.TATEndpointFunc = func(string) string { return accounts.URL }
+	t.Cleanup(func() { auth.TATEndpointFunc = orig })
+
+	var appPathHits int
+	sdkTestTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "app_access_token/internal") {
+			appPathHits++
+			payload := `{"code":0,"app_access_token":"a-real-app","expire":100}`
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Proto:         "HTTP/1.1",
+				ProtoMajor:    1,
+				ProtoMinor:    1,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				Body:          io.NopCloser(strings.NewReader(payload)),
+				ContentLength: int64(len(payload)),
+				Request:       req,
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected %s", req.URL)
+	})
+	t.Cleanup(func() { sdkTestTransport = nil })
+
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.yaml"
+	if err := os.WriteFile(configFile, []byte("app_id: \"cli_app_tok\"\napp_secret: \"secret_app\"\nbase_url: \"https://open.feishu.cn\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(configFile); err != nil {
+		t.Fatal(err)
+	}
+	cli, err := GetClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := cli.GetAppAccessTokenBySelfBuiltApp(ctx, &larkcore.SelfBuiltAppAccessTokenReq{
+		AppID: "cli_app_tok", AppSecret: "secret_app",
+	})
+	if err != nil {
+		t.Fatalf("app_access_token/internal 不应被 v3 桥接拦截: %v", err)
+	}
+	if resp == nil || resp.AppAccessToken != "a-real-app" {
+		t.Fatalf("不得把 tenant token 标成 app_access_token: %+v", resp)
+	}
+	if v3Hits != 0 {
+		t.Fatalf("app token 路径不得调用 Accounts v3, hits=%d", v3Hits)
+	}
+	if appPathHits != 1 {
+		t.Fatalf("应将请求交给底层传输, hits=%d", appPathHits)
+	}
+}
+
+func TestGetClient_OfficialBotBusinessCallUsesV3TenantToken(t *testing.T) {
+	resetClient()
+	resetConfig()
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+
+	var v3Hits int
+	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v3Hits++
+		_, _ = w.Write([]byte(`{"code":0,"access_token":"t-biz","expires_in":3600}`))
+	}))
+	t.Cleanup(accounts.Close)
+	orig := auth.TATEndpointFunc
+	auth.TATEndpointFunc = func(string) string { return accounts.URL }
+	t.Cleanup(func() { auth.TATEndpointFunc = orig })
+
+	var (
+		legacyHits int
+		bizAuth    string
+		bizHits    int
+	)
+	sdkTestTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		if strings.Contains(req.URL.Path, "tenant_access_token/internal") || strings.Contains(string(body), "app_secret") && strings.Contains(req.URL.Path, "/open-apis/auth/") {
+			legacyHits++
+			return nil, fmt.Errorf("legacy credential request: %s", req.URL)
+		}
+		if strings.Contains(req.URL.Path, "/open-apis/im/v1/chats") {
+			bizHits++
+			bizAuth = req.Header.Get("Authorization")
+			payload := `{"code":0,"msg":"ok","data":{"items":[{"chat_id":"oc_1","name":"n"}],"has_more":false}}`
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Proto:         "HTTP/1.1",
+				ProtoMajor:    1,
+				ProtoMinor:    1,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				Body:          io.NopCloser(strings.NewReader(payload)),
+				ContentLength: int64(len(payload)),
+				Request:       req,
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected %s", req.URL)
+	})
+	t.Cleanup(func() { sdkTestTransport = nil })
+
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.yaml"
+	if err := os.WriteFile(configFile, []byte("app_id: \"cli_biz\"\napp_secret: \"secret_biz\"\nbase_url: \"https://open.feishu.cn\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(configFile); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ListChats("", "", 10, "", "")
+	if err != nil {
+		t.Fatalf("业务 API: %v", err)
+	}
+	if got == nil || len(got.Items) != 1 || got.Items[0].ChatID != "oc_1" {
+		t.Fatalf("业务响应 %+v", got)
+	}
+	if v3Hits != 1 {
+		t.Fatalf("Accounts v3 应恰好一次, hits=%d", v3Hits)
+	}
+	if legacyHits != 0 {
+		t.Fatal("不得向旧 Open host 发送凭证换票")
+	}
+	if bizHits != 1 || bizAuth != "Bearer t-biz" {
+		t.Fatalf("业务请求应携带 v3 tenant token, auth=%q hits=%d", bizAuth, bizHits)
+	}
+}
