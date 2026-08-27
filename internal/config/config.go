@@ -12,15 +12,18 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	AppID             string       `mapstructure:"app_id"`
-	AppSecret         string       `mapstructure:"app_secret"`
-	UserAccessToken   string       `mapstructure:"user_access_token"`
-	BaseURL           string       `mapstructure:"base_url"`
-	OwnerEmail        string       `mapstructure:"owner_email"`
-	TransferOwnership bool         `mapstructure:"transfer_ownership"`
-	Debug             bool         `mapstructure:"debug"`
-	Export            ExportConfig `mapstructure:"export"`
-	Import            ImportConfig `mapstructure:"import"`
+	AppID                    string       `mapstructure:"app_id"`
+	AppSecret                string       `mapstructure:"app_secret"`
+	UserAccessToken          string       `mapstructure:"user_access_token"`
+	BaseURL                  string       `mapstructure:"base_url"`
+	AllowCustomBaseURL       bool         `mapstructure:"allow_custom_base_url"`
+	AllowInsecureHTTP        bool         `mapstructure:"allow_insecure_http"`
+	AllowCrossOriginRedirect bool         `mapstructure:"allow_cross_origin_redirect"`
+	OwnerEmail               string       `mapstructure:"owner_email"`
+	TransferOwnership        bool         `mapstructure:"transfer_ownership"`
+	Debug                    bool         `mapstructure:"debug"`
+	Export                   ExportConfig `mapstructure:"export"`
+	Import                   ImportConfig `mapstructure:"import"`
 }
 
 // ExportConfig holds export-related configuration
@@ -74,7 +77,7 @@ func ApplyBotFlagCredentials() {
 	}
 	if cfg == nil {
 		cfg = &Config{
-			BaseURL: "https://open.feishu.cn",
+			BaseURL: OfficialFeishuOpen,
 			Export:  ExportConfig{AssetsDir: "./assets"},
 			Import:  ImportConfig{UploadImages: true},
 		}
@@ -106,7 +109,10 @@ func Init(cfgFile string) error {
 	}
 
 	// 2. 设置默认值
-	viper.SetDefault("base_url", "https://open.feishu.cn")
+	viper.SetDefault("base_url", OfficialFeishuOpen)
+	viper.SetDefault("allow_custom_base_url", false)
+	viper.SetDefault("allow_insecure_http", false)
+	viper.SetDefault("allow_cross_origin_redirect", false)
 	viper.SetDefault("owner_email", "")
 	viper.SetDefault("transfer_ownership", false)
 	viper.SetDefault("debug", false)
@@ -123,6 +129,9 @@ func Init(cfgFile string) error {
 	_ = viper.BindEnv("app_secret", "FEISHU_APP_SECRET")
 	_ = viper.BindEnv("user_access_token", "FEISHU_USER_ACCESS_TOKEN")
 	_ = viper.BindEnv("base_url", "FEISHU_BASE_URL")
+	_ = viper.BindEnv("allow_custom_base_url", envAllowCustomBaseURL)
+	_ = viper.BindEnv("allow_insecure_http", envAllowInsecureHTTP)
+	_ = viper.BindEnv("allow_cross_origin_redirect", envAllowCrossOriginRedirect)
 	_ = viper.BindEnv("owner_email", "FEISHU_OWNER_EMAIL")
 	_ = viper.BindEnv("transfer_ownership", "FEISHU_TRANSFER_OWNERSHIP")
 	_ = viper.BindEnv("debug", "FEISHU_DEBUG")
@@ -152,7 +161,7 @@ func Init(cfgFile string) error {
 func Get() *Config {
 	if cfg == nil {
 		return &Config{
-			BaseURL:           "https://open.feishu.cn",
+			BaseURL:           OfficialFeishuOpen,
 			OwnerEmail:        "",
 			TransferOwnership: false,
 			Export: ExportConfig{
@@ -177,6 +186,9 @@ func Validate() error {
 	}
 	if cfg.AppSecret == "" {
 		return fmt.Errorf("缺少 app_secret，请通过以下方式之一设置:\n  1. 命令行: --bot-app-id cli_xxx --bot-app-secret xxx\n  2. 环境变量: export FEISHU_APP_SECRET=xxx\n  3. 配置文件: %s", cfgPath)
+	}
+	if err := CheckBaseURL(cfg.BaseURL); err != nil {
+		return err
 	}
 	return nil
 }
@@ -222,6 +234,12 @@ func CreateDefaultConfig() error {
 app_id: ""
 app_secret: ""
 base_url: "https://open.feishu.cn"
+# base_url 默认只允许官方 HTTPS（open.feishu.cn / open.larksuite.com）。
+# loopback HTTP 仅用于本机开发/测试。自定义远端 host 需 allow_custom_base_url: true
+#（或 FEISHU_ALLOW_CUSTOM_BASE_URL=1）；非 loopback HTTP 另需 allow_insecure_http: true。
+allow_custom_base_url: false
+allow_insecure_http: false
+allow_cross_origin_redirect: false
 owner_email: ""              # 文档创建后自动授权的邮箱（环境变量: FEISHU_OWNER_EMAIL）
 transfer_ownership: false    # 创建文档后是否转移所有权给 owner_email（默认仅添加 full_access）
 debug: false

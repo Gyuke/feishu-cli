@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -17,15 +19,20 @@ const defaultTimeout = 30 * time.Second
 var (
 	mu       sync.Mutex
 	instance *lark.Client
-	// lastCfg 用于检测配置变更，不存储敏感信息的明文
+	// lastCfg 用于检测配置变更。secretFingerprint 是 SHA-256 十六进制，绝不保存明文。
 	lastCfg struct {
-		appID   string
-		baseURL string
-		debug   bool
-		// 使用配置的哈希值而非明文存储 secret
-		cfgHash string
+		appID             string
+		baseURL           string
+		debug             bool
+		secretFingerprint string
 	}
 )
+
+// secretFingerprint 返回 App Secret 的不可逆指纹，用于检测同长度 secret 轮换。
+func secretFingerprint(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
 
 // GetClient returns a Feishu API client, recreating if config changed
 func GetClient() (*lark.Client, error) {
@@ -33,32 +40,34 @@ func GetClient() (*lark.Client, error) {
 	if cfg.AppID == "" || cfg.AppSecret == "" {
 		return nil, fmt.Errorf("缺少 app_id 或 app_secret 配置")
 	}
+	if err := config.CheckBaseURL(cfg.BaseURL); err != nil {
+		return nil, err
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	// 使用简单的配置指纹来检测变更，避免存储敏感信息
-	currentHash := fmt.Sprintf("%s:%d", cfg.AppID, len(cfg.AppSecret))
+	fp := secretFingerprint(cfg.AppSecret)
 
-	// Check if config changed or instance is nil
 	configChanged := instance == nil ||
 		lastCfg.appID != cfg.AppID ||
-		lastCfg.cfgHash != currentHash ||
+		lastCfg.secretFingerprint != fp ||
 		lastCfg.baseURL != cfg.BaseURL ||
 		lastCfg.debug != cfg.Debug
 
 	if configChanged {
 		opts := []lark.ClientOptionFunc{
 			lark.WithOpenBaseUrl(cfg.BaseURL),
+			lark.WithReqTimeout(defaultTimeout),
+			lark.WithHttpClient(config.NewHTTPClient(defaultTimeout)),
 		}
 		if cfg.Debug {
 			opts = append(opts, lark.WithLogLevel(larkcore.LogLevelDebug))
 		}
 		instance = lark.NewClient(cfg.AppID, cfg.AppSecret, opts...)
 
-		// Save current config (不存储 secret 明文)
 		lastCfg.appID = cfg.AppID
-		lastCfg.cfgHash = currentHash
+		lastCfg.secretFingerprint = fp
 		lastCfg.baseURL = cfg.BaseURL
 		lastCfg.debug = cfg.Debug
 	}

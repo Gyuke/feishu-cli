@@ -16,7 +16,7 @@ func resetClient() {
 	defer mu.Unlock()
 	instance = nil
 	lastCfg.appID = ""
-	lastCfg.cfgHash = ""
+	lastCfg.secretFingerprint = ""
 	lastCfg.baseURL = ""
 	lastCfg.debug = false
 }
@@ -262,12 +262,34 @@ debug: true
 	}
 }
 
-func TestGetClient_CustomBaseURL(t *testing.T) {
+func TestGetClient_CustomBaseURLRejectedByDefault(t *testing.T) {
 	resetClient()
 	resetConfig()
+	t.Setenv("FEISHU_ALLOW_CUSTOM_BASE_URL", "")
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
 
-	os.Unsetenv("FEISHU_APP_ID")
-	os.Unsetenv("FEISHU_APP_SECRET")
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.yaml"
+	content := `app_id: "test_app_id"
+app_secret: "test_app_secret"
+base_url: "https://custom.feishu.cn"
+`
+	os.WriteFile(configFile, []byte(content), 0600)
+	config.Init(configFile)
+
+	_, err := GetClient()
+	if err == nil {
+		t.Fatal("未 opt-in 的自定义远端 host 应被拒绝")
+	}
+}
+
+func TestGetClient_CustomBaseURLOptIn(t *testing.T) {
+	resetClient()
+	resetConfig()
+	t.Setenv("FEISHU_ALLOW_CUSTOM_BASE_URL", "1")
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
 
 	tmpDir := t.TempDir()
 	configFile := tmpDir + "/config.yaml"
@@ -280,11 +302,57 @@ base_url: "https://custom.feishu.cn"
 
 	client, err := GetClient()
 	if err != nil {
-		t.Fatalf("GetClient() 返回错误: %v", err)
+		t.Fatalf("opt-in 后自定义 HTTPS 应允许: %v", err)
 	}
-
 	if client == nil {
 		t.Error("GetClient() 返回 nil")
+	}
+}
+
+func TestGetClient_SameLengthSecretRebuildsWithoutStoringPlaintext(t *testing.T) {
+	resetClient()
+	resetConfig()
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.yaml"
+	secretA := "length_matched_a"
+	secretB := "length_matched_b"
+	if len(secretA) != len(secretB) {
+		t.Fatal("测试前置：两个 secret 必须同长度")
+	}
+
+	content1 := "app_id: \"test_app_id\"\napp_secret: \"" + secretA + "\"\nbase_url: \"https://open.feishu.cn\"\n"
+	os.WriteFile(configFile, []byte(content1), 0600)
+	config.Init(configFile)
+
+	client1, err := GetClient()
+	if err != nil {
+		t.Fatalf("第一次 GetClient: %v", err)
+	}
+	fp1 := lastCfg.secretFingerprint
+	if fp1 == "" || fp1 == secretA || len(fp1) != 64 {
+		t.Fatalf("fingerprint 应是 SHA-256 hex，不能等于明文")
+	}
+
+	resetConfig()
+	content2 := "app_id: \"test_app_id\"\napp_secret: \"" + secretB + "\"\nbase_url: \"https://open.feishu.cn\"\n"
+	os.WriteFile(configFile, []byte(content2), 0600)
+	config.Init(configFile)
+
+	client2, err := GetClient()
+	if err != nil {
+		t.Fatalf("同长度 secret 变更后 GetClient: %v", err)
+	}
+	if client1 == client2 {
+		t.Fatal("同长度 App Secret 变更后必须重建 client")
+	}
+	if lastCfg.secretFingerprint == fp1 {
+		t.Fatal("secret 指纹应随内容变化")
+	}
+	if lastCfg.secretFingerprint == secretB {
+		t.Fatal("不得把 secret 明文写入指纹缓存")
 	}
 }
 

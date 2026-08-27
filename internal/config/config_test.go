@@ -428,6 +428,35 @@ func TestInit_BaseURLTrimsTrailingSlashFromFile(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsCustomRemoteBaseURL(t *testing.T) {
+	resetConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FEISHU_ALLOW_CUSTOM_BASE_URL", "")
+	t.Setenv("FEISHU_APP_ID", "cli_x")
+	t.Setenv("FEISHU_APP_SECRET", "sec_x")
+	t.Setenv("FEISHU_BASE_URL", "https://private.example.com")
+	if err := Init(""); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := Validate(); err == nil {
+		t.Fatal("Validate 应拒绝未 opt-in 的自定义远端 host")
+	}
+}
+
+func TestValidate_AllowsOfficialBaseURL(t *testing.T) {
+	resetConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FEISHU_APP_ID", "cli_x")
+	t.Setenv("FEISHU_APP_SECRET", "sec_x")
+	t.Setenv("FEISHU_BASE_URL", "https://open.feishu.cn")
+	if err := Init(""); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := Validate(); err != nil {
+		t.Fatalf("官方 host 应通过: %v", err)
+	}
+}
+
 func TestInit_DebugFromEnv(t *testing.T) {
 	resetConfig()
 

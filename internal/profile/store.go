@@ -805,6 +805,10 @@ func renderConfigYAML(appID, appSecret, baseURL string) string {
 		fmt.Fprintf(&b, "app_secret: %q\n", appSecret)
 	}
 	fmt.Fprintf(&b, "base_url: %q\n", baseURL)
+	b.WriteString("# 默认只允许官方 HTTPS；自定义远端 host 需 allow_custom_base_url: true\n")
+	b.WriteString("allow_custom_base_url: false\n")
+	b.WriteString("allow_insecure_http: false\n")
+	b.WriteString("allow_cross_origin_redirect: false\n")
 	b.WriteString(`owner_email: ""` + "\n")
 	b.WriteString("transfer_ownership: false\n")
 	b.WriteString("debug: false\n\n")
