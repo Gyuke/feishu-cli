@@ -420,6 +420,7 @@ func TestMailMessagesCmd_PreflightValidationZeroNetworkAndTokenRefresh(t *testin
 	_ = mailMessagesCmd.Flags().Set("mailbox", "me")
 	_ = mailMessagesCmd.Flags().Set("message-ids", "msg_1,msg_2")
 	_ = mailMessagesCmd.Flags().Set("format", "raw")
+	_ = mailMessagesCmd.Flags().Set("output", "")
 	_ = mailMessagesCmd.Flags().Set("user-access-token", "")
 
 	err = mailMessagesCmd.RunE(mailMessagesCmd, []string{})
@@ -431,5 +432,25 @@ func TestMailMessagesCmd_PreflightValidationZeroNetworkAndTokenRefresh(t *testin
 	}
 	if networkCalled {
 		t.Error("非法 format 时不应发起任何网络调用或触发 token 刷新")
+	}
+
+	// 3. 非法 output 校验（如 output=yaml）：应在本地报错，零网络
+	networkCalled = false
+	_ = mailMessagesCmd.Flags().Set("as", "auto")
+	_ = mailMessagesCmd.Flags().Set("mailbox", "me")
+	_ = mailMessagesCmd.Flags().Set("message-ids", "msg_1,msg_2")
+	_ = mailMessagesCmd.Flags().Set("format", "full")
+	_ = mailMessagesCmd.Flags().Set("output", "yaml")
+	_ = mailMessagesCmd.Flags().Set("user-access-token", "")
+
+	err = mailMessagesCmd.RunE(mailMessagesCmd, []string{})
+	if err == nil {
+		t.Fatal("非法 output 必须报错")
+	}
+	if !strings.Contains(err.Error(), "output 仅支持 json") {
+		t.Errorf("error = %v, want output 校验错误", err)
+	}
+	if networkCalled {
+		t.Error("非法 output 时不应发起任何网络调用或触发 token 刷新")
 	}
 }

@@ -70,6 +70,10 @@ var mailMessagesCmd = &cobra.Command{
 			return fmt.Errorf("--format 仅支持 full|plain_text_full，得到 %q", format)
 		}
 
+		if output != "" && output != "json" {
+			return fmt.Errorf("-o/--output 仅支持 json，得到 %q", output)
+		}
+
 		// 2. 身份解析（仅在本地参数校验全绿后才执行，避免非法输入触发 token 刷新）
 		token, mailbox, err := resolveMailReadIdentity(cmd)
 		if err != nil {

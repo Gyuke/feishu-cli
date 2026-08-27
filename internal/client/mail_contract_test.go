@@ -89,21 +89,14 @@ func TestMailSearch_QueryAndFilterContract(t *testing.T) {
 		t.Fatalf("body.filter 缺失或格式不正确: %v", gotBody)
 	}
 
-	// INBOX 和 IMPORTANT 都应在 folder 中（inbox 和 priority）
+	// 官方 Step 1: IMPORTANT 识别为系统标签，覆盖原 folder 并清空 label
 	folders, ok := bodyFilter["folder"].([]any)
-	if !ok || len(folders) != 2 {
-		t.Fatalf("filter.folder = %v, want 2 items", bodyFilter["folder"])
+	if !ok || len(folders) != 1 || folders[0] != "priority" {
+		t.Fatalf("filter.folder = %v, want ['priority'] (系统标签覆盖原 folder)", bodyFilter["folder"])
 	}
-	fSet := map[string]bool{}
-	for _, f := range folders {
-		fSet[fmt.Sprintf("%v", f)] = true
-	}
-	if !fSet["inbox"] || !fSet["priority"] {
-		t.Errorf("filter.folder = %v, want containing inbox and priority", bodyFilter["folder"])
-	}
-	// IMPORTANT 迁移到 folder 后，label 应被清除或不包含 priority
+	// IMPORTANT 迁移到 folder 后，label 应被清除
 	if _, exists := bodyFilter["label"]; exists {
-		t.Errorf("filter.label 应为空/被清除，got: %v", bodyFilter["label"])
+		t.Errorf("filter.label 应被清除，got: %v", bodyFilter["label"])
 	}
 	// is_unread 应为 true
 	if isUnread, ok := bodyFilter["is_unread"].(bool); !ok || !isUnread {
@@ -397,10 +390,9 @@ func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
 	defer srv.Close()
 	setupTestConfig(t, srv.URL)
 
-	// 1. 系统别名映射测试：INBOX → inbox, IMPORTANT → priority（迁移至 folder）
+	// 1. 系统别名映射测试：INBOX → inbox (系统 folder)
 	filter1 := map[string]any{
 		"folder":    "INBOX",
-		"label":     "IMPORTANT",
 		"page_size": 10,
 	}
 	_, err := SearchMailMessages("me", "test", filter1, "u-test-token")
@@ -411,11 +403,11 @@ func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
 		t.Errorf("query 应包含 page_size=10, got: %s", gotSearchQuery)
 	}
 	f1, _ := gotSearchBody["filter"].(map[string]any)
-	if folders, ok := f1["folder"].([]any); !ok || len(folders) != 2 || folders[0] != "inbox" || folders[1] != "priority" {
-		t.Errorf("INBOX/IMPORTANT 映射 = %v, want ['inbox', 'priority']", f1["folder"])
+	if folders, ok := f1["folder"].([]any); !ok || len(folders) != 1 || folders[0] != "inbox" {
+		t.Errorf("INBOX 映射 = %v, want ['inbox']", f1["folder"])
 	}
 	if _, exists := f1["label"]; exists {
-		t.Errorf("IMPORTANT 迁移后 label 应为空，got: %v", f1["label"])
+		t.Errorf("无 label 时 label 字段应不存在，got: %v", f1["label"])
 	}
 
 	// 2. 自定义 ID 解析与单次拉取复用测试：
@@ -462,6 +454,17 @@ func TestMailSearch_FailClosedOnErrors(t *testing.T) {
 				_, _ = io.WriteString(w, `invalid_json_corrupt{`)
 			case "ambiguous":
 				_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_1","name":"DupName"},{"id":"fld_2","name":"DupName"}]}}`)
+			case "api_error":
+				_, _ = io.WriteString(w, `{"code":99991663,"msg":"permission denied","data":{}}`)
+			}
+		case "/open-apis/mail/v1/user_mailboxes/me/labels":
+			switch handlerMode {
+			case "not_found":
+				_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"lbl_1","name":"Label1"}]}}`)
+			case "corrupt":
+				_, _ = io.WriteString(w, `invalid_json_corrupt{`)
+			case "ambiguous":
+				_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"lbl_1","name":"DupName"},{"id":"lbl_2","name":"DupName"}]}}`)
 			case "api_error":
 				_, _ = io.WriteString(w, `{"code":99991663,"msg":"permission denied","data":{}}`)
 			}
@@ -520,6 +523,32 @@ func TestMailSearch_FailClosedOnErrors(t *testing.T) {
 	_, err = SearchMailMessages("me", "q", map[string]any{"folder": "fld_xyz"}, "u-test-token")
 	if err == nil {
 		t.Fatal("List API 业务错误应返回错误")
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
+	}
+
+	// 5. --label inbox / --label scheduled 绝非系统 label，若自定义 labels 列表无此标签，必须 fail-closed 且不得调用 search
+	searchCalled = false
+	handlerMode = "not_found"
+	_, err = SearchMailMessages("me", "q", map[string]any{"label": "inbox"}, "u-test-token")
+	if err == nil {
+		t.Fatal("--label inbox 无匹配自定义标签时必须报错")
+	}
+	if !strings.Contains(err.Error(), "未找到标签") {
+		t.Errorf("error = %v, want mentioning 未找到标签", err)
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
+	}
+
+	searchCalled = false
+	_, err = SearchMailMessages("me", "q", map[string]any{"label": "scheduled"}, "u-test-token")
+	if err == nil {
+		t.Fatal("--label scheduled 无匹配自定义标签时必须报错")
+	}
+	if !strings.Contains(err.Error(), "未找到标签") {
+		t.Errorf("error = %v, want mentioning 未找到标签", err)
 	}
 	if searchCalled {
 		t.Error("解析失败时不得继续发起 POST /search 请求")
