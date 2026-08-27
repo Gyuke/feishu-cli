@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -156,5 +157,61 @@ func TestAppendRowsLoop_NilProgressOK(t *testing.T) {
 	err := appendRowsLoop(2, nil, func() error { return nil })
 	if err != nil {
 		t.Fatalf("nil progress 应正常，得到 %v", err)
+	}
+}
+
+func TestDeleteBlocksWithRevisionPassesDocumentRevisionID(t *testing.T) {
+	var gotRevision string
+	var gotStart, gotEnd int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "batch_delete") {
+			gotRevision = r.URL.Query().Get("document_revision_id")
+			var body struct {
+				StartIndex int `json:"start_index"`
+				EndIndex   int `json:"end_index"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotStart = body.StartIndex
+			gotEnd = body.EndIndex
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document_revision_id":11}}`)
+			return
+		}
+		http.Error(w, "unexpected path: "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	_, err := DeleteBlocksWithRevision("doc-123", "block-456", 0, 5, 10, "u-token")
+	if err != nil {
+		t.Fatalf("DeleteBlocksWithRevision 报错: %v", err)
+	}
+
+	if gotRevision != "10" {
+		t.Fatalf("Query document_revision_id = %q, 期望 10", gotRevision)
+	}
+	if gotStart != 0 || gotEnd != 5 {
+		t.Fatalf("删除范围 = [%d, %d), 期望 [0, 5)", gotStart, gotEnd)
+	}
+}
+
+func TestGetDocumentRevision(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/open-apis/docx/v1/documents/doc-rev" {
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"document_id":"doc-rev","revision_id":42}}}`)
+			return
+		}
+		http.Error(w, "unexpected path: "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	rev, err := GetDocumentRevision("doc-rev", "u-token")
+	if err != nil {
+		t.Fatalf("GetDocumentRevision 报错: %v", err)
+	}
+	if rev != 42 {
+		t.Fatalf("revision = %d, 期望 42", rev)
 	}
 }

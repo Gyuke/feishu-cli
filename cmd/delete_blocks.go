@@ -34,8 +34,8 @@ var deleteBlocksCmd = &cobra.Command{
 		userAccessToken := resolveOptionalUserToken(cmd)
 
 		if deleteAll {
-			// Get block children count first
-			children, _, err := client.GetBlockChildren(documentID, blockID, userAccessToken)
+			// 获取全部子块（全分页拉取，避免仅读第一页导致遗漏或谎报全删）
+			children, err := client.GetAllBlockChildren(documentID, blockID, userAccessToken)
 			if err != nil {
 				return fmt.Errorf("获取子块失败: %w", err)
 			}
@@ -71,7 +71,11 @@ var deleteBlocksCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("成功删除索引 %d 到 %d 的块！\n", startIndex, endIndex)
+		if deleteAll {
+			fmt.Printf("成功删除所有子块（共 %d 个）！\n", endIndex)
+		} else {
+			fmt.Printf("成功删除索引 %d 到 %d 的块！\n", startIndex, endIndex)
+		}
 		return nil
 	},
 }

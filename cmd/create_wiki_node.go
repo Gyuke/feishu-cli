@@ -51,9 +51,17 @@ var createWikiNodeCmd = &cobra.Command{
 		parentNode, _ := cmd.Flags().GetString("parent-node")
 		objType, _ := cmd.Flags().GetString("obj-type")
 		nodeType, _ := cmd.Flags().GetString("node-type")
+		originNodeToken, _ := cmd.Flags().GetString("origin-node-token")
 		output, _ := cmd.Flags().GetString("output")
 
-		result, err := client.CreateWikiNode(spaceID, title, parentNode, objType, nodeType, resolveOptionalUserToken(cmd))
+		if nodeType == "shortcut" && originNodeToken == "" {
+			return fmt.Errorf("--origin-node-token 在 --node-type=shortcut 时必填")
+		}
+		if nodeType != "shortcut" && originNodeToken != "" {
+			return fmt.Errorf("--origin-node-token 仅在 --node-type=shortcut 时可用")
+		}
+
+		result, err := client.CreateWikiNode(spaceID, title, parentNode, objType, nodeType, originNodeToken, resolveOptionalUserToken(cmd))
 		if err != nil {
 			return err
 		}
@@ -68,6 +76,9 @@ var createWikiNodeCmd = &cobra.Command{
 			fmt.Printf("  节点 Token: %s\n", result.NodeToken)
 			fmt.Printf("  文档 Token: %s\n", result.ObjToken)
 			fmt.Printf("  文档类型:   %s\n", result.ObjType)
+			if result.OriginNodeToken != "" {
+				fmt.Printf("  源节点:     %s\n", result.OriginNodeToken)
+			}
 		}
 
 		return nil
@@ -81,6 +92,7 @@ func init() {
 	createWikiNodeCmd.Flags().String("parent-node", "", "父节点 Token（可选）")
 	createWikiNodeCmd.Flags().String("obj-type", "docx", "文档类型：docx/doc/sheet（默认 docx）")
 	createWikiNodeCmd.Flags().String("node-type", "origin", "节点类型：origin/shortcut（默认 origin）")
+	createWikiNodeCmd.Flags().String("origin-node-token", "", "快捷方式指向的源节点 Token（当 --node-type=shortcut 时必填）")
 	createWikiNodeCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	mustMarkFlagRequired(createWikiNodeCmd, "space-id", "title")
 	createWikiNodeCmd.Flags().String("user-access-token", "", "User Access Token（可选，用于访问个人知识库）")

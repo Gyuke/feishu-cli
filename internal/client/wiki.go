@@ -181,14 +181,16 @@ func ListWikiNodes(spaceID string, parentNodeToken string, pageSize int, pageTok
 
 // CreateWikiNodeResult 创建节点的结果
 type CreateWikiNodeResult struct {
-	SpaceID   string `json:"space_id"`
-	NodeToken string `json:"node_token"`
-	ObjToken  string `json:"obj_token"`
-	ObjType   string `json:"obj_type"`
+	SpaceID         string `json:"space_id"`
+	NodeToken       string `json:"node_token"`
+	ObjToken        string `json:"obj_token"`
+	ObjType         string `json:"obj_type"`
+	NodeType        string `json:"node_type,omitempty"`
+	OriginNodeToken string `json:"origin_node_token,omitempty"`
 }
 
 // CreateWikiNode 在知识空间中创建节点
-func CreateWikiNode(spaceID, title, parentNode, objType string, nodeType string, userAccessToken string) (*CreateWikiNodeResult, error) {
+func CreateWikiNode(spaceID, title, parentNode, objType, nodeType, originNodeToken string, userAccessToken string) (*CreateWikiNodeResult, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
@@ -211,6 +213,10 @@ func CreateWikiNode(spaceID, title, parentNode, objType string, nodeType string,
 		nodeBuilder.ParentNodeToken(parentNode)
 	}
 
+	if originNodeToken != "" {
+		nodeBuilder.OriginNodeToken(originNodeToken)
+	}
+
 	req := larkwiki.NewCreateSpaceNodeReqBuilder().
 		SpaceId(spaceID).
 		Node(nodeBuilder.Build()).
@@ -231,10 +237,12 @@ func CreateWikiNode(spaceID, title, parentNode, objType string, nodeType string,
 
 	node := resp.Data.Node
 	return &CreateWikiNodeResult{
-		SpaceID:   StringVal(node.SpaceId),
-		NodeToken: StringVal(node.NodeToken),
-		ObjToken:  StringVal(node.ObjToken),
-		ObjType:   StringVal(node.ObjType),
+		SpaceID:         StringVal(node.SpaceId),
+		NodeToken:       StringVal(node.NodeToken),
+		ObjToken:        StringVal(node.ObjToken),
+		ObjType:         StringVal(node.ObjType),
+		NodeType:        StringVal(node.NodeType),
+		OriginNodeToken: StringVal(node.OriginNodeToken),
 	}, nil
 }
 
@@ -611,5 +619,120 @@ func GetWikiDeleteSpaceTask(taskID, userAccessToken string) (*WikiDeleteSpaceTas
 		TaskID:    parsed.Data.Task.TaskID,
 		Status:    parsed.Data.Task.DeleteSpaceResult.Status,
 		StatusMsg: parsed.Data.Task.DeleteSpaceResult.StatusMsg,
+	}, nil
+}
+
+// WikiDeleteNodeTaskStatus 表示 delete_node 异步任务的状态。
+type WikiDeleteNodeTaskStatus struct {
+	TaskID    string
+	Status    string // success / failure / processing 等
+	StatusMsg string
+}
+
+// Ready 表示任务已成功完成。
+func (s WikiDeleteNodeTaskStatus) Ready() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Status), "success")
+}
+
+// Failed 表示任务以失败状态结束。
+func (s WikiDeleteNodeTaskStatus) Failed() bool {
+	st := strings.ToLower(strings.TrimSpace(s.Status))
+	return st == "failure" || st == "failed"
+}
+
+// DeleteWikiNode 提交删除知识库节点请求。
+// OpenAPI: DELETE /open-apis/wiki/v2/spaces/{space_id}/nodes/{node_token}
+// body: {"obj_type": objType, "include_children": includeChildren}
+// 返回 task_id 为空表示同步删除完成；非空表示转为异步任务。
+func DeleteWikiNode(spaceID, nodeToken, objType string, includeChildren bool, userAccessToken string) (string, error) {
+	c, err := GetClient()
+	if err != nil {
+		return "", err
+	}
+	if objType == "" {
+		objType = "wiki"
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/spaces/%s/nodes/%s", spaceID, nodeToken)
+	body := map[string]any{
+		"obj_type":         objType,
+		"include_children": includeChildren,
+	}
+	resp, err := c.Delete(Context(), apiPath, body, tokenType, opts...)
+	if err != nil {
+		return "", fmt.Errorf("删除知识库节点失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("删除知识库节点失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			TaskID string `json:"task_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &parsed); err != nil {
+		return "", fmt.Errorf("删除知识库节点响应解析失败: %w", err)
+	}
+	if parsed.Code != 0 {
+		return "", fmt.Errorf("删除知识库节点失败: code=%d, msg=%s", parsed.Code, parsed.Msg)
+	}
+	return parsed.Data.TaskID, nil
+}
+
+// GetWikiDeleteNodeTask 查询 delete_node 异步任务的当前状态。
+// OpenAPI: GET /open-apis/wiki/v2/tasks/{task_id}?task_type=delete_node
+// 响应数据在 task.simple_task_result 下。
+func GetWikiDeleteNodeTask(taskID, userAccessToken string) (*WikiDeleteNodeTaskStatus, error) {
+	c, err := GetClient()
+	if err != nil {
+		return nil, err
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/tasks/%s?task_type=delete_node", taskID)
+	resp, err := c.Get(Context(), apiPath, nil, tokenType, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("查询 delete_node 任务失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("查询 delete_node 任务失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Task struct {
+				TaskID           string `json:"task_id"`
+				SimpleTaskResult struct {
+					Status    string `json:"status"`
+					StatusMsg string `json:"status_msg"`
+				} `json:"simple_task_result"`
+			} `json:"task"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &parsed); err != nil {
+		return nil, fmt.Errorf("查询 delete_node 任务响应解析失败: %w", err)
+	}
+	if parsed.Code != 0 {
+		return nil, fmt.Errorf("查询 delete_node 任务失败: code=%d, msg=%s", parsed.Code, parsed.Msg)
+	}
+
+	taskIDOut := parsed.Data.Task.TaskID
+	if taskIDOut == "" {
+		taskIDOut = taskID
+	}
+	status := parsed.Data.Task.SimpleTaskResult.Status
+	statusMsg := parsed.Data.Task.SimpleTaskResult.StatusMsg
+	if status == "" {
+		status = "processing"
+	}
+	if statusMsg == "" {
+		statusMsg = status
+	}
+	return &WikiDeleteNodeTaskStatus{
+		TaskID:    taskIDOut,
+		Status:    status,
+		StatusMsg: statusMsg,
 	}, nil
 }

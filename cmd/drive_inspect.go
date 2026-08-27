@@ -111,7 +111,7 @@ func driveAPICall(method, path string, query map[string]string, body any, userTo
 func inspectFetchWikiNode(token, userToken string) (objType, objToken, spaceID, nodeToken string, err error) {
 	body, status, err := driveAPICall(http.MethodGet,
 		"/open-apis/wiki/v2/spaces/get_node",
-		map[string]string{"token": token, "obj_type": "wiki"},
+		map[string]string{"token": token},
 		nil, userToken)
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("wiki get_node 失败: %w", err)

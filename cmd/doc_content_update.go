@@ -70,6 +70,7 @@ func init() {
 	docContentUpdateCmd.Flags().Bool("upload-images", false, "上传 Markdown 中的本地图片")
 	docContentUpdateCmd.Flags().String("table-column-width", "auto",
 		"Markdown 表格列宽策略：auto | fixed | 像素列表如 80,200,*,120（* 表示该列走 auto）")
+	docContentUpdateCmd.Flags().Int("revision-id", -1, "文档版本号（用于并发冲突保护，-1 表示自动基于当前版本）")
 	mustMarkFlagRequired(docContentUpdateCmd, "mode")
 }
 
@@ -93,6 +94,7 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 		return errFlag
 	}
 	userAccessToken := resolveOptionalUserToken(cmd)
+	revisionID, _ := cmd.Flags().GetInt("revision-id")
 
 	// 解析 Markdown 内容
 	markdownContent, err := resolveMarkdownContent(markdownStr, markdownFile)
@@ -109,17 +111,17 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	case "append":
 		return doAppend(documentID, markdownContent, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
 	case "overwrite":
-		return doOverwrite(documentID, markdownContent, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doOverwrite(documentID, markdownContent, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
 	case "replace_range":
-		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
 	case "replace_all":
-		return doReplaceAll(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doReplaceAll(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
 	case "insert_before":
 		return doInsertBefore(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
 	case "insert_after":
 		return doInsertAfter(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
 	case "delete_range":
-		return doDeleteRange(documentID, selByTitle, selWithEllipsis, output, userAccessToken)
+		return doDeleteRange(documentID, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	}
 	return nil // validateContentUpdateParams 已确保 mode 合法
 }
@@ -279,20 +281,23 @@ func findByTitle(children []*larkdocx.Block, title string) ([]blockRange, error)
 	var ranges []blockRange
 	for i, block := range children {
 		blockLevel := getBlockHeadingLevel(block)
-		if blockLevel != level {
-			continue
+		if blockLevel == 0 {
+			continue // 非标题块不匹配
+		}
+		if level > 0 && blockLevel != level {
+			continue // 指定级别时不匹配其它级别
 		}
 		blockText := getBlockText(block)
 		if !strings.Contains(blockText, text) {
 			continue
 		}
 
-		// 找到匹配的标题，确定范围终点
+		// 找到匹配的标题，确定范围终点（遇到同级或更高级标题结束）
+		matchLevel := blockLevel
 		end := len(children) // 默认到文档末尾
 		for j := i + 1; j < len(children); j++ {
 			nextLevel := getBlockHeadingLevel(children[j])
-			if nextLevel > 0 && nextLevel <= level {
-				// 遇到同级或更高级标题，范围结束
+			if nextLevel > 0 && nextLevel <= matchLevel {
 				end = j
 				break
 			}
@@ -412,22 +417,62 @@ func doAppend(documentID, markdown string, uploadImages bool, output, userAccess
 	return nil
 }
 
-// doOverwrite 完全覆盖文档内容
-func doOverwrite(documentID, markdown string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
-	// 1. 获取根块，仅需子块 ID 列表（避免获取所有子块的完整内容）
-	rootBlock, err := client.GetBlock(documentID, documentID, userAccessToken)
+// validateAndPreconvertMarkdown 先行解析校验 Markdown、转换并预处理本地图片，确保在破坏性删除前拦截所有内容与上传错误
+func validateAndPreconvertMarkdown(documentID, markdown string, uploadImages bool, colWidthMode string, colWidthValues []int) error {
+	opts := converter.ConvertOptions{
+		DocumentID:   documentID,
+		UploadImages: uploadImages,
+	}
+	applyColumnWidthOptions(&opts, colWidthMode, colWidthValues)
+	conv := converter.NewMarkdownToBlock([]byte(markdown), opts, "")
+	result, err := conv.ConvertWithTableData()
 	if err != nil {
-		return fmt.Errorf("获取文档内容失败: %w", err)
+		return fmt.Errorf("转换 Markdown 失败: %w", err)
+	}
+	if len(result.BlockNodes) == 0 {
+		return fmt.Errorf("没有内容可添加")
+	}
+	return nil
+}
+
+// resolveBaseRevision 解析用于并发冲突保护的文档基准版本号
+func resolveBaseRevision(documentID string, userAccessToken string, revisionID int) (int, error) {
+	if revisionID >= 0 {
+		return revisionID, nil
+	}
+	currentRev, err := client.GetDocumentRevision(documentID, userAccessToken)
+	if err != nil {
+		return -1, fmt.Errorf("获取文档版本失败: %w", err)
+	}
+	return currentRev, nil
+}
+
+// doOverwrite 完全覆盖文档内容
+func doOverwrite(documentID, markdown string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
+	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
+	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
+		return err
 	}
 
-	// 2. 删除所有现有子块
-	if rootBlock.Children != nil && len(rootBlock.Children) > 0 {
-		if _, err := client.DeleteBlocks(documentID, documentID, 0, len(rootBlock.Children), userAccessToken); err != nil {
+	// 2. 获取文档基准版本（并发冲突保护）与全部直接子块（全分页拉取）
+	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
+	if err != nil {
+		return err
+	}
+
+	children, err := client.GetAllBlockChildren(documentID, documentID, userAccessToken)
+	if err != nil {
+		return fmt.Errorf("获取文档子块失败: %w", err)
+	}
+
+	// 3. 删除所有现有子块（带版本号冲突保护）
+	if len(children) > 0 {
+		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, 0, len(children), baseRevision, userAccessToken); err != nil {
 			return fmt.Errorf("删除现有内容失败: %w", err)
 		}
 	}
 
-	// 3. 创建新内容
+	// 4. 创建新内容
 	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, -1, output, userAccessToken, colWidthMode, colWidthValues)
 	if err != nil {
 		return fmt.Errorf("写入新内容失败: %w", err)
@@ -439,7 +484,18 @@ func doOverwrite(documentID, markdown string, uploadImages bool, output, userAcc
 }
 
 // doReplaceRange 按定位替换一段内容
-func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
+func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
+	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
+	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
+		return err
+	}
+
+	// 2. 获取文档基准版本与定位范围
+	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
+	if err != nil {
+		return err
+	}
+
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -453,12 +509,12 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, up
 	// 取第一个匹配范围
 	r := ranges[0]
 
-	// 先删除匹配范围
-	if _, err := client.DeleteBlocks(documentID, documentID, r.startIndex, r.endIndex, userAccessToken); err != nil {
+	// 3. 删除匹配范围（带版本号冲突保护）
+	if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
 		return fmt.Errorf("删除目标内容失败: %w", err)
 	}
 
-	// 在删除位置插入新内容
+	// 4. 在删除位置插入新内容
 	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, r.startIndex, output, userAccessToken, colWidthMode, colWidthValues)
 	if err != nil {
 		return fmt.Errorf("插入替换内容失败: %w", err)
@@ -470,7 +526,18 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, up
 }
 
 // doReplaceAll 全文查找替换所有匹配
-func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
+func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
+	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
+	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
+		return err
+	}
+
+	// 2. 获取文档基准版本与定位范围
+	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
+	if err != nil {
+		return err
+	}
+
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -486,8 +553,8 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uplo
 	for i := len(ranges) - 1; i >= 0; i-- {
 		r := ranges[i]
 
-		// 删除匹配范围
-		if _, err := client.DeleteBlocks(documentID, documentID, r.startIndex, r.endIndex, userAccessToken); err != nil {
+		// 删除匹配范围（带版本号冲突保护）
+		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
 			return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
 		}
 
@@ -497,6 +564,7 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uplo
 			return fmt.Errorf("插入第 %d 个替换内容失败: %w", i+1, err)
 		}
 		replaced++
+		baseRevision = -1 // 首次操作已完成版本校验，后续操作忽略递增的 revision
 	}
 
 	if output == "json" {
@@ -558,7 +626,12 @@ func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, upl
 }
 
 // doDeleteRange 删除定位的内容
-func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userAccessToken string) error {
+func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
+	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
+	if err != nil {
+		return err
+	}
+
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -573,10 +646,11 @@ func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userA
 	deleted := 0
 	for i := len(ranges) - 1; i >= 0; i-- {
 		r := ranges[i]
-		if _, err := client.DeleteBlocks(documentID, documentID, r.startIndex, r.endIndex, userAccessToken); err != nil {
+		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
 			return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
 		}
 		deleted += r.endIndex - r.startIndex
+		baseRevision = -1
 	}
 
 	if output == "json" {

@@ -331,6 +331,13 @@ func ReplaceImage(documentID, imageBlockID, fileToken string, opts ReplaceImageO
 // 受单文档 3 QPS 写限制：调用 SDK 之前先过 docWriteLimiter（issue #159）。
 // startIndex is the starting index (0-based), endIndex is exclusive
 func DeleteBlocks(documentID string, blockID string, startIndex int, endIndex int, userAccessToken ...string) (http.Header, error) {
+	// 限流由 DeleteBlocksWithRevision 内部的 acquireDocWriteSlotWithTimeout(documentID) 统一执行
+	return DeleteBlocksWithRevision(documentID, blockID, startIndex, endIndex, -1, userAccessToken...)
+}
+
+// DeleteBlocksWithRevision deletes child blocks from a parent block by index range with document revision validation.
+// documentRevisionID >= 0 时校验文档版本号，若发生并发修改冲突则服务端拒绝，防止损坏最新数据；-1 表示不校验。
+func DeleteBlocksWithRevision(documentID string, blockID string, startIndex int, endIndex int, documentRevisionID int, userAccessToken ...string) (http.Header, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
@@ -339,7 +346,7 @@ func DeleteBlocks(documentID string, blockID string, startIndex int, endIndex in
 	req := larkdocx.NewBatchDeleteDocumentBlockChildrenReqBuilder().
 		DocumentId(documentID).
 		BlockId(blockID).
-		DocumentRevisionId(-1).
+		DocumentRevisionId(documentRevisionID).
 		Body(larkdocx.NewBatchDeleteDocumentBlockChildrenReqBodyBuilder().
 			StartIndex(startIndex).
 			EndIndex(endIndex).
@@ -360,6 +367,18 @@ func DeleteBlocks(documentID string, blockID string, startIndex int, endIndex in
 	}
 
 	return headers, nil
+}
+
+// GetDocumentRevision 获取文档当前的 revision_id。如果无法获取或为 nil 则返回 -1。
+func GetDocumentRevision(documentID string, userAccessToken ...string) (int, error) {
+	doc, err := GetDocumentWithToken(documentID, firstString(userAccessToken))
+	if err != nil {
+		return -1, err
+	}
+	if doc.RevisionId != nil {
+		return *doc.RevisionId, nil
+	}
+	return -1, nil
 }
 
 // BatchUpdateBlocksOptions contains options for batch updating blocks
