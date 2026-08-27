@@ -482,17 +482,22 @@ func GetBlockChildren(documentID string, blockID string, userAccessToken ...stri
 
 // GetAllBlockChildren retrieves all direct children of a block with pagination.
 func GetAllBlockChildren(documentID string, blockID string, userAccessToken ...string) ([]*larkdocx.Block, error) {
-	return getAllBlockChildren(documentID, blockID, false, userAccessToken...)
+	return getAllBlockChildren(documentID, blockID, false, -1, userAccessToken...)
+}
+
+// GetAllBlockChildrenWithRevision retrieves all direct children of a block at a specific document revision snapshot.
+func GetAllBlockChildrenWithRevision(documentID string, blockID string, revisionID int, userAccessToken ...string) ([]*larkdocx.Block, error) {
+	return getAllBlockChildren(documentID, blockID, false, revisionID, userAccessToken...)
 }
 
 // GetAllBlockDescendants retrieves a block and all of its descendants with pagination.
 // 飞书的引用同步块只返回 source_document_id/source_block_id；官方要求调用子块接口并设置
 // with_descendants=true 才能取得源同步块的完整块树。
 func GetAllBlockDescendants(documentID string, blockID string, userAccessToken ...string) ([]*larkdocx.Block, error) {
-	return getAllBlockChildren(documentID, blockID, true, userAccessToken...)
+	return getAllBlockChildren(documentID, blockID, true, -1, userAccessToken...)
 }
 
-func getAllBlockChildren(documentID string, blockID string, withDescendants bool, userAccessToken ...string) ([]*larkdocx.Block, error) {
+func getAllBlockChildren(documentID string, blockID string, withDescendants bool, revisionID int, userAccessToken ...string) ([]*larkdocx.Block, error) {
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
@@ -502,18 +507,23 @@ func getAllBlockChildren(documentID string, blockID string, withDescendants bool
 	pageToken := ""
 	pageSize := 500
 	const maxPages = 1000
+	seenPageTokens := make(map[string]bool)
 
 	for page := 0; page < maxPages; page++ {
 		reqBuilder := larkdocx.NewGetDocumentBlockChildrenReqBuilder().
 			DocumentId(documentID).
 			BlockId(blockID).
 			PageSize(pageSize).
-			DocumentRevisionId(-1)
+			DocumentRevisionId(revisionID)
 		if withDescendants {
 			reqBuilder.WithDescendants(true)
 		}
 
 		if pageToken != "" {
+			if seenPageTokens[pageToken] {
+				return nil, fmt.Errorf("获取子块分页失败: 检测到重复的 page_token %q (死循环)", pageToken)
+			}
+			seenPageTokens[pageToken] = true
 			reqBuilder.PageToken(pageToken)
 		}
 
@@ -525,20 +535,25 @@ func getAllBlockChildren(documentID string, blockID string, withDescendants bool
 		if !resp.Success() {
 			return nil, fmt.Errorf("获取子块失败: code=%d, msg=%s", resp.Code, resp.Msg)
 		}
+		if resp.Data == nil {
+			return nil, fmt.Errorf("获取子块失败: 返回数据为空 (resp.Data=nil)")
+		}
 
 		allChildren = append(allChildren, resp.Data.Items...)
 
-		if !BoolVal(resp.Data.HasMore) {
-			break
+		hasMore := BoolVal(resp.Data.HasMore)
+		if !hasMore {
+			return allChildren, nil
 		}
-		if next := StringVal(resp.Data.PageToken); next == "" {
-			break
-		} else {
-			pageToken = next
+
+		next := StringVal(resp.Data.PageToken)
+		if next == "" || next == pageToken {
+			return nil, fmt.Errorf("获取子块分页失败: has_more=true 但下一页 page_token 为空或无进展")
 		}
+		pageToken = next
 	}
 
-	return allChildren, nil
+	return nil, fmt.Errorf("获取子块失败: 超过最大分页限制 %d，文档可能有异常", maxPages)
 }
 
 // AddBoardResult contains the result of adding a board to document

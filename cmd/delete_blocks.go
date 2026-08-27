@@ -33,9 +33,18 @@ var deleteBlocksCmd = &cobra.Command{
 		force, _ := cmd.Flags().GetBool("force")
 		userAccessToken := resolveOptionalUserToken(cmd)
 
+		// 建立一致性 revision 快照：先取得当前正整数版本号，无法取得时不可假装受保护
+		docRev, err := client.GetDocumentRevision(documentID, userAccessToken)
+		if err != nil {
+			return fmt.Errorf("获取文档版本失败（无法建立安全快照）: %w", err)
+		}
+		if docRev < 0 {
+			return fmt.Errorf("无法取得文档版本号（无法建立一致性安全快照）")
+		}
+
 		if deleteAll {
-			// 获取全部子块（全分页拉取，避免仅读第一页导致遗漏或谎报全删）
-			children, err := client.GetAllBlockChildren(documentID, blockID, userAccessToken)
+			// 获取全部子块（基于同一 docRev 快照全分页拉取，避免仅读第一页导致遗漏或谎报全删）
+			children, err := client.GetAllBlockChildrenWithRevision(documentID, blockID, docRev, userAccessToken)
 			if err != nil {
 				return fmt.Errorf("获取子块失败: %w", err)
 			}
@@ -67,7 +76,8 @@ var deleteBlocksCmd = &cobra.Command{
 			}
 		}
 
-		if _, err := client.DeleteBlocks(documentID, blockID, startIndex, endIndex, userAccessToken); err != nil {
+		// 使用同一 docRev 发起带版本锁的删除；若期间发生并发冲突服务端将直接拒绝并返回非零错误
+		if _, err := client.DeleteBlocksWithRevision(documentID, blockID, startIndex, endIndex, docRev, userAccessToken); err != nil {
 			return err
 		}
 

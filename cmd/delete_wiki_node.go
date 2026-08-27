@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -265,8 +264,16 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 	},
 }
 
+// quotePOSIXShell 为字符串生成 POSIX shell 单引号包裹格式，确保 $()、反引号、美元变量均作为字面量且可安全无损还原
+func quotePOSIXShell(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func buildWikiDeleteNodeResumeCmd(taskID, identity string) string {
-	return fmt.Sprintf("feishu-cli drive task-result --scenario wiki_delete_node --task-id %s --as %s", strconv.Quote(taskID), identity)
+	return fmt.Sprintf("feishu-cli drive task-result --scenario wiki_delete_node --task-id %s --as %s", quotePOSIXShell(taskID), identity)
 }
 
 func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken, identity string) (*client.WikiDeleteNodeTaskStatus, error) {

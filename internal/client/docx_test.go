@@ -215,3 +215,67 @@ func TestGetDocumentRevision(t *testing.T) {
 		t.Fatalf("revision = %d, 期望 42", rev)
 	}
 }
+
+// TestGetAllBlockChildrenFailClosedOnMissingPageToken 验证 has_more=true 但 page_token 为空时 fail closed
+func TestGetAllBlockChildrenFailClosedOnMissingPageToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// has_more=true 但是 page_token 为空
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"items":[{"block_id":"b1"}],"has_more":true,"page_token":""}}`)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	_, err := GetAllBlockChildren("doc-1", "b-root", "u-token")
+	if err == nil {
+		t.Fatal("has_more=true 且 page_token 为空时必须报错 fail closed")
+	}
+	if !strings.Contains(err.Error(), "page_token 为空或无进展") {
+		t.Fatalf("错误信息应说明 page_token 为空或无进展，得到: %v", err)
+	}
+}
+
+// TestGetAllBlockChildrenFailClosedOnRepeatedToken 验证检测到循环重复 page_token 时 fail closed
+func TestGetAllBlockChildrenFailClosedOnRepeatedToken(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		callCount++
+		token := r.URL.Query().Get("page_token")
+		next := "token-B"
+		if token == "token-B" {
+			next = "token-A" // 形成 A -> B -> A 环路
+		} else if token == "" {
+			next = "token-A"
+		}
+		_, _ = fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"items":[{"block_id":"b1"}],"has_more":true,"page_token":%q}}`, next)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	_, err := GetAllBlockChildren("doc-1", "b-root", "u-token")
+	if err == nil {
+		t.Fatal("循环重复 page_token 时必须报错 fail closed")
+	}
+	if !strings.Contains(err.Error(), "重复的 page_token") {
+		t.Fatalf("错误信息应说明检测到重复 page_token，得到: %v", err)
+	}
+}
+
+// TestGetAllBlockChildrenFailClosedOnNilData 验证 resp.Data=nil 时 fail closed
+func TestGetAllBlockChildrenFailClosedOnNilData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":null}`)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	_, err := GetAllBlockChildren("doc-1", "b-root", "u-token")
+	if err == nil {
+		t.Fatal("resp.Data=nil 时必须报错 fail closed")
+	}
+	if !strings.Contains(err.Error(), "返回数据为空") {
+		t.Fatalf("错误信息应说明返回数据为空，得到: %v", err)
+	}
+}

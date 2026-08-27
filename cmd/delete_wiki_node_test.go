@@ -524,3 +524,44 @@ func TestDeleteWikiNodeURLInfersObjTypeAndPassesObjType(t *testing.T) {
 		t.Fatalf("DELETE 请求 body obj_type = %v, 期望 docx", gotDeleteBody["obj_type"])
 	}
 }
+
+// TestBuildWikiDeleteNodeResumeCmdPOSIXShellSafe 验证 taskID 含 $(), backtick, single quote, whitespace 时不可触发展开且完全安全
+func TestBuildWikiDeleteNodeResumeCmdPOSIXShellSafe(t *testing.T) {
+	testCases := []struct {
+		taskID   string
+		identity string
+		want     string
+	}{
+		{
+			taskID:   "$(touch /tmp/pwn)",
+			identity: "user",
+			want:     "feishu-cli drive task-result --scenario wiki_delete_node --task-id '$(touch /tmp/pwn)' --as user",
+		},
+		{
+			taskID:   "task`rm -rf /`",
+			identity: "bot",
+			want:     "feishu-cli drive task-result --scenario wiki_delete_node --task-id 'task`rm -rf /`' --as bot",
+		},
+		{
+			taskID:   "task'with'quote",
+			identity: "user",
+			want:     "feishu-cli drive task-result --scenario wiki_delete_node --task-id 'task'\\''with'\\''quote' --as user",
+		},
+		{
+			taskID:   "$USER $HOME task",
+			identity: "bot",
+			want:     "feishu-cli drive task-result --scenario wiki_delete_node --task-id '$USER $HOME task' --as bot",
+		},
+	}
+
+	for _, tc := range testCases {
+		got := buildWikiDeleteNodeResumeCmd(tc.taskID, tc.identity)
+		if got != tc.want {
+			t.Errorf("buildWikiDeleteNodeResumeCmd(%q, %q) = %q, want %q", tc.taskID, tc.identity, got, tc.want)
+		}
+		// 严密断言：命令中不得使用双引号包裹 task_id
+		if strings.Contains(got, `"`+tc.taskID+`"`) {
+			t.Errorf("resume 命令禁止使用双引号包裹 task_id: %s", got)
+		}
+	}
+}
