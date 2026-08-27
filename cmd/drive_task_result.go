@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
@@ -43,6 +44,11 @@ var driveTaskResultCmd = &cobra.Command{
 		output, _ := cmd.Flags().GetString("output")
 
 		// 1. 先行完成所有本地参数校验（参数非法时零网络、零 token 刷新）
+		output = strings.ToLower(strings.TrimSpace(output))
+		if output != "" && output != "json" {
+			return fmt.Errorf("不支持的 --output %q，仅支持 json（或留空使用默认格式）", output)
+		}
+
 		if err := validateEnum(scenario, "--scenario", driveTaskScenarios); err != nil {
 			return err
 		}

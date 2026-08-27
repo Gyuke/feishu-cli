@@ -723,3 +723,25 @@ func TestReplaceAllRevisionExtractionFallback(t *testing.T) {
 		t.Fatalf("第二步使用的 revision 应当为 12，实际为: %v", receivedRevisions)
 	}
 }
+
+// TestDocContentUpdateInvalidOutputZeroNetwork 验证非法 --output 在任何网络请求前 fail closed
+func TestDocContentUpdateInvalidOutputZeroNetwork(t *testing.T) {
+	initDocUpdateTestConfig(t, "http://127.0.0.1:59997")
+
+	_ = docContentUpdateCmd.Flags().Set("mode", "overwrite")
+	_ = docContentUpdateCmd.Flags().Set("markdown", "test")
+	_ = docContentUpdateCmd.Flags().Set("output", "yaml")
+	defer func() {
+		_ = docContentUpdateCmd.Flags().Set("mode", "")
+		_ = docContentUpdateCmd.Flags().Set("markdown", "")
+		_ = docContentUpdateCmd.Flags().Set("output", "")
+	}()
+
+	err := docContentUpdateCmd.RunE(docContentUpdateCmd, []string{"doc-123"})
+	if err == nil {
+		t.Fatal("非法 --output yaml 必须立即报错")
+	}
+	if !strings.Contains(err.Error(), "不支持的 --output") {
+		t.Fatalf("错误信息应说明不支持的 output，得到: %v", err)
+	}
+}

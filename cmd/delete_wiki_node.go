@@ -172,6 +172,12 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 			return err
 		}
 
+		output, _ := cmd.Flags().GetString("output")
+		output = strings.ToLower(strings.TrimSpace(output))
+		if output != "" && output != "json" {
+			return fmt.Errorf("不支持的 --output %q，仅支持 json（或留空使用默认格式）", output)
+		}
+
 		rawObjType, _ := cmd.Flags().GetString("obj-type")
 		nodeToken, objType, err := parseWikiDeleteInput(args[0], rawObjType)
 		if err != nil {
@@ -187,7 +193,6 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 		}
 		includeChildren, _ := cmd.Flags().GetBool("include-children")
 		force, _ := cmd.Flags().GetBool("force")
-		output, _ := cmd.Flags().GetString("output")
 
 		token, err := resolveIdentityToken(cmd)
 		if err != nil {
@@ -208,6 +213,9 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 			spaceID = strings.TrimSpace(node.SpaceID)
 			if spaceID == "" {
 				return fmt.Errorf("未能通过 get_node 获取 space_id，请通过 --space-id 显式指定")
+			}
+			if err := validateResourceIdentifier(spaceID, "从节点解析出的 space_id"); err != nil {
+				return fmt.Errorf("节点所属 space_id 非法: %w", err)
 			}
 			nodeTitle = node.Title
 		}

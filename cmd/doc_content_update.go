@@ -88,6 +88,11 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	selByTitle, _ := cmd.Flags().GetString("selection-by-title")
 	selWithEllipsis, _ := cmd.Flags().GetString("selection-with-ellipsis")
 	output, _ := cmd.Flags().GetString("output")
+	output = strings.ToLower(strings.TrimSpace(output))
+	if output != "" && output != "json" {
+		return fmt.Errorf("不支持的 --output %q，仅支持 json（或留空使用默认格式）", output)
+	}
+
 	uploadImages, _ := cmd.Flags().GetBool("upload-images")
 	colWidthRaw, _ := cmd.Flags().GetString("table-column-width")
 	_, _, errFlag := parseTableColumnWidthFlag(colWidthRaw)

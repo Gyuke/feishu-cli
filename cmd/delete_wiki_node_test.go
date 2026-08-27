@@ -358,33 +358,203 @@ func TestDeleteWikiNodeCancelReturnsError(t *testing.T) {
 	}
 }
 
-// TestDeleteWikiNodeURLValidation 验证严格的 URL 解析安全规则
+// TestDeleteWikiNodeURLValidation 验证严格的 URL 解析、域名白名单、Scheme 与路径边界校验（table-driven tests）
 func TestDeleteWikiNodeURLValidation(t *testing.T) {
-	// 1. 拒绝非法第三方域名（防绕过）
-	_, _, err1 := parseWikiDeleteInput("https://attacker.com/evil?redirect=/wiki/wikcnTarget", "wiki")
-	if err1 == nil || !strings.Contains(err1.Error(), "不支持的域名") {
-		t.Fatalf("非飞书域名应报错拒绝，实际得到: %v", err1)
+	tests := []struct {
+		name      string
+		rawURL    string
+		wantErr   bool
+		errSubstr string
+		wantToken string
+		wantObj   string
+	}{
+		{
+			name:      "伪造域名 evilfeishu.cn 必须被拒绝",
+			rawURL:    "https://evilfeishu.cn/wiki/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "不支持的域名",
+		},
+		{
+			name:      "伪造域名 notlarksuite.com 必须被拒绝",
+			rawURL:    "https://notlarksuite.com/wiki/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "不支持的域名",
+		},
+		{
+			name:      "第三方域名嵌入 query 假路径必须被拒绝",
+			rawURL:    "https://attacker.com/evil?redirect=/wiki/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "不支持的域名",
+		},
+		{
+			name:      "外部非 loopback 域名使用 HTTP 协议必须被拒绝",
+			rawURL:    "http://sample.feishu.cn/wiki/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "必须使用 HTTPS 协议",
+		},
+		{
+			name:      "包含 userinfo 凭证嵌入必须被拒绝",
+			rawURL:    "https://user:pass@sample.feishu.cn/wiki/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "用户信息",
+		},
+		{
+			name:      "包含额外 path 段必须被拒绝",
+			rawURL:    "https://sample.feishu.cn/wiki/node123/extra/segment",
+			wantErr:   true,
+			errSubstr: "URL 路径格式无效",
+		},
+		{
+			name:      "包含 encoded slash (%2f) 必须被拒绝",
+			rawURL:    "https://sample.feishu.cn/wiki/node%2fescape",
+			wantErr:   true,
+			errSubstr: "非法的转义斜杠",
+		},
+		{
+			name:      "包含控制字符 (%00) 必须被拒绝",
+			rawURL:    "https://sample.feishu.cn/wiki/node%00null",
+			wantErr:   true,
+			errSubstr: "非法字符",
+		},
+		{
+			name:      "不支持的路径前缀必须被拒绝",
+			rawURL:    "https://sample.feishu.cn/evil_path/wikcnTarget",
+			wantErr:   true,
+			errSubstr: "不支持的 URL 路径前缀",
+		},
+		{
+			name:      "合法飞书 HTTPS 域名正常解析",
+			rawURL:    "https://sample.feishu.cn/wiki/wikcnValidNode?extra=1#frag",
+			wantErr:   false,
+			wantToken: "wikcnValidNode",
+			wantObj:   "wiki",
+		},
+		{
+			name:      "合法官方域名带自定义端口正常解析",
+			rawURL:    "https://sample.feishu.cn:8443/docx/doxcnPortDoc",
+			wantErr:   false,
+			wantToken: "doxcnPortDoc",
+			wantObj:   "docx",
+		},
+		{
+			name:      "合法本地 loopback HTTP 测试地址正常解析",
+			rawURL:    "http://127.0.0.1:9090/sheets/shtcnSheetToken",
+			wantErr:   false,
+			wantToken: "shtcnSheetToken",
+			wantObj:   "sheet",
+		},
 	}
 
-	// 2. 拒绝 userinfo 凭证嵌入
-	_, _, err2 := parseWikiDeleteInput("https://user:pass@sample.feishu.cn/wiki/wikcnTarget", "wiki")
-	if err2 == nil || !strings.Contains(err2.Error(), "用户信息") {
-		t.Fatalf("包含 userinfo 的 URL 应被拒绝，实际得到: %v", err2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tok, objType, err := parseWikiDeleteInput(tt.rawURL, "")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseWikiDeleteInput(%q) err = %v, wantErr = %v", tt.rawURL, err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Fatalf("错误信息应当包含 %q，实际得到: %v", tt.errSubstr, err)
+			}
+			if !tt.wantErr {
+				if tok != tt.wantToken || objType != tt.wantObj {
+					t.Fatalf("parseWikiDeleteInput(%q) = (%q, %q), 期望 (%q, %q)",
+						tt.rawURL, tok, objType, tt.wantToken, tt.wantObj)
+				}
+			}
+		})
 	}
+}
 
-	// 3. 拒绝不支持的路径前缀
-	_, _, err3 := parseWikiDeleteInput("https://sample.feishu.cn/evil_path/wikcnTarget", "wiki")
-	if err3 == nil || !strings.Contains(err3.Error(), "不支持的 URL 路径") {
-		t.Fatalf("不支持的路径前缀应被拒绝，实际得到: %v", err3)
-	}
+// TestDeleteWikiNodeInvalidServerTaskIDRejected 验证服务端返回非法 task_id 时被校验拦截
+func TestDeleteWikiNodeInvalidServerTaskIDRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "DELETE":
+			// 返回含有路径分隔符的非法 task_id
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task/escape/evil"}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
 
-	// 4. 正确的 URL 路径安全提取与推断
-	tok, objType, err4 := parseWikiDeleteInput("https://sample.feishu.cn/wiki/wikcnValidNode?extra=1#frag", "")
-	if err4 != nil {
-		t.Fatalf("合法飞书 wiki URL 应解析成功，但得到: %v", err4)
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-123")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnTest"})
+	if err == nil || !strings.Contains(err.Error(), "task_id") {
+		t.Fatalf("服务端返回非法 task_id 必须被拦截报错，得到: %v", err)
 	}
-	if tok != "wikcnValidNode" || objType != "wiki" {
-		t.Fatalf("解析结果异常: tok=%q objType=%q", tok, objType)
+}
+
+// TestDeleteWikiNodeInvalidParsedSpaceIDRejected 验证 get_node 返回非法 space_id 时立即拦截且不发 DELETE 请求
+func TestDeleteWikiNodeInvalidParsedSpaceIDRejected(t *testing.T) {
+	deleteCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.URL.Path == "/open-apis/wiki/v2/spaces/get_node":
+			// 返回包含路径分隔符的非法 space_id
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{"node":{"space_id":"sp/evil_path_inject","node_token":"wikcnTest","title":"测试"}}
+			}`)
+		case r.Method == "DELETE":
+			deleteCalled = true
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":""}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnTest"})
+	if err == nil || !strings.Contains(err.Error(), "space_id 非法") {
+		t.Fatalf("服务端返回非法 space_id 必须被拦截报错，得到: %v", err)
+	}
+	if deleteCalled {
+		t.Fatal("解析出非法 space_id 后绝不能发起 DELETE 请求！")
+	}
+}
+
+// TestDeleteWikiNodeInvalidOutputZeroNetwork 验证非法 --output 在任何网络请求前 fail closed
+func TestDeleteWikiNodeInvalidOutputZeroNetwork(t *testing.T) {
+	// 指向不可达端口，确保若发起任何网络请求必将报错
+	initWikiNodeDeleteTestConfig(t, "http://127.0.0.1:59998")
+
+	_ = deleteWikiNodeCmd.Flags().Set("output", "yaml")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("output", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnDummy"})
+	if err == nil {
+		t.Fatal("非法 --output yaml 必须立即报错")
+	}
+	if !strings.Contains(err.Error(), "不支持的 --output") {
+		t.Fatalf("错误信息应说明不支持的 output，得到: %v", err)
 	}
 }
 
