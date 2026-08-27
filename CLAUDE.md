@@ -167,7 +167,7 @@ feishu-cli doc import input.md --title "..." --upload-images --verbose
 feishu-cli doc export <doc_id> -o output.md
 feishu-cli doc read <doc_id> {--outline | --heading "标题" | --keyword "正则" [--context N]}  # 大文档选择性读取
 feishu-cli doc content-update <doc_id> --mode <mode> --markdown "..."
-#   mode: append / overwrite / replace_range / delete_range / insert_after
+#   mode: append / overwrite / replace_range / replace_all / delete_range / insert_before / insert_after（对齐 docs_ai 单操作原子协议；支持 --revision-id 乐观锁与无 # 标题选择器）
 feishu-cli doc htmlbox {create|update|get|delete} <doc_id> [block_id] --html-file x.html  # 妙笔BOX HTML 小组件（文档里跑动画/ECharts/可交互图表，唯一能"动"的载体）
 
 # 多维表格（统一用 --base-token，底层 base/v3 + 部分 bitable/v1 API）

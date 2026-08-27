@@ -179,90 +179,24 @@ func initDocUpdateTestConfig(t *testing.T, baseURL string) {
 	}
 }
 
-// TestOverwriteDoesNotDeleteOnConversionFailure 验证当 Markdown 解析/转换失败时，绝不调用任何删除 API，保护原内容
-func TestOverwriteDoesNotDeleteOnConversionFailure(t *testing.T) {
-	deleteCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "batch_delete") {
-			deleteCalls++
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok"}`)
-			return
-		}
-		if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
-			return
-		}
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}))
-	defer server.Close()
-	initDocUpdateTestConfig(t, server.URL)
+// TestOverwriteAtomicProtocol 验证 overwrite 走官方 PUT /docs_ai 单操作原子覆盖协议，彻底杜绝先删后写破坏窗口
+func TestOverwriteAtomicProtocol(t *testing.T) {
+	putCalled := false
+	batchDeleteCalled := false
+	var gotBody map[string]any
 
-	// 传入空内容触发 validateAndPreconvertMarkdown 错误
-	err := doOverwrite("doc-123", "", false, "", "", "auto", nil, -1)
-	if err == nil {
-		t.Fatal("空 Markdown 内容应当报错，但返回了 nil")
-	}
-
-	if deleteCalls != 0 {
-		t.Fatalf("转换失败前不应触发删除！实际调用 batch_delete %d 次", deleteCalls)
-	}
-}
-
-// TestReplaceRangeDoesNotDeleteOnConversionFailure 验证 replace_range 在内容转换失败前不删除原内容
-func TestReplaceRangeDoesNotDeleteOnConversionFailure(t *testing.T) {
-	deleteCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "batch_delete") {
-			deleteCalls++
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok"}`)
-			return
-		}
-		if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
-			return
-		}
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}))
-	defer server.Close()
-	initDocUpdateTestConfig(t, server.URL)
-
-	err := doReplaceRange("doc-123", "", "## 标题", "", false, "", "", "auto", nil, -1)
-	if err == nil {
-		t.Fatal("空 Markdown 内容应当报错，但返回了 nil")
-	}
-
-	if deleteCalls != 0 {
-		t.Fatalf("转换失败前不应触发删除！实际调用 batch_delete %d 次", deleteCalls)
-	}
-}
-
-// TestOverwriteRevisionConflictAbortsBeforeWriting 验证 revision 冲突时删除报错且后续写入被阻止
-func TestOverwriteRevisionConflictAbortsBeforeWriting(t *testing.T) {
-	deleteCalls := 0
-	createCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
 			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
-		case r.URL.Path == "/open-apis/docx/v1/documents/doc-conflict":
-			// 返回当前 revision_id 为 5
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"document_id":"doc-conflict","revision_id":5}}}`)
-		case strings.HasSuffix(r.URL.Path, "/children") && r.Method == "GET":
-			// 返回现有 2 个子块
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"items":[{"block_id":"b1"},{"block_id":"b2"}],"has_more":false}}`)
+		case r.Method == "PUT" && r.URL.Path == "/open-apis/docs_ai/v1/documents/doc-123":
+			putCalled = true
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":6}}}`)
 		case strings.Contains(r.URL.Path, "batch_delete"):
-			deleteCalls++
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			// 服务端模拟 revision 冲突
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = fmt.Fprint(w, `{"code":1770034,"msg":"document revision not match"}`)
-		case strings.HasSuffix(r.URL.Path, "/children") && r.Method == "POST":
-			createCalls++
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"children":[{"block_id":"new1"}]}}`)
+			batchDeleteCalled = true
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok"}`)
 		default:
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 		}
@@ -270,16 +204,209 @@ func TestOverwriteRevisionConflictAbortsBeforeWriting(t *testing.T) {
 	defer server.Close()
 	initDocUpdateTestConfig(t, server.URL)
 
-	err := doOverwrite("doc-conflict", "# 新内容\n\n测试", false, "", "", "auto", nil, 5)
+	err := doOverwrite("doc-123", "# 全新内容\n\n测试", "", "", 5)
+	if err != nil {
+		t.Fatalf("doOverwrite 执行失败: %v", err)
+	}
+
+	if !putCalled {
+		t.Fatal("未发起官方 PUT /open-apis/docs_ai/v1/documents/{id} 请求")
+	}
+	if batchDeleteCalled {
+		t.Fatal("严禁调用 batch_delete！必须走单操作原子覆盖")
+	}
+	if gotBody["command"] != "overwrite" {
+		t.Fatalf("command = %v, 期望 overwrite", gotBody["command"])
+	}
+	if gotBody["format"] != "markdown" {
+		t.Fatalf("format = %v, 期望 markdown", gotBody["format"])
+	}
+	if gotBody["revision_id"] != float64(5) {
+		t.Fatalf("revision_id = %v, 期望 5", gotBody["revision_id"])
+	}
+}
+
+// TestReplaceRangeAtomicProtocol 验证 replace_range 映射 title selector 为 start_block_id/end_block_id 并发起原子 block_replace
+func TestReplaceRangeAtomicProtocol(t *testing.T) {
+	putCalled := false
+	batchDeleteCalled := false
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			// 返回包含 H2 标题和内容的块
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"b_intro","block_type":2,"text":{"elements":[{"text_run":{"content":"前言"}}]}},
+						{"block_id":"b_h2","block_type":4,"heading2":{"elements":[{"text_run":{"content":"目标章节"}}]}},
+						{"block_id":"b_p1","block_type":2,"text":{"elements":[{"text_run":{"content":"正文段落"}}]}},
+						{"block_id":"b_next_h2","block_type":4,"heading2":{"elements":[{"text_run":{"content":"下一章节"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT" && r.URL.Path == "/open-apis/docs_ai/v1/documents/doc-replace":
+			putCalled = true
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":7}}}`)
+		case strings.Contains(r.URL.Path, "batch_delete"):
+			batchDeleteCalled = true
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok"}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doReplaceRange("doc-replace", "## 新章节内容", "## 目标章节", "", "", "", 6)
+	if err != nil {
+		t.Fatalf("doReplaceRange 执行失败: %v", err)
+	}
+
+	if !putCalled {
+		t.Fatal("未发起官方 PUT /open-apis/docs_ai/v1/documents/{id} 请求")
+	}
+	if batchDeleteCalled {
+		t.Fatal("严禁调用 batch_delete！必须走单操作原子 block_replace")
+	}
+	if gotBody["command"] != "block_replace" {
+		t.Fatalf("command = %v, 期望 block_replace", gotBody["command"])
+	}
+	if gotBody["start_block_id"] != "b_h2" {
+		t.Fatalf("start_block_id = %v, 期望 b_h2", gotBody["start_block_id"])
+	}
+	if gotBody["end_block_id"] != "b_p1" {
+		t.Fatalf("end_block_id = %v, 期望 b_p1", gotBody["end_block_id"])
+	}
+	if gotBody["revision_id"] != float64(6) {
+		t.Fatalf("revision_id = %v, 期望 6", gotBody["revision_id"])
+	}
+}
+
+// TestDeleteRangeAtomicProtocol 验证 delete_range 映射 block_delete 原子操作
+func TestDeleteRangeAtomicProtocol(t *testing.T) {
+	putCalled := false
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"b_del_start","block_type":3,"heading1":{"elements":[{"text_run":{"content":"废弃章节"}}]}},
+						{"block_id":"b_del_body","block_type":2,"text":{"elements":[{"text_run":{"content":"废弃正文"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT" && r.URL.Path == "/open-apis/docs_ai/v1/documents/doc-del":
+			putCalled = true
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":8}}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doDeleteRange("doc-del", "废弃章节", "", "", "", 7)
+	if err != nil {
+		t.Fatalf("doDeleteRange 执行失败: %v", err)
+	}
+
+	if !putCalled {
+		t.Fatal("未发起原子 block_delete PUT 请求")
+	}
+	if gotBody["command"] != "block_delete" {
+		t.Fatalf("command = %v, 期望 block_delete", gotBody["command"])
+	}
+	if gotBody["start_block_id"] != "b_del_start" || gotBody["end_block_id"] != "b_del_body" {
+		t.Fatalf("block_delete 范围异常: start=%v, end=%v", gotBody["start_block_id"], gotBody["end_block_id"])
+	}
+}
+
+// TestReplaceAllAtomicProtocolWithPartialFailure 验证 replace_all 倒序原子替换，且部分失败时非零退出并报告已完成项
+func TestReplaceAllAtomicProtocolWithPartialFailure(t *testing.T) {
+	putCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			// 返回 2 个匹配项
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"item_1","block_type":2,"text":{"elements":[{"text_run":{"content":"待替换词项"}}]}},
+						{"block_id":"item_2","block_type":2,"text":{"elements":[{"text_run":{"content":"待替换词项"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT" && r.URL.Path == "/open-apis/docs_ai/v1/documents/doc-rep-all":
+			putCount++
+			if putCount == 1 {
+				// 第一次（倒序 item_2）成功
+				_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":11}}}`)
+			} else {
+				// 第二次（item_1）模拟服务端失败
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = fmt.Fprint(w, `{"code":99991400,"msg":"rate limited"}`)
+			}
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doReplaceAll("doc-rep-all", "新词", "", "待替换词项", "", "", 10)
 	if err == nil {
-		t.Fatal("revision 冲突时应报错，但返回了 nil")
+		t.Fatal("部分失败时必须返回非零错误！")
 	}
 
-	if !strings.Contains(err.Error(), "1770034") && !strings.Contains(err.Error(), "revision not match") {
-		t.Fatalf("错误应包含 revision 冲突信息，实际得到: %v", err)
+	// 验证错误信息明确指出了已成功完成项
+	if !strings.Contains(err.Error(), "已成功完成 1 处") {
+		t.Fatalf("错误信息必须明确报告已成功完成项，实际错误: %v", err)
+	}
+	if putCount != 2 {
+		t.Fatalf("PUT 调用次数 = %d，期望 2", putCount)
+	}
+}
+
+// TestFailClosedOnLocalResources 验证本地资源检测（--upload-images 或相对路径图片）时 fail closed 并给出迁移提示
+func TestFailClosedOnLocalResources(t *testing.T) {
+	// 1. --upload-images fail closed
+	err1 := validateNoLocalResources(true, "普通内容")
+	if err1 == nil || !strings.Contains(err1.Error(), "feishu-cli doc import") {
+		t.Fatalf("upload-images=true 应 fail closed 并给出迁移提示，得到: %v", err1)
 	}
 
-	if createCalls != 0 {
-		t.Fatalf("删除发生 revision 冲突后，绝对不应调用创建新块！实际调用 %d 次", createCalls)
+	// 2. 本地图片语法 fail closed
+	localMD := "一段文字\n![本地图](./assets/pic.png)\n结尾"
+	err2 := validateNoLocalResources(false, localMD)
+	if err2 == nil || !strings.Contains(err2.Error(), "feishu-cli doc import") {
+		t.Fatalf("含本地图片应 fail closed 并给出迁移提示，得到: %v", err2)
+	}
+
+	// 3. 网络图片允许通行
+	remoteMD := "一段文字\n![网络图](https://example.com/pic.png)\n结尾"
+	if err := validateNoLocalResources(false, remoteMD); err != nil {
+		t.Fatalf("网络图片应允许通行，但报错: %v", err)
 	}
 }

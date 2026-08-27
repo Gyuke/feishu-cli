@@ -89,6 +89,24 @@
 
 `--dry-run` 只展示三段计划与打包清单，不获取 token、不访问网络。HTTP/业务错误非零退出并带恢复建议；任一步失败中止后续调用。敏感文件扫描、index.html、尺寸上限保持不变。
 
+### 修复 — Docs 与 Wiki 数据安全与 API 语义对齐
+
+- **文档更新原子安全协议（PUT /open-apis/docs_ai/v1/documents/{id}）**：
+  - `doc content-update` 全面迁移至官方单操作原子更新协议，`overwrite` 采用原子 overwrite，`replace_range` 采用原子 `block_replace`，`delete_range` 采用原子 `block_delete`，`replace_all` 倒序逐个原子替换且部分失败时非零并报告已完成项，彻底杜绝先删后写的数据破坏窗口。
+  - 新增 `--revision-id` flag，透传版本号进行服务端乐观锁并发冲突保护。
+  - 标题选择器：无 `#` 前缀支持匹配任意级别标题并精准截断章节范围，自动映射为实际 `start_block_id` 与 `end_block_id`。
+  - 本地资源安全：检测到本地相对路径图片/文件时 fail closed 拒绝执行并提供迁移指引，确保远程原子操作真实保真。
+- **文档子块删除分页健全**：
+  - `doc delete --all` 改用 `GetAllBlockChildren` 全分页拉取父块下全部子块，彻底避免仅拉取第一页导致的漏删和谎报全删。
+- **Wiki 节点删除与任务安全**：
+  - 迁移至官方 `DELETE /open-apis/wiki/v2/spaces/{space_id}/nodes/{node_token}` 端点，请求体正确携带 `obj_type` 与 `include_children`。
+  - 校验 `obj_type` 白名单（wiki, doc, docx, sheet, bitable, mindnote, slides, file），并对 space/node/task path segment 进行 URL 转义。
+  - 异步任务轮询健全化：当轮询失败或超时/仍在 processing 时返回非零错误码，绝不谎报成功，并在错误信息中保留 `task_id` 与继续查询命令。
+- **Wiki 快捷方式创建**：
+  - `wiki create` 在 `--node-type=shortcut` 时强制校验并下发 `--origin-node-token`。
+- **Wiki 节点检视**：
+  - `drive inspect` 在展开 Wiki 节点时移除错误的 `obj_type=wiki` 查询参数。
+
 ## [v1.36.0] - 2026-07-22
 
 本版为一次全域能力补齐：消息读取发送者名字服务端回填、CLI 交互健壮性守卫、OKR 全量接线、多维表格结构化过滤 DSL、电子表格类型保真读取闭环、大文档选择性读取、卡片交互回调与审批 v4 事件订阅，以及邮件/会议/纪要/云盘/任务/日历多域新命令。

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	larkdocx "github.com/larksuite/oapi-sdk-go/v3/service/docx/v1"
@@ -1194,4 +1195,40 @@ func UnmergeTableCells(documentID, tableBlockID string, rowIndex, columnIndex in
 		},
 	}, userAccessToken...)
 	return err
+}
+
+// UpdateDocContentAtomic 封装官方 PUT /open-apis/docs_ai/v1/documents/{document_id} 单操作原子更新接口。
+// 支持 command: overwrite, block_replace, block_delete, block_insert_after, append 等。
+// 彻底避免客户端先删后写的中间窗口，并支持服务端 revision 乐观锁冲突校验。
+func UpdateDocContentAtomic(documentID string, body map[string]any, userAccessToken string) (map[string]any, error) {
+	c, err := GetClient()
+	if err != nil {
+		return nil, err
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	apiPath := fmt.Sprintf("/open-apis/docs_ai/v1/documents/%s", url.PathEscape(documentID))
+
+	if err := acquireDocWriteSlotWithTimeout(documentID); err != nil {
+		return nil, fmt.Errorf("等待文档写入配额失败: %w", err)
+	}
+
+	resp, err := c.Put(Context(), apiPath, body, tokenType, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("更新文档内容失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("更新文档内容失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+	var parsed struct {
+		Code int            `json:"code"`
+		Msg  string         `json:"msg"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &parsed); err != nil {
+		return nil, fmt.Errorf("解析更新文档响应失败: %w", err)
+	}
+	if parsed.Code != 0 {
+		return nil, fmt.Errorf("更新文档内容失败: code=%d, msg=%s", parsed.Code, parsed.Msg)
+	}
+	return parsed.Data, nil
 }

@@ -51,7 +51,7 @@ python3 -c "d=open('/tmp/doc.md','rb').read(); assert b'\xef\xbf\xbd' not in d; 
 常用示例：
 
 ```bash
-# 按标题替换章节
+# 按标题替换章节（原子 block_replace，无先删后写破坏窗口）
 feishu-cli doc content-update <document_id> --mode replace_range \
   --selection-by-title "## 旧章节" \
   --markdown-file /tmp/new-section.md
@@ -65,17 +65,20 @@ feishu-cli doc content-update <document_id> --mode insert_after \
 feishu-cli doc content-update <document_id> --mode append \
   --markdown-file /tmp/append.md
 
-# 完全覆盖
+# 完全覆盖（原子 overwrite，无破坏窗口；支持 --revision-id 并发保护）
 feishu-cli doc content-update <document_id> --mode overwrite \
-  --markdown-file /tmp/full.md
+  --markdown-file /tmp/full.md --revision-id 42
 
-# 控制 Markdown 表格列宽（默认按内容启发式自动计算）
-feishu-cli doc content-update <document_id> --mode append \
-  --markdown-file /tmp/with-table.md \
-  --table-column-width 80,200,*,120
+# 全文替换所有匹配项（倒序逐个原子 block_replace，中途失败非零退出并报告已完成项）
+feishu-cli doc content-update <document_id> --mode replace_all \
+  --selection-with-ellipsis "旧文本" --markdown "新文本"
 ```
 
-关键规则：用户说“修改/替换/更新某段”时用 `replace_range` 或 `replace_all`，不要 append 导致重复。
+关键规则：
+- **原子更新安全协议**：`doc content-update` 全面走官方单操作原子能力（`PUT /open-apis/docs_ai/v1/documents/{id}`），彻底杜绝先删后写的数据破坏窗口；支持 `--revision-id` 透传进行乐观锁并发保护。
+- **标题选择器**：`--selection-by-title` 支持无 `#` 匹配任意级别标题（如 `"架构设计"`），并精准映射为实际 `start_block_id` / `end_block_id`；带 `#` 则精准匹配对应级别。
+- **本地资源提示**：为确保原子更新数据不损坏，`content-update` 暂不支持本地文件/图片混合上传；如需嵌入本地图片，请使用网络图片 URL，或使用 `feishu-cli doc import` 全量导入。
+- 用户说“修改/替换/更新某段”时用 `replace_range` 或 `replace_all`，不要 append 导致重复。
 
 `--table-column-width`（content-update / add 通用，默认 `auto`）：控制 Markdown 表格列宽，仅 Markdown 内容类型生效；取值与 `<!-- feishu-colwidth: ... -->` 注释的完整规则（单位/优先级/clamp）以 `../import/references/doc-guide.md` 表格章节为权威。
 

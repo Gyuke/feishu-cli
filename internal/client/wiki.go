@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	larkwiki "github.com/larksuite/oapi-sdk-go/v3/service/wiki/v2"
@@ -557,7 +558,7 @@ func DeleteWikiSpace(spaceID, userAccessToken string) (string, error) {
 		return "", err
 	}
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-	apiPath := fmt.Sprintf("/open-apis/wiki/v2/spaces/%s", spaceID)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/spaces/%s", url.PathEscape(spaceID))
 	resp, err := c.Delete(Context(), apiPath, nil, tokenType, opts...)
 	if err != nil {
 		return "", fmt.Errorf("删除知识空间失败: %w", err)
@@ -588,7 +589,7 @@ func GetWikiDeleteSpaceTask(taskID, userAccessToken string) (*WikiDeleteSpaceTas
 		return nil, err
 	}
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-	apiPath := fmt.Sprintf("/open-apis/wiki/v2/tasks/%s?task_type=delete_space", taskID)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/tasks/%s?task_type=delete_space", url.PathEscape(taskID))
 	resp, err := c.Get(Context(), apiPath, nil, tokenType, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("查询 delete_space 任务失败: %w", err)
@@ -653,7 +654,7 @@ func DeleteWikiNode(spaceID, nodeToken, objType string, includeChildren bool, us
 		objType = "wiki"
 	}
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-	apiPath := fmt.Sprintf("/open-apis/wiki/v2/spaces/%s/nodes/%s", spaceID, nodeToken)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/spaces/%s/nodes/%s", url.PathEscape(spaceID), url.PathEscape(nodeToken))
 	body := map[string]any{
 		"obj_type":         objType,
 		"include_children": includeChildren,
@@ -690,7 +691,7 @@ func GetWikiDeleteNodeTask(taskID, userAccessToken string) (*WikiDeleteNodeTaskS
 		return nil, err
 	}
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-	apiPath := fmt.Sprintf("/open-apis/wiki/v2/tasks/%s?task_type=delete_node", taskID)
+	apiPath := fmt.Sprintf("/open-apis/wiki/v2/tasks/%s?task_type=delete_node", url.PathEscape(taskID))
 	resp, err := c.Get(Context(), apiPath, nil, tokenType, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("查询 delete_node 任务失败: %w", err)

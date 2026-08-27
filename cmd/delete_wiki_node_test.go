@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/viper"
@@ -113,8 +115,14 @@ func TestDeleteWikiNodePathBodyAndAsyncPoll(t *testing.T) {
 	initWikiNodeDeleteTestConfig(t, server.URL)
 
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	origAttempts := wikiDeleteNodePollAttempts
+	origInterval := wikiDeleteNodePollInterval
+	wikiDeleteNodePollAttempts = 3
+	wikiDeleteNodePollInterval = 5 * time.Millisecond
 	defer func() {
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+		wikiDeleteNodePollAttempts = origAttempts
+		wikiDeleteNodePollInterval = origInterval
 	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnTestNode"})
@@ -171,5 +179,182 @@ func TestDeleteWikiNodeSyncCompletion(t *testing.T) {
 	}
 	if !deleteCalled {
 		t.Fatal("未发起同步删除请求")
+	}
+}
+
+// TestDeleteWikiNodeAllFailedReturnsError 验证所有状态轮询均失败时返回非零退出，并保留 task_id 及 resume 提示
+func TestDeleteWikiNodeAllFailedReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "DELETE" && r.URL.Path == "/open-apis/wiki/v2/spaces/sp-fail/nodes/node-fail":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task-failed-999"}}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/open-apis/wiki/v2/tasks/"):
+			// 模拟所有轮询均失败
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	origAttempts := wikiDeleteNodePollAttempts
+	origInterval := wikiDeleteNodePollInterval
+	wikiDeleteNodePollAttempts = 2
+	wikiDeleteNodePollInterval = 1 * time.Millisecond
+	defer func() {
+		wikiDeleteNodePollAttempts = origAttempts
+		wikiDeleteNodePollInterval = origInterval
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-fail")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-fail"})
+	if err == nil {
+		t.Fatal("状态查询全部失败时必须返回非零错误，绝不能返回 nil")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "task-failed-999") {
+		t.Fatalf("错误信息必须保留 task_id (task-failed-999)，实际得到: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "feishu-cli") {
+		t.Fatalf("错误信息必须包含 resume 查询提示命令，实际得到: %s", errMsg)
+	}
+}
+
+// TestDeleteWikiNodeTimeoutReturnsError 验证轮询超时（仍为 processing）时返回非零退出，并保留 task_id 与 resume 提示
+func TestDeleteWikiNodeTimeoutReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "DELETE" && r.URL.Path == "/open-apis/wiki/v2/spaces/sp-timeout/nodes/node-timeout":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task-timeout-888"}}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/open-apis/wiki/v2/tasks/"):
+			// 模拟一直为 processing
+			_, _ = fmt.Fprint(w, `{
+				"code": 0,
+				"msg": "ok",
+				"data": {
+					"task": {
+						"task_id": "task-timeout-888",
+						"simple_task_result": {
+							"status": "processing"
+						}
+					}
+				}
+			}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	origAttempts := wikiDeleteNodePollAttempts
+	origInterval := wikiDeleteNodePollInterval
+	wikiDeleteNodePollAttempts = 2
+	wikiDeleteNodePollInterval = 1 * time.Millisecond
+	defer func() {
+		wikiDeleteNodePollAttempts = origAttempts
+		wikiDeleteNodePollInterval = origInterval
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-timeout")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-timeout"})
+	if err == nil {
+		t.Fatal("轮询超时仍未完成时必须返回非零错误，绝不能返回 nil 谎报成功")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "task-timeout-888") {
+		t.Fatalf("错误信息必须保留 task_id (task-timeout-888)，实际得到: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "超时") && !strings.Contains(errMsg, "执行中") {
+		t.Fatalf("错误信息必须说明超时或执行中状态，实际得到: %s", errMsg)
+	}
+}
+
+// TestDeleteWikiNodeInvalidObjType 验证非法 obj-type 立即被拦截拒绝
+func TestDeleteWikiNodeInvalidObjType(t *testing.T) {
+	initWikiNodeDeleteTestConfig(t, "http://127.0.0.1:9999")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "not_exist_type")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnDummy"})
+	if err == nil {
+		t.Fatal("非法 obj-type 应当被拒绝，但返回了 nil")
+	}
+	if !strings.Contains(err.Error(), "不支持的 --obj-type") {
+		t.Fatalf("错误信息应指出不支持的 obj-type，得到: %v", err)
+	}
+}
+
+// TestDeleteWikiNodePathEscaped 验证 space_id、node_token 和 task_id 正确进行 PathEscape 转义
+func TestDeleteWikiNodePathEscaped(t *testing.T) {
+	var gotDeletePath, gotPollPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "DELETE":
+			gotDeletePath = r.URL.EscapedPath()
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task id with space"}}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/open-apis/wiki/v2/tasks/"):
+			gotPollPath = r.URL.EscapedPath()
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{"task":{"task_id":"task id with space","simple_task_result":{"status":"success"}}}
+			}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	origAttempts := wikiDeleteNodePollAttempts
+	origInterval := wikiDeleteNodePollInterval
+	wikiDeleteNodePollAttempts = 2
+	wikiDeleteNodePollInterval = 1 * time.Millisecond
+	defer func() {
+		wikiDeleteNodePollAttempts = origAttempts
+		wikiDeleteNodePollInterval = origInterval
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+	}()
+
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp 123")
+	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
+
+	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnEscaped"})
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+
+	wantDeletePath := "/open-apis/wiki/v2/spaces/sp%20123/nodes/wikcnEscaped"
+	if gotDeletePath != wantDeletePath {
+		t.Fatalf("DELETE 路径转义异常: got %q, want %q", gotDeletePath, wantDeletePath)
+	}
+	wantPollPath := "/open-apis/wiki/v2/tasks/task%20id%20with%20space"
+	if gotPollPath != wantPollPath {
+		t.Fatalf("Task 轮询路径转义异常: got %q, want %q", gotPollPath, wantPollPath)
 	}
 }

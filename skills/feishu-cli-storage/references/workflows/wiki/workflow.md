@@ -18,6 +18,8 @@ feishu-cli wiki export-tree <node_token> --output-dir ./backup
 
 ```bash
 feishu-cli wiki create --space-id <space_id> --title "新文档"
+# 创建快捷方式节点必须提供 --origin-node-token
+feishu-cli wiki create --space-id <space_id> --title "快捷方式" --node-type shortcut --origin-node-token <origin_node_token>
 feishu-cli wiki update <node_token> --title "新标题"
 feishu-cli wiki move <node_token> --target-space <space_id>
 feishu-cli wiki node-copy --space-id <src> --node-token <node> --target-space-id <dst>
@@ -25,9 +27,11 @@ feishu-cli wiki space-create --name "新知识库"
 feishu-cli wiki member add <space_id> --member-id ou_xxx --member-type openid --role member   # --role 枚举仅 admin/member
 ```
 
-删除节点、成员或整个空间前必须确认目标。删除空间只有显式 `--yes` 才执行，并会轮询异步任务：
+删除节点走官方 `DELETE /wiki/v2/spaces/{space}/nodes/{node}` 接口，支持级联删除与异步任务轮询（若未完成或失败非零退出并保留 task_id 与 resume 命令）；删除空间只有显式 `--yes` 才执行，并会轮询异步任务：
 
 ```bash
+# 删除节点（--space-id 可选，缺省自动解析；--obj-type 默认 wiki；支持 -f 跳过确认）
+feishu-cli wiki delete <node_token> [-f]
 feishu-cli wiki delete-space <space_id> --yes
 ```
 

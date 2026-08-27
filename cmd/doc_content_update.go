@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	larkdocx "github.com/larksuite/oapi-sdk-go/v3/service/docx/v1"
@@ -89,7 +90,7 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 	uploadImages, _ := cmd.Flags().GetBool("upload-images")
 	colWidthRaw, _ := cmd.Flags().GetString("table-column-width")
-	colWidthMode, colWidthValues, errFlag := parseTableColumnWidthFlag(colWidthRaw)
+	_, _, errFlag := parseTableColumnWidthFlag(colWidthRaw)
 	if errFlag != nil {
 		return errFlag
 	}
@@ -107,19 +108,26 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 验证本地资源：若存在本地文件/图片则 fail closed 并给出迁移提示
+	if mode != "delete_range" {
+		if err := validateNoLocalResources(uploadImages, markdownContent); err != nil {
+			return err
+		}
+	}
+
 	switch mode {
 	case "append":
-		return doAppend(documentID, markdownContent, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doAppend(documentID, markdownContent, output, userAccessToken, revisionID)
 	case "overwrite":
-		return doOverwrite(documentID, markdownContent, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
+		return doOverwrite(documentID, markdownContent, output, userAccessToken, revisionID)
 	case "replace_range":
-		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
+		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	case "replace_all":
-		return doReplaceAll(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues, revisionID)
+		return doReplaceAll(documentID, markdownContent, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	case "insert_before":
-		return doInsertBefore(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doInsertBefore(documentID, markdownContent, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	case "insert_after":
-		return doInsertAfter(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken, colWidthMode, colWidthValues)
+		return doInsertAfter(documentID, markdownContent, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	case "delete_range":
 		return doDeleteRange(documentID, selByTitle, selWithEllipsis, output, userAccessToken, revisionID)
 	}
@@ -402,100 +410,89 @@ func getPageChildren(documentID, userAccessToken string) ([]*larkdocx.Block, err
 }
 
 // ============================================================
-// 7 种模式实现
+// 本地资源检查（Fail Closed）
 // ============================================================
 
-// doAppend 追加到文档末尾
-func doAppend(documentID, markdown string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
-	err := addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, -1, output, userAccessToken, colWidthMode, colWidthValues)
+// localResourceRegex 匹配 Markdown 图片与文件链接 ![alt](target)
+var localResourceRegex = regexp.MustCompile(`!\[.*?\]\((.*?)\)`)
+
+// containsLocalMarkdownResources 检查 Markdown 中是否包含本地文件/图片资源
+func containsLocalMarkdownResources(content string) bool {
+	matches := localResourceRegex.FindAllStringSubmatch(content, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			target := strings.TrimSpace(m[1])
+			if target != "" &&
+				!strings.HasPrefix(target, "http://") &&
+				!strings.HasPrefix(target, "https://") &&
+				!strings.HasPrefix(target, "data:") &&
+				!strings.HasPrefix(target, "#") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateNoLocalResources 检查是否包含本地文件/图片资源；若有则 fail closed 并给出迁移提示
+func validateNoLocalResources(uploadImages bool, markdown string) error {
+	if uploadImages {
+		return fmt.Errorf("doc content-update 现采用官方原子安全更新协议，暂不支持 --upload-images；如需上传本地图片，请改用图床/网络图片 URL，或使用 'feishu-cli doc import' 全量导入")
+	}
+	if containsLocalMarkdownResources(markdown) {
+		return fmt.Errorf("检测到 Markdown 包含本地文件/图片资源；doc content-update 为保证数据安全不产生先删后写破坏窗口，暂不支持本地文件混合上传；请改用网络图片 URL，或使用 'feishu-cli doc import' 导入")
+	}
+	return nil
+}
+
+// ============================================================
+// 7 种模式实现（对齐官方 PUT /open-apis/docs_ai/v1/documents/{id} 原子更新能力）
+// ============================================================
+
+// doAppend 追加到文档末尾（原子更新）
+func doAppend(documentID, markdown string, output, userAccessToken string, revisionID int) error {
+	body := map[string]any{
+		"format":  "markdown",
+		"command": "append",
+		"content": markdown,
+	}
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
+	}
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("追加内容失败: %w", err)
 	}
-	if output != "json" {
-		fmt.Println("文档内容追加成功！")
+	if output == "json" {
+		return printJSON(data)
 	}
+	fmt.Println("文档内容追加成功！")
 	return nil
 }
 
-// validateAndPreconvertMarkdown 先行解析校验 Markdown、转换并预处理本地图片，确保在破坏性删除前拦截所有内容与上传错误
-func validateAndPreconvertMarkdown(documentID, markdown string, uploadImages bool, colWidthMode string, colWidthValues []int) error {
-	opts := converter.ConvertOptions{
-		DocumentID:   documentID,
-		UploadImages: uploadImages,
+// doOverwrite 完全覆盖文档内容（官方单操作原子 overwrite，彻底消除先删后写破坏窗口）
+func doOverwrite(documentID, markdown string, output, userAccessToken string, revisionID int) error {
+	body := map[string]any{
+		"format":  "markdown",
+		"command": "overwrite",
+		"content": markdown,
 	}
-	applyColumnWidthOptions(&opts, colWidthMode, colWidthValues)
-	conv := converter.NewMarkdownToBlock([]byte(markdown), opts, "")
-	result, err := conv.ConvertWithTableData()
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
+	}
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
-		return fmt.Errorf("转换 Markdown 失败: %w", err)
+		return fmt.Errorf("覆盖内容失败: %w", err)
 	}
-	if len(result.BlockNodes) == 0 {
-		return fmt.Errorf("没有内容可添加")
+	if output == "json" {
+		return printJSON(data)
 	}
+	fmt.Println("文档内容覆盖成功！")
 	return nil
 }
 
-// resolveBaseRevision 解析用于并发冲突保护的文档基准版本号
-func resolveBaseRevision(documentID string, userAccessToken string, revisionID int) (int, error) {
-	if revisionID >= 0 {
-		return revisionID, nil
-	}
-	currentRev, err := client.GetDocumentRevision(documentID, userAccessToken)
-	if err != nil {
-		return -1, fmt.Errorf("获取文档版本失败: %w", err)
-	}
-	return currentRev, nil
-}
-
-// doOverwrite 完全覆盖文档内容
-func doOverwrite(documentID, markdown string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
-	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
-	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
-		return err
-	}
-
-	// 2. 获取文档基准版本（并发冲突保护）与全部直接子块（全分页拉取）
-	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
-	if err != nil {
-		return err
-	}
-
-	children, err := client.GetAllBlockChildren(documentID, documentID, userAccessToken)
-	if err != nil {
-		return fmt.Errorf("获取文档子块失败: %w", err)
-	}
-
-	// 3. 删除所有现有子块（带版本号冲突保护）
-	if len(children) > 0 {
-		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, 0, len(children), baseRevision, userAccessToken); err != nil {
-			return fmt.Errorf("删除现有内容失败: %w", err)
-		}
-	}
-
-	// 4. 创建新内容
-	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, -1, output, userAccessToken, colWidthMode, colWidthValues)
-	if err != nil {
-		return fmt.Errorf("写入新内容失败: %w", err)
-	}
-	if output != "json" {
-		fmt.Println("文档内容覆盖成功！")
-	}
-	return nil
-}
-
-// doReplaceRange 按定位替换一段内容
-func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
-	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
-	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
-		return err
-	}
-
-	// 2. 获取文档基准版本与定位范围
-	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
-	if err != nil {
-		return err
-	}
-
+// doReplaceRange 按定位替换一段内容（映射为单操作原子 block_replace + start_block_id/end_block_id）
+func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -506,38 +503,37 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, up
 		return err
 	}
 
-	// 取第一个匹配范围
 	r := ranges[0]
+	if r.startIndex >= len(children) || r.endIndex <= r.startIndex {
+		return fmt.Errorf("定位范围无效: [%d, %d)", r.startIndex, r.endIndex)
+	}
+	startBlockID := client.StringVal(children[r.startIndex].BlockId)
+	endBlockID := client.StringVal(children[r.endIndex-1].BlockId)
 
-	// 3. 删除匹配范围（带版本号冲突保护）
-	if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
-		return fmt.Errorf("删除目标内容失败: %w", err)
+	body := map[string]any{
+		"format":         "markdown",
+		"command":        "block_replace",
+		"content":        markdown,
+		"start_block_id": startBlockID,
+		"end_block_id":   endBlockID,
+	}
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
 	}
 
-	// 4. 在删除位置插入新内容
-	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, r.startIndex, output, userAccessToken, colWidthMode, colWidthValues)
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
-		return fmt.Errorf("插入替换内容失败: %w", err)
+		return fmt.Errorf("替换内容失败: %w", err)
 	}
-	if output != "json" {
-		fmt.Printf("已替换索引 %d 到 %d 的内容\n", r.startIndex, r.endIndex)
+	if output == "json" {
+		return printJSON(data)
 	}
+	fmt.Printf("已替换索引 %d 到 %d 的内容（块 %s 到 %s）\n", r.startIndex, r.endIndex, startBlockID, endBlockID)
 	return nil
 }
 
-// doReplaceAll 全文查找替换所有匹配
-func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int, revisionID int) error {
-	// 1. 失败前不删除：先行解析转换并预处理图片，任何错误立即终止，绝不删除原内容
-	if err := validateAndPreconvertMarkdown(documentID, markdown, uploadImages, colWidthMode, colWidthValues); err != nil {
-		return err
-	}
-
-	// 2. 获取文档基准版本与定位范围
-	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
-	if err != nil {
-		return err
-	}
-
+// doReplaceAll 全文查找替换所有匹配（倒序逐个原子 block_replace，部分失败时非零退出并报告已完成项）
+func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -548,23 +544,43 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uplo
 		return err
 	}
 
-	// 从后往前替换，避免索引偏移
 	replaced := 0
-	for i := len(ranges) - 1; i >= 0; i-- {
-		r := ranges[i]
+	totalRanges := len(ranges)
+	currentRevision := revisionID
 
-		// 删除匹配范围（带版本号冲突保护）
-		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
-			return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
+	for i := totalRanges - 1; i >= 0; i-- {
+		r := ranges[i]
+		if r.startIndex >= len(children) || r.endIndex <= r.startIndex {
+			continue
+		}
+		startBlockID := client.StringVal(children[r.startIndex].BlockId)
+		endBlockID := client.StringVal(children[r.endIndex-1].BlockId)
+
+		body := map[string]any{
+			"format":         "markdown",
+			"command":        "block_replace",
+			"content":        markdown,
+			"start_block_id": startBlockID,
+			"end_block_id":   endBlockID,
+		}
+		if currentRevision > 0 {
+			body["revision_id"] = currentRevision
 		}
 
-		// 在删除位置插入新内容
-		err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, r.startIndex, "", userAccessToken, colWidthMode, colWidthValues)
+		data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 		if err != nil {
-			return fmt.Errorf("插入第 %d 个替换内容失败: %w", i+1, err)
+			return fmt.Errorf("全文替换未完全完成：共 %d 处匹配，已成功完成 %d 处，在第 %d 处替换失败（索引 %d 到 %d，块 %s 到 %s）: %w",
+				totalRanges, replaced, totalRanges-i, r.startIndex, r.endIndex, startBlockID, endBlockID, err)
 		}
 		replaced++
-		baseRevision = -1 // 首次操作已完成版本校验，后续操作忽略递增的 revision
+
+		if docObj, ok := data["document"].(map[string]any); ok {
+			if rev, ok := docObj["revision_id"].(float64); ok && int(rev) > 0 {
+				currentRevision = int(rev)
+			}
+		} else if rev, ok := data["revision_id"].(float64); ok && int(rev) > 0 {
+			currentRevision = int(rev)
+		}
 	}
 
 	if output == "json" {
@@ -577,8 +593,8 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, uplo
 	return nil
 }
 
-// doInsertBefore 在定位内容前插入
-func doInsertBefore(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
+// doInsertBefore 在定位内容前插入（原子 block_insert_after）
+func doInsertBefore(documentID, markdown, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -589,77 +605,100 @@ func doInsertBefore(documentID, markdown, selByTitle, selWithEllipsis string, up
 		return err
 	}
 
-	// 取第一个匹配范围，在其前面插入
 	r := ranges[0]
-	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, r.startIndex, output, userAccessToken, colWidthMode, colWidthValues)
+	blockID := "0"
+	if r.startIndex > 0 {
+		blockID = client.StringVal(children[r.startIndex-1].BlockId)
+	}
+	body := map[string]any{
+		"format":   "markdown",
+		"command":  "block_insert_after",
+		"block_id": blockID,
+		"content":  markdown,
+	}
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
+	}
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("插入内容失败: %w", err)
 	}
-	if output != "json" {
-		fmt.Printf("已在索引 %d 前插入内容\n", r.startIndex)
-	}
-	return nil
-}
-
-// doInsertAfter 在定位内容后插入
-func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken, colWidthMode string, colWidthValues []int) error {
-	children, err := getPageChildren(documentID, userAccessToken)
-	if err != nil {
-		return fmt.Errorf("获取文档内容失败: %w", err)
-	}
-
-	ranges, err := findSelection(children, selByTitle, selWithEllipsis)
-	if err != nil {
-		return err
-	}
-
-	// 取第一个匹配范围，在其后面插入
-	r := ranges[0]
-	err = addContentMarkdownWithOptions(documentID, documentID, markdown, "", uploadImages, r.endIndex, output, userAccessToken, colWidthMode, colWidthValues)
-	if err != nil {
-		return fmt.Errorf("插入内容失败: %w", err)
-	}
-	if output != "json" {
-		fmt.Printf("已在索引 %d 后插入内容\n", r.endIndex-1)
-	}
-	return nil
-}
-
-// doDeleteRange 删除定位的内容
-func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
-	baseRevision, err := resolveBaseRevision(documentID, userAccessToken, revisionID)
-	if err != nil {
-		return err
-	}
-
-	children, err := getPageChildren(documentID, userAccessToken)
-	if err != nil {
-		return fmt.Errorf("获取文档内容失败: %w", err)
-	}
-
-	ranges, err := findSelection(children, selByTitle, selWithEllipsis)
-	if err != nil {
-		return err
-	}
-
-	// 从后往前删除，避免索引偏移
-	deleted := 0
-	for i := len(ranges) - 1; i >= 0; i-- {
-		r := ranges[i]
-		if _, err := client.DeleteBlocksWithRevision(documentID, documentID, r.startIndex, r.endIndex, baseRevision, userAccessToken); err != nil {
-			return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
-		}
-		deleted += r.endIndex - r.startIndex
-		baseRevision = -1
-	}
-
 	if output == "json" {
-		return printJSON(map[string]any{
-			"document_id":    documentID,
-			"deleted_blocks": deleted,
-			"deleted_ranges": len(ranges),
-		})
+		return printJSON(data)
 	}
-	fmt.Printf("已删除 %d 个块（%d 个匹配范围）\n", deleted, len(ranges))
+	fmt.Printf("已在索引 %d 前插入内容\n", r.startIndex)
+	return nil
+}
+
+// doInsertAfter 在定位内容后插入（原子 block_insert_after）
+func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
+	children, err := getPageChildren(documentID, userAccessToken)
+	if err != nil {
+		return fmt.Errorf("获取文档内容失败: %w", err)
+	}
+
+	ranges, err := findSelection(children, selByTitle, selWithEllipsis)
+	if err != nil {
+		return err
+	}
+
+	r := ranges[0]
+	targetBlockID := client.StringVal(children[r.endIndex-1].BlockId)
+	body := map[string]any{
+		"format":   "markdown",
+		"command":  "block_insert_after",
+		"block_id": targetBlockID,
+		"content":  markdown,
+	}
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
+	}
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
+	if err != nil {
+		return fmt.Errorf("插入内容失败: %w", err)
+	}
+	if output == "json" {
+		return printJSON(data)
+	}
+	fmt.Printf("已在索引 %d 后插入内容（块 %s）\n", r.endIndex-1, targetBlockID)
+	return nil
+}
+
+// doDeleteRange 删除定位的内容（官方单操作原子 block_delete + start_block_id/end_block_id）
+func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userAccessToken string, revisionID int) error {
+	children, err := getPageChildren(documentID, userAccessToken)
+	if err != nil {
+		return fmt.Errorf("获取文档内容失败: %w", err)
+	}
+
+	ranges, err := findSelection(children, selByTitle, selWithEllipsis)
+	if err != nil {
+		return err
+	}
+
+	r := ranges[0]
+	if r.startIndex >= len(children) || r.endIndex <= r.startIndex {
+		return fmt.Errorf("定位范围无效: [%d, %d)", r.startIndex, r.endIndex)
+	}
+	startBlockID := client.StringVal(children[r.startIndex].BlockId)
+	endBlockID := client.StringVal(children[r.endIndex-1].BlockId)
+
+	body := map[string]any{
+		"command":        "block_delete",
+		"start_block_id": startBlockID,
+		"end_block_id":   endBlockID,
+	}
+	if revisionID > 0 {
+		body["revision_id"] = revisionID
+	}
+
+	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
+	if err != nil {
+		return fmt.Errorf("删除内容失败: %w", err)
+	}
+	if output == "json" {
+		return printJSON(data)
+	}
+	fmt.Printf("已删除索引 %d 到 %d 的块（块 %s 到 %s）\n", r.startIndex, r.endIndex, startBlockID, endBlockID)
 	return nil
 }

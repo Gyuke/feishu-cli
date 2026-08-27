@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/riba2534/feishu-cli/internal/client"
@@ -11,7 +12,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
+var validWikiNodeDeleteObjTypes = map[string]bool{
+	"wiki":     true,
+	"doc":      true,
+	"docx":     true,
+	"sheet":    true,
+	"bitable":  true,
+	"mindnote": true,
+	"slides":   true,
+	"file":     true,
+}
+
+var (
 	wikiDeleteNodePollAttempts = 30
 	wikiDeleteNodePollInterval = 2 * time.Second
 )
@@ -56,6 +68,11 @@ var deleteWikiNodeCmd = &cobra.Command{
 		includeChildren, _ := cmd.Flags().GetBool("include-children")
 		force, _ := cmd.Flags().GetBool("force")
 		output, _ := cmd.Flags().GetString("output")
+
+		objType = strings.ToLower(strings.TrimSpace(objType))
+		if !validWikiNodeDeleteObjTypes[objType] {
+			return fmt.Errorf("不支持的 --obj-type %q；可选值: wiki, doc, docx, sheet, bitable, mindnote, slides, file", objType)
+		}
 
 		token := resolveOptionalUserToken(cmd)
 
@@ -114,47 +131,55 @@ var deleteWikiNodeCmd = &cobra.Command{
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		status, ready, err := pollDeleteWikiNodeTask(ctx, taskID, token)
+		status, err := pollDeleteWikiNodeTask(ctx, taskID, token)
 		if err != nil {
 			return err
 		}
-		result["ready"] = ready
-		result["failed"] = status.Failed()
+		result["ready"] = true
 		result["status"] = status.Status
 		result["status_msg"] = status.StatusMsg
-		if !ready {
-			result["timed_out"] = true
-		}
 		return printDeleteWikiNodeResult(result, output)
 	},
 }
 
-func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken string) (*client.WikiDeleteNodeTaskStatus, bool, error) {
+func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken string) (*client.WikiDeleteNodeTaskStatus, error) {
+	resumeCmd := fmt.Sprintf("feishu-cli drive task-result --task-id %s", taskID)
 	var last client.WikiDeleteNodeTaskStatus
+	var lastErr error
+	hadSuccessfulPoll := false
+
 	for attempt := 1; attempt <= wikiDeleteNodePollAttempts; attempt++ {
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
-				return &last, false, ctx.Err()
+				return &last, ctx.Err()
 			case <-time.After(wikiDeleteNodePollInterval):
 			}
 		}
 		st, err := client.GetWikiDeleteNodeTask(taskID, userToken)
 		if err != nil {
+			lastErr = err
 			fmt.Fprintf(os.Stderr, "  [%d/%d] 查询失败: %v\n", attempt, wikiDeleteNodePollAttempts, err)
 			continue
 		}
 		last = *st
+		hadSuccessfulPoll = true
+
 		if st.Ready() {
 			fmt.Fprintf(os.Stderr, "任务完成 ✅\n")
-			return st, true, nil
+			return st, nil
 		}
 		if st.Failed() {
-			return st, false, fmt.Errorf("delete_node 任务失败: status=%s, msg=%s", st.Status, st.StatusMsg)
+			return st, fmt.Errorf("delete_node 任务失败 (task_id=%s): status=%s, msg=%s", taskID, st.Status, st.StatusMsg)
 		}
 		fmt.Fprintf(os.Stderr, "  [%d/%d] status=%s\n", attempt, wikiDeleteNodePollAttempts, st.Status)
 	}
-	return &last, false, nil
+
+	if !hadSuccessfulPoll && lastErr != nil {
+		return &last, fmt.Errorf("知识库节点删除任务已提交，但状态查询全部失败 (task_id=%s): %w\n后续可通过以下命令查询任务状态: %s", taskID, lastErr, resumeCmd)
+	}
+
+	return &last, fmt.Errorf("知识库节点删除任务仍在执行中或轮询超时 (task_id=%s, 当前状态=%s)\n请勿重复提交，可通过以下命令继续查询: %s", taskID, last.Status, resumeCmd)
 }
 
 func printDeleteWikiNodeResult(result map[string]any, output string) error {
@@ -167,9 +192,6 @@ func printDeleteWikiNodeResult(result map[string]any, output string) error {
 	if tid, ok := result["task_id"].(string); ok && tid != "" {
 		fmt.Printf("  任务 ID:    %s\n", tid)
 		fmt.Printf("  任务状态:   %v\n", result["status"])
-	}
-	if v, ok := result["timed_out"].(bool); ok && v {
-		fmt.Printf("⚠ 轮询超时，任务仍在后端执行中\n")
 	}
 	return nil
 }

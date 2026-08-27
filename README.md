@@ -362,6 +362,8 @@ feishu-cli wiki nodes <space_id>                    # 列出节点
 feishu-cli wiki export <node_token> -o doc.md       # 导出为 Markdown
 feishu-cli wiki export-tree <node_token> -o ./backup  # 递归导出知识库子树
 feishu-cli wiki create --space-id <id> --title "新节点"
+feishu-cli wiki create --space-id <id> --title "快捷方式" --node-type shortcut --origin-node-token <token>
+feishu-cli wiki delete <node_token>                 # 删除节点（官方 API，支持异步任务自动轮询）
 feishu-cli wiki move-docs <obj_token> --space-id <id>  # 移动云空间文档至知识空间
 feishu-cli wiki move-to-drive --node-token wikcnXXX --folder-token fldcnYYY  # 反向：移出知识库到云盘
 feishu-cli wiki space-get <space_id>                # 获取知识空间详情
@@ -934,10 +936,10 @@ feishu-cli msg get om_xxx --card-content-type raw              # cardDSL（平�
 feishu-cli msg mget --message-ids om_xxx,om_yyy --card-content-type user
 feishu-cli msg list --container-id oc_xxx --card-content-type user
 
-# 文档增强
+# 文档增强（采用 docs_ai 单操作原子更新协议，彻底避免先删后写破坏窗口；支持 --revision-id 并发保护）
 feishu-cli doc content-update <doc_id> --mode append --markdown "## 新内容"
-feishu-cli doc content-update <doc_id> --mode overwrite --markdown "# 全新文档"
-feishu-cli doc content-update <doc_id> --mode replace_range --selection-by-title "## 旧章节" --markdown "## 新章节"
+feishu-cli doc content-update <doc_id> --mode overwrite --markdown "# 全新文档" [--revision-id 42]
+feishu-cli doc content-update <doc_id> --mode replace_range --selection-by-title "章节标题" --markdown "## 新章节"
 feishu-cli doc media-insert <doc_id> --file photo.png --type image --align center
 feishu-cli doc media-download <file_token> -o image.png
 feishu-cli doc media-download <file_token> --doc-token DOC_TOKEN --doc-type docx -o image.png
