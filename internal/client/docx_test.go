@@ -279,3 +279,34 @@ func TestGetAllBlockChildrenFailClosedOnNilData(t *testing.T) {
 		t.Fatalf("错误信息应说明返回数据为空，得到: %v", err)
 	}
 }
+
+// TestGetAllBlockChildrenFailClosedOnMaxPages 验证达到最大分页上限时 fail closed 绝不返回截断数据
+func TestGetAllBlockChildrenFailClosedOnMaxPages(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		callCount++
+		// 每次都返回 has_more=true 并递增 page_token
+		next := fmt.Sprintf("page-%d", callCount+1)
+		_, _ = fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"items":[{"block_id":"b1"}],"has_more":true,"page_token":%q}}`, next)
+	}))
+	defer server.Close()
+	setupTestConfig(t, server.URL)
+
+	origLimit := maxPagesLimit
+	maxPagesLimit = 3
+	defer func() {
+		maxPagesLimit = origLimit
+	}()
+
+	_, err := GetAllBlockChildren("doc-1", "b-root", "u-token")
+	if err == nil {
+		t.Fatal("达到最大分页上限时必须报错 fail closed，但返回了 nil")
+	}
+	if !strings.Contains(err.Error(), "超过最大分页限制") {
+		t.Fatalf("错误信息应说明超过最大分页限制，得到: %v", err)
+	}
+	if callCount != 3 {
+		t.Fatalf("应在达到 maxPagesLimit=3 时中止，实际调用了 %d 次", callCount)
+	}
+}

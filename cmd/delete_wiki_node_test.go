@@ -374,7 +374,7 @@ func TestDeleteWikiNodeURLValidation(t *testing.T) {
 
 	// 3. 拒绝不支持的路径前缀
 	_, _, err3 := parseWikiDeleteInput("https://sample.feishu.cn/evil_path/wikcnTarget", "wiki")
-	if err3 == nil || !strings.Contains(err3.Error(), "无法从 URL 路径") {
+	if err3 == nil || !strings.Contains(err3.Error(), "不支持的 URL 路径") {
 		t.Fatalf("不支持的路径前缀应被拒绝，实际得到: %v", err3)
 	}
 
@@ -401,7 +401,7 @@ func TestDeleteWikiNodeSpaceIDValidation(t *testing.T) {
 	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnDummy"})
-	if err == nil || !strings.Contains(err.Error(), "非法的 --space-id") {
+	if err == nil || !strings.Contains(err.Error(), "--space-id") {
 		t.Fatalf("非法 space-id 应被校验拒绝，实际得到: %v", err)
 	}
 }
@@ -416,12 +416,12 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
 		case r.Method == "DELETE":
 			gotDeletePath = r.URL.EscapedPath()
-			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task id with space"}}`)
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task-escaped-123"}}`)
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/open-apis/wiki/v2/tasks/"):
 			gotPollPath = r.URL.EscapedPath()
 			_, _ = fmt.Fprint(w, `{
 				"code":0,"msg":"ok",
-				"data":{"task":{"task_id":"task id with space","simple_task_result":{"status":"success"}}}
+				"data":{"task":{"task_id":"task-escaped-123","simple_task_result":{"status":"success"}}}
 			}`)
 		default:
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
@@ -442,7 +442,7 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
 	}()
 
-	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp 123")
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-123")
 	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
 
@@ -451,11 +451,11 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 		t.Fatalf("执行失败: %v", err)
 	}
 
-	wantDeletePath := "/open-apis/wiki/v2/spaces/sp%20123/nodes/wikcnEscaped"
+	wantDeletePath := "/open-apis/wiki/v2/spaces/sp-123/nodes/wikcnEscaped"
 	if gotDeletePath != wantDeletePath {
 		t.Fatalf("DELETE 路径转义异常: got %q, want %q", gotDeletePath, wantDeletePath)
 	}
-	wantPollPath := "/open-apis/wiki/v2/tasks/task%20id%20with%20space"
+	wantPollPath := "/open-apis/wiki/v2/tasks/task-escaped-123"
 	if gotPollPath != wantPollPath {
 		t.Fatalf("Task 轮询路径转义异常: got %q, want %q", gotPollPath, wantPollPath)
 	}

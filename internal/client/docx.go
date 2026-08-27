@@ -497,6 +497,9 @@ func GetAllBlockDescendants(documentID string, blockID string, userAccessToken .
 	return getAllBlockChildren(documentID, blockID, true, -1, userAccessToken...)
 }
 
+// maxPagesLimit 控制 getAllBlockChildren 最多翻页次数，防止超大异常文档导致无限循环
+var maxPagesLimit = 1000
+
 func getAllBlockChildren(documentID string, blockID string, withDescendants bool, revisionID int, userAccessToken ...string) ([]*larkdocx.Block, error) {
 	client, err := GetClient()
 	if err != nil {
@@ -506,10 +509,9 @@ func getAllBlockChildren(documentID string, blockID string, withDescendants bool
 	var allChildren []*larkdocx.Block
 	pageToken := ""
 	pageSize := 500
-	const maxPages = 1000
 	seenPageTokens := make(map[string]bool)
 
-	for page := 0; page < maxPages; page++ {
+	for page := 0; page < maxPagesLimit; page++ {
 		reqBuilder := larkdocx.NewGetDocumentBlockChildrenReqBuilder().
 			DocumentId(documentID).
 			BlockId(blockID).
@@ -553,7 +555,7 @@ func getAllBlockChildren(documentID string, blockID string, withDescendants bool
 		pageToken = next
 	}
 
-	return nil, fmt.Errorf("获取子块失败: 超过最大分页限制 %d，文档可能有异常", maxPages)
+	return nil, fmt.Errorf("获取子块失败: 超过最大分页限制 %d，文档可能有异常", maxPagesLimit)
 }
 
 // AddBoardResult contains the result of adding a board to document

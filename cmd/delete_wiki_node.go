@@ -39,29 +39,7 @@ var wikiURLMarkers = []struct {
 	{"/doc/", "doc"},
 }
 
-// isValidFeishuLarkHost 检查是否属于飞书/Lark 文档域名或本地测试地址
-func isValidFeishuLarkHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	if host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "127.0.0.") {
-		return true
-	}
-	validSuffixes := []string{
-		".feishu.cn", "feishu.cn",
-		".larksuite.com", "larksuite.com",
-		".larkoffice.com", "larkoffice.com",
-	}
-	for _, suffix := range validSuffixes {
-		if host == suffix || strings.HasSuffix(host, "."+suffix) || (strings.HasPrefix(suffix, ".") && strings.HasSuffix(host, suffix)) {
-			return true
-		}
-	}
-	return false
-}
-
-// parseWikiDeleteInput 对齐官方输入契约：URL 路径推断 obj_type，裸 token 必须显式传 --obj-type
+// parseWikiDeleteInput 对齐官方输入契约：严格使用 u.Hostname()，HTTPS 域名白名单，URL 路径推断 obj_type，裸 token 必须显式传 --obj-type
 func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, err error) {
 	rawInput = strings.TrimSpace(rawInput)
 	if rawInput == "" {
@@ -75,48 +53,73 @@ func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, 
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return "", "", fmt.Errorf("URL 格式无效: %q", rawInput)
 		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return "", "", fmt.Errorf("不支持的 URL 协议 %q，仅支持 http/https", u.Scheme)
-		}
 		if u.User != nil {
 			return "", "", fmt.Errorf("URL 包含非法的用户信息 (userinfo): %q", rawInput)
 		}
-		if !isValidFeishuLarkHost(u.Host) {
-			return "", "", fmt.Errorf("不支持的域名 %q，仅接受飞书/Lark 文档域名 (*.feishu.cn, *.larksuite.com, *.larkoffice.com)", u.Host)
+
+		hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
+		scheme := strings.ToLower(u.Scheme)
+
+		// 协议与域名规则：HTTP 仅允许 loopback 测试，官方域名必须是 HTTPS
+		if scheme == "http" {
+			if hostname != "localhost" && hostname != "127.0.0.1" && !strings.HasPrefix(hostname, "127.0.0.") && hostname != "::1" {
+				return "", "", fmt.Errorf("非本地测试地址必须使用 HTTPS 协议: %q", rawInput)
+			}
+		} else if scheme == "https" {
+			// 校验官方域名白名单（精准校验 hostname，严防 evilfeishu.cn 等前缀/伪造域名）
+			valid := hostname == "feishu.cn" || strings.HasSuffix(hostname, ".feishu.cn") ||
+				hostname == "larksuite.com" || strings.HasSuffix(hostname, ".larksuite.com") ||
+				hostname == "larkoffice.com" || strings.HasSuffix(hostname, ".larkoffice.com") ||
+				hostname == "localhost" || hostname == "127.0.0.1"
+			if !valid {
+				return "", "", fmt.Errorf("不支持的域名 %q，仅接受飞书/Lark 官方文档域名 (*.feishu.cn, *.larksuite.com, *.larkoffice.com)", hostname)
+			}
+		} else {
+			return "", "", fmt.Errorf("不支持的 URL 协议 %q，仅支持 https (本地测试支持 http)", scheme)
 		}
 
+		// 检查原始 Path 中是否包含 encoded slash (%2f/%2F) 或 percent / control 字符
+		if strings.Contains(u.RawPath, "%2f") || strings.Contains(u.RawPath, "%2F") {
+			return "", "", fmt.Errorf("URL 路径包含非法的转义斜杠 %%2f")
+		}
+		if strings.Contains(u.Path, "%") || unsafeResourceChars.MatchString(u.Path) {
+			return "", "", fmt.Errorf("URL 路径包含非法字符")
+		}
+
+		// 严格单 segment marker/token：按 / 拆分，去除两端斜杠后必须恰好为 2 个 segment [marker, token]
+		trimmedPath := strings.Trim(u.Path, "/")
+		segments := strings.Split(trimmedPath, "/")
+		if len(segments) != 2 || segments[0] == "" || segments[1] == "" {
+			return "", "", fmt.Errorf("URL 路径格式无效: %q，必须为标准的 '/<type>/<token>' 形式（且不能包含多余路径段）", u.Path)
+		}
+
+		marker := "/" + segments[0] + "/"
 		inferredType := ""
-		extractedToken := ""
 		for _, m := range wikiURLMarkers {
-			if strings.HasPrefix(u.Path, m.Marker) {
-				rest := strings.TrimPrefix(u.Path, m.Marker)
-				if idx := strings.IndexByte(rest, '/'); idx >= 0 {
-					rest = rest[:idx]
-				}
-				if rest != "" {
-					unescaped, err := url.PathUnescape(rest)
-					if err != nil {
-						return "", "", fmt.Errorf("URL token 解码失败: %w", err)
-					}
-					extractedToken = unescaped
-					inferredType = m.ObjType
-					break
-				}
+			if m.Marker == marker {
+				inferredType = m.ObjType
+				break
 			}
 		}
-		if extractedToken == "" {
-			return "", "", fmt.Errorf("无法从 URL 路径 %q 推断有效文档 token，期望以 /wiki/, /docx/, /sheets/, /base/, /mindnote/, /slides/, /file/, /doc/ 开头", u.Path)
+		if inferredType == "" {
+			return "", "", fmt.Errorf("不支持的 URL 路径前缀 %q，期望以 /wiki/, /docx/, /sheets/, /base/, /mindnote/, /slides/, /file/, /doc/ 开头", marker)
 		}
+
+		token = segments[1]
+		// 对 URL 提取的 token 执行 ResourceName 等价校验
+		if err := validateResourceIdentifier(token, "URL 中的文档 token"); err != nil {
+			return "", "", err
+		}
+
 		if flagObjType != "" && flagObjType != inferredType {
 			return "", "", fmt.Errorf("--obj-type %q 与从 URL 推断的文档类型 %q 冲突；请二选一", flagObjType, inferredType)
 		}
-		token = extractedToken
 		objType = inferredType
 	} else {
-		if strings.ContainsAny(rawInput, "/?#") {
-			return "", "", fmt.Errorf("参数 %q 既非完整 URL 亦非合法 token，不支持带部分路径的输入", rawInput)
-		}
 		token = rawInput
+		if err := validateResourceIdentifier(token, "--node-token"); err != nil {
+			return "", "", err
+		}
 		if flagObjType == "" {
 			return "", "", fmt.Errorf("当输入为裸 token 时，--obj-type 为必填项（无法从 URL 自动推断文档类型）；可选值: wiki, doc, docx, sheet, bitable, mindnote, slides, file")
 		}
@@ -178,8 +181,8 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 		spaceID, _ := cmd.Flags().GetString("space-id")
 		spaceID = strings.TrimSpace(spaceID)
 		if spaceID != "" {
-			if strings.ContainsAny(spaceID, "/?#\n\r") {
-				return fmt.Errorf("非法的 --space-id: %q", spaceID)
+			if err := validateResourceIdentifier(spaceID, "--space-id"); err != nil {
+				return err
 			}
 		}
 		includeChildren, _ := cmd.Flags().GetBool("include-children")
@@ -242,6 +245,10 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 			result["ready"] = true
 			result["status"] = "success"
 			return printDeleteWikiNodeResult(result, output)
+		}
+
+		if err := validateResourceIdentifier(taskID, "task_id"); err != nil {
+			return fmt.Errorf("服务端返回非法的 task_id: %w", err)
 		}
 
 		// 异步任务：轮询

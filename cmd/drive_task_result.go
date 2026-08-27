@@ -23,21 +23,16 @@ var driveTaskResultCmd = &cobra.Command{
   --file-token   export 场景必填（原始文档 token）
   --task-id      task_check 与 wiki_delete_node 场景必填（异步任务 ID）
 
-权限:
-  - User Access Token
+权限与身份:
+  - User / Bot 身份（--as bot|user|auto，默认 auto: User 优先，回退 Bot）
 
 示例:
   feishu-cli drive task-result --scenario export --ticket abcxxx --file-token docxxx
   feishu-cli drive task-result --scenario import --ticket abcxxx
   feishu-cli drive task-result --scenario task_check --task-id xxx
-  feishu-cli drive task-result --scenario wiki_delete_node --task-id xxx`,
+  feishu-cli drive task-result --scenario wiki_delete_node --task-id xxx --as bot`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
-			return err
-		}
-
-		token, err := resolveIdentityToken(cmd)
-		if err != nil {
 			return err
 		}
 
@@ -47,7 +42,44 @@ var driveTaskResultCmd = &cobra.Command{
 		taskID, _ := cmd.Flags().GetString("task-id")
 		output, _ := cmd.Flags().GetString("output")
 
+		// 1. 先行完成所有本地参数校验（参数非法时零网络、零 token 刷新）
 		if err := validateEnum(scenario, "--scenario", driveTaskScenarios); err != nil {
+			return err
+		}
+
+		switch scenario {
+		case "import":
+			if ticket == "" {
+				return fmt.Errorf("--ticket 在 import 场景必填")
+			}
+			if err := validateResourceIdentifier(ticket, "--ticket"); err != nil {
+				return err
+			}
+		case "export":
+			if ticket == "" {
+				return fmt.Errorf("--ticket 在 export 场景必填")
+			}
+			if err := validateResourceIdentifier(ticket, "--ticket"); err != nil {
+				return err
+			}
+			if fileToken == "" {
+				return fmt.Errorf("--file-token 在 export 场景必填（原始文档 token）")
+			}
+			if err := validateResourceIdentifier(fileToken, "--file-token"); err != nil {
+				return err
+			}
+		case "task_check", "wiki_delete_node":
+			if taskID == "" {
+				return fmt.Errorf("--task-id 在 %s 场景必填", scenario)
+			}
+			if err := validateResourceIdentifier(taskID, "--task-id"); err != nil {
+				return err
+			}
+		}
+
+		// 2. 本地参数全部合法后，才解析身份与可能触发刷新的 token
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
 			return err
 		}
 
@@ -55,9 +87,6 @@ var driveTaskResultCmd = &cobra.Command{
 
 		switch scenario {
 		case "import":
-			if ticket == "" {
-				return fmt.Errorf("--ticket 在 import 场景必填")
-			}
 			status, err := client.GetDriveImportStatus(ticket, token)
 			if err != nil {
 				return err
@@ -75,12 +104,6 @@ var driveTaskResultCmd = &cobra.Command{
 				"type":          status.Type,
 			}
 		case "export":
-			if ticket == "" {
-				return fmt.Errorf("--ticket 在 export 场景必填")
-			}
-			if fileToken == "" {
-				return fmt.Errorf("--file-token 在 export 场景必填（原始文档 token）")
-			}
 			status, err := client.GetDriveExportStatus(ticket, fileToken, token)
 			if err != nil {
 				return err
@@ -101,9 +124,6 @@ var driveTaskResultCmd = &cobra.Command{
 				"file_extension":   status.FileExtension,
 			}
 		case "task_check":
-			if taskID == "" {
-				return fmt.Errorf("--task-id 在 task_check 场景必填")
-			}
 			status, err := client.GetDriveTaskCheck(taskID, token)
 			if err != nil {
 				return err
@@ -116,9 +136,6 @@ var driveTaskResultCmd = &cobra.Command{
 				"failed":   status.Status == "failed",
 			}
 		case "wiki_delete_node":
-			if taskID == "" {
-				return fmt.Errorf("--task-id 在 wiki_delete_node 场景必填")
-			}
 			status, err := client.GetWikiDeleteNodeTask(taskID, token)
 			if err != nil {
 				return err

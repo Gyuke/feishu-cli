@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/auth"
@@ -617,4 +618,25 @@ func exifOrientationFromAPP1(payload []byte) int {
 		return 0
 	}
 	return 0
+}
+
+var unsafeResourceChars = regexp.MustCompile(`[?#%\x00-\x1f\x7f]`)
+
+// validateResourceIdentifier 严格校验资源标识符（nodeToken, spaceID, taskID, ticket, fileToken 等）：
+// 拒绝空、.. 路径穿越、URL 元字符 (?#%)、百分号编码绕过 (%2e%2e)、ASCII 控制字符 (0x00-0x1f, 0x7f)、空白与斜杠。
+func validateResourceIdentifier(val, name string) error {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return fmt.Errorf("%s 不能为空", name)
+	}
+	if strings.Contains(val, "..") {
+		return fmt.Errorf("%s 不能包含 '..' 路径穿越", name)
+	}
+	if strings.ContainsAny(val, " \t\r\n/") {
+		return fmt.Errorf("%s 不能包含空白字符或路径分隔符 '/'", name)
+	}
+	if unsafeResourceChars.MatchString(val) {
+		return fmt.Errorf("%s 包含非法字符（禁止包含 ? # %% 及控制字符）", name)
+	}
+	return nil
 }

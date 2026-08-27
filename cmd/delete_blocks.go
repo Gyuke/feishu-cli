@@ -38,8 +38,8 @@ var deleteBlocksCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("获取文档版本失败（无法建立安全快照）: %w", err)
 		}
-		if docRev < 0 {
-			return fmt.Errorf("无法取得文档版本号（无法建立一致性安全快照）")
+		if docRev <= 0 {
+			return fmt.Errorf("无法取得有效正整数文档版本号（docRev=%d，无法建立一致性安全快照）", docRev)
 		}
 
 		if deleteAll {

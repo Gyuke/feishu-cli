@@ -194,3 +194,35 @@ func TestDeleteBlocksFailsClosedWhenRevisionUnavailable(t *testing.T) {
 		t.Fatalf("错误信息应说明无法取得版本号，得到: %v", err)
 	}
 }
+
+// TestDeleteBlocksFailsClosedWhenRevisionZero 验证 revision=0 时不被当作安全快照，fail closed
+func TestDeleteBlocksFailsClosedWhenRevisionZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.URL.Path == "/open-apis/docx/v1/documents/doc-zero-rev":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"document_id":"doc-zero-rev","revision_id":0}}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDeleteBlocksTestConfig(t, server.URL)
+
+	_ = deleteBlocksCmd.Flags().Set("all", "true")
+	_ = deleteBlocksCmd.Flags().Set("force", "true")
+	defer func() {
+		_ = deleteBlocksCmd.Flags().Set("all", "false")
+		_ = deleteBlocksCmd.Flags().Set("force", "false")
+	}()
+
+	err := deleteBlocksCmd.RunE(deleteBlocksCmd, []string{"doc-zero-rev", "parent-456"})
+	if err == nil {
+		t.Fatal("revision=0 时必须 fail closed 报错，但返回了 nil")
+	}
+	if !strings.Contains(err.Error(), "无法取得有效正整数文档版本号") {
+		t.Fatalf("错误应说明无法取得有效正整数版本号，得到: %v", err)
+	}
+}
