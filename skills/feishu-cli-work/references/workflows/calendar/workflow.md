@@ -4,8 +4,9 @@
 
 本工作流覆盖基础日历 CRUD、agenda、参与人、忙闲查询，以及智能时段、会议室和 RSVP。
 
-`calendar agenda --end-date` 按当天 `23:59:59` 处理，是包含端。只查“明天”时 start-date 和
-end-date 都传明天日期；传“明天到后天”会同时包含后天。
+`calendar agenda --end-date` 是包含端：结束时刻为**该日次日当地午夜减 1 秒**（不要用 `Add(24h)`，DST 日会错）。
+缺省 `--end-date` 与起始日同一天。只查“明天”时 start-date 和 end-date 都传明天日期；
+起始日晚于结束日会在发网前报错。
 
 `calendar agenda` 走 `GET /open-apis/calendar/v4/calendars/{id}/events/instance_view`：单次窗口上限 40 天，超过会客户端对半切分；命中 193104（单窗口超过 1000 个实例）同样切分后去重。instance_view **没有服务端分页**，`--page-size` / `--page-token` 会被忽略。全天日程的结束日按飞书排他日期转为含当日（例如 API 的 `end.date=2025-03-22` 输出为 `2025-03-21`）。
 

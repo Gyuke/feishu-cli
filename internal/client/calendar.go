@@ -638,16 +638,6 @@ func buildSearchEventFilter(startTime, endTime string, attendeeIDs []string) *se
 	}
 }
 
-func clampSearchEventPageSize(pageSize int) int {
-	if pageSize <= 0 {
-		return searchEventDefaultPageSize
-	}
-	if pageSize > searchEventMaxPageSize {
-		return searchEventMaxPageSize
-	}
-	return pageSize
-}
-
 func searchEventTimeText(info *struct {
 	Date     string `json:"date"`
 	DateTime string `json:"date_time"`
@@ -676,12 +666,17 @@ func SearchEvents(calendarID, query string, startTime, endTime string, pageToken
 
 // SearchEventsWithParams 按 current search_event 契约搜索日程。
 func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) ([]*CalendarEvent, string, error) {
+	if strings.TrimSpace(params.CalendarID) == "" {
+		params.CalendarID = "primary"
+	}
+	pageSize, err := ResolvePageSize(params.PageSize, searchEventDefaultPageSize, 1, searchEventMaxPageSize)
+	if err != nil {
+		return nil, "", fmt.Errorf("搜索日程失败: %w", err)
+	}
+
 	cli, err := GetClient()
 	if err != nil {
 		return nil, "", err
-	}
-	if strings.TrimSpace(params.CalendarID) == "" {
-		return nil, "", fmt.Errorf("搜索日程失败: 日历 ID 不能为空")
 	}
 
 	body := searchEventRequestBody{
@@ -690,7 +685,7 @@ func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (
 	}
 
 	q := url.Values{}
-	q.Set("page_size", strconv.Itoa(clampSearchEventPageSize(params.PageSize)))
+	q.Set("page_size", strconv.Itoa(pageSize))
 	if params.PageToken != "" {
 		q.Set("page_token", params.PageToken)
 	}

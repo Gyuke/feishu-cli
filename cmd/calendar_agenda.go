@@ -19,7 +19,7 @@ var calendarAgendaCmd = &cobra.Command{
 
 可选参数:
   --start-date    起始日期，格式 YYYY-MM-DD（默认今天）
-  --end-date      结束日期，格式 YYYY-MM-DD（默认起始日期当天，包含端）
+  --end-date      结束日期，格式 YYYY-MM-DD（默认与起始日同一天，包含端）
   --page-size     已忽略（instance_view 无服务端分页）
   --page-token    已忽略（instance_view 无服务端分页）
   --output, -o    输出格式（json）
@@ -42,8 +42,6 @@ var calendarAgendaCmd = &cobra.Command{
 			return err
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
-
 		// 解析 calendar_id，默认 "primary"
 		calendarID := "primary"
 		if len(args) > 0 {
@@ -56,34 +54,12 @@ var calendarAgendaCmd = &cobra.Command{
 		pageToken, _ := cmd.Flags().GetString("page-token")
 		output, _ := cmd.Flags().GetString("output")
 
-		// 解析时间范围
-		now := time.Now()
-		loc := now.Location()
-
-		var startTime, endTime time.Time
-
-		if startDateStr != "" {
-			t, err := time.ParseInLocation("2006-01-02", startDateStr, loc)
-			if err != nil {
-				return fmt.Errorf("解析起始日期失败（格式应为 YYYY-MM-DD）: %w", err)
-			}
-			startTime = t
-		} else {
-			// 默认今天 00:00
-			startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		startTime, endTime, err := client.ParseAgendaDateRange(startDateStr, endDateStr, time.Now())
+		if err != nil {
+			return err
 		}
 
-		if endDateStr != "" {
-			t, err := time.ParseInLocation("2006-01-02", endDateStr, loc)
-			if err != nil {
-				return fmt.Errorf("解析结束日期失败（格式应为 YYYY-MM-DD）: %w", err)
-			}
-			// 结束日期设为当天 23:59:59，使查询包含该天
-			endTime = t.Add(24*time.Hour - time.Second)
-		} else {
-			// 默认为起始日期的下一天
-			endTime = startTime.Add(24*time.Hour - time.Second)
-		}
+		token := resolveOptionalUserTokenWithFallback(cmd)
 
 		events, nextToken, hasMore, err := client.ListCalendarAgenda(
 			calendarID,
@@ -159,7 +135,7 @@ var calendarAgendaCmd = &cobra.Command{
 func init() {
 	calendarCmd.AddCommand(calendarAgendaCmd)
 	calendarAgendaCmd.Flags().String("start-date", "", "起始日期，格式 YYYY-MM-DD（默认今天）")
-	calendarAgendaCmd.Flags().String("end-date", "", "结束日期，格式 YYYY-MM-DD（默认起始日期的下一天）")
+	calendarAgendaCmd.Flags().String("end-date", "", "结束日期，格式 YYYY-MM-DD（默认与起始日同一天，包含端）")
 	calendarAgendaCmd.Flags().Int("page-size", 0, "已忽略：instance_view 无服务端分页")
 	calendarAgendaCmd.Flags().String("page-token", "", "已忽略：instance_view 无服务端分页")
 	calendarAgendaCmd.Flags().StringP("output", "o", "", "输出格式（json）")

@@ -1,6 +1,6 @@
 # 搜索命令详细参考
 
-**重要**：搜索 API 需要 **User Access Token**，不能使用 App Access Token。
+**重要**：`search docs` / `search apps` 需要 **User Access Token**。`search messages` 走 current IM 端点，支持 `--as bot|user|auto`（默认 auto）。
 
 ## User Access Token 获取方式
 

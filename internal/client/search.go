@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
@@ -16,18 +15,20 @@ import (
 
 // SearchMessagesOptions 搜索消息的选项
 type SearchMessagesOptions struct {
-	Query        string   // 搜索关键词
-	FromIDs      []string // 消息来自用户 ID 列表
-	ChatIDs      []string // 消息所在会话 ID 列表
-	MessageType  string   // 消息类型（file/image/media）
-	AtChatterIDs []string // @用户 ID 列表
-	FromType     string   // 消息来自类型（bot/user）
-	ChatType     string   // 会话类型（group_chat/p2p_chat）
-	StartTime    string   // 消息发送起始时间
-	EndTime      string   // 消息发送结束时间
-	PageSize     int      // 每页数量
-	PageToken    string   // 分页 token
-	UserIDType   string   // 用户 ID 类型（open_id/union_id/user_id）
+	Query           string   // 搜索关键词（可空，支持纯 filter 搜索）
+	FromIDs         []string // 消息来自用户 ID 列表
+	ChatIDs         []string // 消息所在会话 ID 列表
+	MessageType     string   // 附件类型（file/image/media/video/link；media→video）
+	AtChatterIDs    []string // @用户 ID 列表
+	FromType        string   // 消息来自类型（bot/user）
+	ExcludeFromType string   // 排除发送者类型（bot/user）→ exclude_from_types
+	ChatType        string   // 会话类型（group_chat/p2p_chat 或 group/p2p）
+	IsAtMe          bool     // 仅 @我
+	StartTime       string   // 消息发送起始时间
+	EndTime         string   // 消息发送结束时间
+	PageSize        int      // 每页数量
+	PageToken       string   // 分页 token
+	UserIDType      string   // 已废弃：current /im/v1/messages/search 忽略
 }
 
 // SearchMessagesResult 搜索消息的结果
@@ -42,59 +43,52 @@ const (
 	messagesSearchMaxPageSize     = 50
 )
 
-func clampMessagesSearchPageSize(pageSize int) int {
-	if pageSize <= 0 {
-		return messagesSearchDefaultPageSize
-	}
-	if pageSize > messagesSearchMaxPageSize {
-		return messagesSearchMaxPageSize
-	}
-	return pageSize
-}
-
-func isUnixSeconds(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeMessagesSearchTime(s string) string {
+func normalizeMessagesSearchTime(s string, endOfDay bool) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return ""
+		return "", nil
 	}
-	if isUnixSeconds(s) {
-		n, err := strconv.ParseInt(s, 10, 64)
-		if err == nil {
-			return time.Unix(n, 0).Format(time.RFC3339)
-		}
+	t, err := ParseTimeInput(s, endOfDay)
+	if err != nil {
+		return "", err
 	}
-	return s
+	return t.Format(time.RFC3339), nil
 }
 
-func mapMessagesSearchChatType(chatType string) string {
+func mapMessagesSearchChatType(chatType string) (string, error) {
 	switch chatType {
+	case "":
+		return "", nil
 	case "group_chat", "group":
-		return "group"
+		return "group", nil
 	case "p2p_chat", "p2p":
-		return "p2p"
+		return "p2p", nil
 	default:
-		return chatType
+		return "", fmt.Errorf("不支持的会话类型 %q（group_chat/p2p_chat 或 group/p2p）", chatType)
 	}
 }
 
-func mapMessagesSearchAttachmentType(messageType string) string {
+func mapMessagesSearchAttachmentType(messageType string) (string, error) {
 	switch messageType {
+	case "":
+		return "", nil
 	case "media":
-		return "video"
+		return "video", nil
+	case "file", "image", "video", "link":
+		return messageType, nil
 	default:
-		return messageType
+		return "", fmt.Errorf("不支持的消息/附件类型 %q（file/image/media/video/link）", messageType)
+	}
+}
+
+func mapMessagesSearchSenderType(v, flag string) (string, error) {
+	switch v {
+	case "":
+		return "", nil
+	case "bot", "user":
+		return v, nil
+	default:
+		return "", fmt.Errorf("%s 仅支持 bot|user，得到 %q", flag, v)
 	}
 }
 
@@ -118,8 +112,14 @@ func extractSearchMessageID(item any) string {
 // buildMessagesSearchBody 构造 POST /im/v1/messages/search 的 current filter body。
 func buildMessagesSearchBody(opts SearchMessagesOptions) (map[string]any, error) {
 	filter := map[string]any{}
-	start := normalizeMessagesSearchTime(opts.StartTime)
-	end := normalizeMessagesSearchTime(opts.EndTime)
+	start, err := normalizeMessagesSearchTime(opts.StartTime, false)
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
+	end, err := normalizeMessagesSearchTime(opts.EndTime, true)
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
 	if start != "" && end != "" {
 		st, err1 := time.Parse(time.RFC3339, start)
 		et, err2 := time.Parse(time.RFC3339, end)
@@ -143,14 +143,39 @@ func buildMessagesSearchBody(opts SearchMessagesOptions) (map[string]any, error)
 	if len(opts.FromIDs) > 0 {
 		filter["from_ids"] = opts.FromIDs
 	}
-	if opts.MessageType != "" {
-		filter["include_attachment_types"] = []string{mapMessagesSearchAttachmentType(opts.MessageType)}
+	attach, err := mapMessagesSearchAttachmentType(opts.MessageType)
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
 	}
-	if opts.FromType != "" {
-		filter["from_types"] = []string{opts.FromType}
+	if attach != "" {
+		filter["include_attachment_types"] = []string{attach}
 	}
-	if chatType := mapMessagesSearchChatType(opts.ChatType); chatType != "" {
+	fromType, err := mapMessagesSearchSenderType(opts.FromType, "--from-type")
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
+	excludeFrom, err := mapMessagesSearchSenderType(opts.ExcludeFromType, "--exclude-from-type")
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
+	if fromType != "" && excludeFrom != "" && fromType == excludeFrom {
+		return nil, fmt.Errorf("搜索消息失败: --from-type 与 --exclude-from-type 不能相同")
+	}
+	if fromType != "" {
+		filter["from_types"] = []string{fromType}
+	}
+	if excludeFrom != "" {
+		filter["exclude_from_types"] = []string{excludeFrom}
+	}
+	chatType, err := mapMessagesSearchChatType(opts.ChatType)
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
+	if chatType != "" {
 		filter["chat_type"] = chatType
+	}
+	if opts.IsAtMe {
+		filter["is_at_me"] = true
 	}
 	if len(opts.AtChatterIDs) > 0 {
 		filter["at_chatter_ids"] = opts.AtChatterIDs
@@ -163,21 +188,39 @@ func buildMessagesSearchBody(opts SearchMessagesOptions) (map[string]any, error)
 	return body, nil
 }
 
+// ValidateSearchMessagesOptions 在发网前校验 filter / 时间 / page-size。
+func ValidateSearchMessagesOptions(opts SearchMessagesOptions) error {
+	if _, err := buildMessagesSearchBody(opts); err != nil {
+		return err
+	}
+	if _, err := ResolvePageSize(opts.PageSize, messagesSearchDefaultPageSize, 1, messagesSearchMaxPageSize); err != nil {
+		return fmt.Errorf("搜索消息失败: %w", err)
+	}
+	return nil
+}
+
 // SearchMessages 搜索消息。
 // 走 current POST /open-apis/im/v1/messages/search（支持 User / Tenant 身份）。
 func SearchMessages(opts SearchMessagesOptions, userAccessToken string) (*SearchMessagesResult, error) {
+	if err := ValidateSearchMessagesOptions(opts); err != nil {
+		return nil, err
+	}
+	body, err := buildMessagesSearchBody(opts)
+	if err != nil {
+		return nil, err
+	}
+	pageSize, err := ResolvePageSize(opts.PageSize, messagesSearchDefaultPageSize, 1, messagesSearchMaxPageSize)
+	if err != nil {
+		return nil, fmt.Errorf("搜索消息失败: %w", err)
+	}
+
 	cli, err := GetClient()
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := buildMessagesSearchBody(opts)
-	if err != nil {
-		return nil, err
-	}
-
 	q := url.Values{}
-	q.Set("page_size", strconv.Itoa(clampMessagesSearchPageSize(opts.PageSize)))
+	q.Set("page_size", strconv.Itoa(pageSize))
 	if opts.PageToken != "" {
 		q.Set("page_token", opts.PageToken)
 	}
@@ -196,9 +239,10 @@ func SearchMessages(opts SearchMessagesOptions, userAccessToken string) (*Search
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
-			Items     []any  `json:"items"`
-			PageToken string `json:"page_token"`
-			HasMore   bool   `json:"has_more"`
+			Items         []any  `json:"items"`
+			PageToken     string `json:"page_token"`
+			NextPageToken string `json:"next_page_token"`
+			HasMore       bool   `json:"has_more"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
@@ -214,9 +258,13 @@ func SearchMessages(opts SearchMessagesOptions, userAccessToken string) (*Search
 			ids = append(ids, id)
 		}
 	}
+	pageToken := apiResp.Data.PageToken
+	if pageToken == "" {
+		pageToken = apiResp.Data.NextPageToken
+	}
 	return &SearchMessagesResult{
 		MessageIDs: ids,
-		PageToken:  apiResp.Data.PageToken,
+		PageToken:  pageToken,
 		HasMore:    apiResp.Data.HasMore,
 	}, nil
 }

@@ -1,6 +1,6 @@
 # 飞书搜索
 
-搜索飞书云文档、消息和应用。所有搜索命令**必须使用 User Access Token**。
+搜索飞书云文档、消息和应用。`search docs` / `search apps` **必须使用 User Access Token**。`search messages` 走 current IM 端点，使用 `--as bot|user|auto`。
 
 > **feishu-cli**：如尚未安装，请前往 [riba2534/feishu-cli](https://github.com/riba2534/feishu-cli) 获取安装方式。
 
@@ -138,7 +138,7 @@ sheet 走 sheet，wiki 先按 node 类型解析，bitable/file/slides 分别走�
 
 ## 搜索消息
 
-搜索飞书消息记录。走 **`POST /open-apis/im/v1/messages/search`**（不再使用 `/search/v2/message`）。**scope: `search:message`**
+搜索飞书消息记录。走 **`POST /open-apis/im/v1/messages/search`**（不再使用 `/search/v2/message`）。**scope: `search:message`**。端点支持 User 与 Bot：`--as bot|user|auto`（默认 auto；已配置 User 但刷新失败 fail-closed）。query 可省略，仅靠 filter 搜索。
 
 CLI 仍接受旧 flag 写法，会映射到 current filter：`--start-time`/`--end-time` → `filter.time_range`；`--chat-type group_chat|p2p_chat` → `group|p2p`；`--message-type media` → `include_attachment_types: ["video"]`。
 

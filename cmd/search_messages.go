@@ -10,34 +10,33 @@ import (
 )
 
 var searchMessagesCmd = &cobra.Command{
-	Use:   "messages <query>",
+	Use:   "messages [query]",
 	Short: "搜索消息（默认返回消息 ID，--enrich 补全内容/发送者/群名/时间）",
-	Long: `搜索飞书消息。默认返回消息 ID（人类可读列表 + -o json 返回
-{MessageIDs,HasMore,PageToken}），与历史行为完全一致。
+	Long: `搜索飞书消息（POST /open-apis/im/v1/messages/search）。默认返回消息 ID
+（人类可读列表 + -o json 返回 {MessageIDs,HasMore,PageToken}）。
 
-加 --enrich 才在消息 ID 基础上补全内容、发送者、群名、时间
-（补全消息上下文），此时会多发 BatchGetMessages 等 API 调用。
+query 可省略，仅用 filter 搜索。加 --enrich 才补全内容/发送者/群名/时间。
 
-注意：此功能需要 User Access Token（用户授权令牌），推荐通过 auth login 获取。
-
-参数:
-  query           搜索关键词（必需）
+身份：--as bot|user|auto（默认 auto = User 优先，未配置回落 Bot；已配置 User
+但刷新失败 fail-closed，不会静默切 Bot）。
 
 选项:
-  --chat-ids      指定搜索的会话 ID 列表（逗号分隔）
-  --from-ids      指定消息发送者用户 ID 列表（逗号分隔）
-  --message-type  消息类型过滤（file/image/media）
-  --chat-type     会话类型（group_chat/p2p_chat）
-  --from-type     发送者类型（bot/user）
-  --start-time    消息发送起始时间（RFC3339 或 Unix 秒，写入 filter.time_range）
-  --end-time      消息发送结束时间（RFC3339 或 Unix 秒，写入 filter.time_range）
-  --page-size     每页数量（默认 20）
-  --page-token    分页 token
-  --page-all      自动翻页拉取全部结果（配合 --page-limit 限制页数）
-  --enrich        补全内容/发送者/群名/时间（额外 API 调用，opt-in）
-  --format        结构化输出: json | pretty | table | ndjson | csv
-  --jq            用 jq 表达式过滤结构化输出
-  --user-id-type  用户 ID 类型（open_id/union_id/user_id，默认 open_id）
+  --chat-ids              指定搜索的会话 ID 列表（逗号分隔）
+  --from-ids              指定消息发送者用户 ID 列表（逗号分隔）
+  --message-type          附件类型（file/image/media/video/link；media→video）
+  --chat-type             会话类型（group_chat/p2p_chat 或 group/p2p）
+  --from-type             发送者类型（bot/user）
+  --exclude-from-type     排除发送者类型（bot/user）
+  --is-at-me              仅搜索 @我 的消息
+  --start-time            起始时间（RFC3339 / YYYY-MM-DD / Unix 秒）
+  --end-time              结束时间（RFC3339 / YYYY-MM-DD / Unix 秒）
+  --page-size             每页数量（1-50，默认 20；越界报错）
+  --page-token            分页 token
+  --page-all              自动翻页拉取全部结果（配合 --page-limit 限制页数）
+  --enrich                补全内容/发送者/群名/时间（额外 API 调用，opt-in）
+  --as                    身份：bot | user | auto
+  --format                结构化输出: json | pretty | table | ndjson | csv
+  --jq                    用 jq 表达式过滤结构化输出
 
 示例:
   # 搜索包含"会议"的消息（默认返回消息 ID，人类可读）
@@ -55,17 +54,15 @@ var searchMessagesCmd = &cobra.Command{
 
   # 富化 + 指定会话 + 自动翻页 + CSV
   feishu-cli search messages "项目" --enrich --chat-ids oc_xxx --page-all --page-limit 5 --format csv`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
 		}
 
-		query := args[0]
-
-		userAccessToken, err := resolveRequiredUserToken(cmd)
-		if err != nil {
-			return err
+		query := ""
+		if len(args) == 1 {
+			query = args[0]
 		}
 
 		chatIDsStr, _ := cmd.Flags().GetString("chat-ids")
@@ -74,11 +71,12 @@ var searchMessagesCmd = &cobra.Command{
 		messageType, _ := cmd.Flags().GetString("message-type")
 		chatType, _ := cmd.Flags().GetString("chat-type")
 		fromType, _ := cmd.Flags().GetString("from-type")
+		excludeFromType, _ := cmd.Flags().GetString("exclude-from-type")
+		isAtMe, _ := cmd.Flags().GetBool("is-at-me")
 		startTime, _ := cmd.Flags().GetString("start-time")
 		endTime, _ := cmd.Flags().GetString("end-time")
 		pageSize, _ := cmd.Flags().GetInt("page-size")
 		pageToken, _ := cmd.Flags().GetString("page-token")
-		userIDType, _ := cmd.Flags().GetString("user-id-type")
 		enrich, _ := cmd.Flags().GetBool("enrich")
 		pageAll, _ := cmd.Flags().GetBool("page-all")
 		pageLimit, _ := cmd.Flags().GetInt("page-limit")
@@ -86,18 +84,27 @@ var searchMessagesCmd = &cobra.Command{
 		jq, _ := cmd.Flags().GetString("jq")
 
 		opts := client.SearchMessagesOptions{
-			Query:        query,
-			ChatIDs:      splitAndTrim(chatIDsStr),
-			FromIDs:      splitAndTrim(fromIDsStr),
-			AtChatterIDs: splitAndTrim(atChatterIDsStr),
-			MessageType:  messageType,
-			ChatType:     chatType,
-			FromType:     fromType,
-			StartTime:    startTime,
-			EndTime:      endTime,
-			PageSize:     pageSize,
-			PageToken:    pageToken,
-			UserIDType:   userIDType,
+			Query:           query,
+			ChatIDs:         splitAndTrim(chatIDsStr),
+			FromIDs:         splitAndTrim(fromIDsStr),
+			AtChatterIDs:    splitAndTrim(atChatterIDsStr),
+			MessageType:     messageType,
+			ChatType:        chatType,
+			FromType:        fromType,
+			ExcludeFromType: excludeFromType,
+			IsAtMe:          isAtMe,
+			StartTime:       startTime,
+			EndTime:         endTime,
+			PageSize:        pageSize,
+			PageToken:       pageToken,
+		}
+		if err := client.ValidateSearchMessagesOptions(opts); err != nil {
+			return err
+		}
+
+		userAccessToken, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
 		}
 
 		// 是否走结构化输出：显式 --format / --jq，或旧的 -o json
@@ -188,10 +195,14 @@ func collectMessageIDs(opts client.SearchMessagesOptions, token string, pageAll 
 		last = res
 		ids = append(ids, res.MessageIDs...)
 		pages++
-		if !pageAll || !res.HasMore || (pageLimit > 0 && pages >= pageLimit) {
+		more, next, err := client.PaginationCursor(res.HasMore, res.PageToken, "", opts.PageToken)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !pageAll || !more || (pageLimit > 0 && pages >= pageLimit) {
 			break
 		}
-		opts.PageToken = res.PageToken
+		opts.PageToken = next
 	}
 	return ids, last, nil
 }
@@ -209,10 +220,19 @@ func collectEnrichedMessages(opts client.SearchMessagesOptions, token, cardConte
 		last = res
 		all = append(all, enriched...)
 		pages++
-		if !pageAll || res == nil || !res.HasMore || (pageLimit > 0 && pages >= pageLimit) {
+		hasMore := res != nil && res.HasMore
+		pageTok := ""
+		if res != nil {
+			pageTok = res.PageToken
+		}
+		more, next, err := client.PaginationCursor(hasMore, pageTok, "", opts.PageToken)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !pageAll || !more || (pageLimit > 0 && pages >= pageLimit) {
 			break
 		}
-		opts.PageToken = res.PageToken
+		opts.PageToken = next
 	}
 	return all, last, nil
 }
@@ -243,17 +263,21 @@ func init() {
 	searchCmd.AddCommand(searchMessagesCmd)
 
 	searchMessagesCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")
+	searchMessagesCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto）")
 	searchMessagesCmd.Flags().String("chat-ids", "", "会话 ID 列表（逗号分隔）")
 	searchMessagesCmd.Flags().String("from-ids", "", "消息发送者用户 ID 列表（逗号分隔）")
 	searchMessagesCmd.Flags().String("at-chatter-ids", "", "@的用户 ID 列表（逗号分隔）")
-	searchMessagesCmd.Flags().String("message-type", "", "消息类型（file/image/media）")
-	searchMessagesCmd.Flags().String("chat-type", "", "会话类型（group_chat/p2p_chat）")
+	searchMessagesCmd.Flags().String("message-type", "", "附件类型（file/image/media/video/link；media 映射为 video）")
+	searchMessagesCmd.Flags().String("chat-type", "", "会话类型（group_chat/p2p_chat 或 group/p2p）")
 	searchMessagesCmd.Flags().String("from-type", "", "发送者类型（bot/user）")
-	searchMessagesCmd.Flags().String("start-time", "", "消息发送起始时间（RFC3339 或 Unix 秒）")
-	searchMessagesCmd.Flags().String("end-time", "", "消息发送结束时间（RFC3339 或 Unix 秒）")
-	searchMessagesCmd.Flags().Int("page-size", 20, "每页数量")
+	searchMessagesCmd.Flags().String("exclude-from-type", "", "排除发送者类型（bot/user）")
+	searchMessagesCmd.Flags().Bool("is-at-me", false, "仅搜索 @我 的消息")
+	searchMessagesCmd.Flags().String("start-time", "", "消息发送起始时间（RFC3339 / YYYY-MM-DD / Unix 秒）")
+	searchMessagesCmd.Flags().String("end-time", "", "消息发送结束时间（RFC3339 / YYYY-MM-DD / Unix 秒）")
+	searchMessagesCmd.Flags().Int("page-size", 20, "每页数量（1-50）")
 	searchMessagesCmd.Flags().String("page-token", "", "分页 token")
-	searchMessagesCmd.Flags().String("user-id-type", "open_id", "用户 ID 类型（open_id/union_id/user_id）")
+	searchMessagesCmd.Flags().String("user-id-type", "open_id", "已废弃：current /im/v1/messages/search 忽略此参数")
+	_ = searchMessagesCmd.Flags().MarkHidden("user-id-type")
 	searchMessagesCmd.Flags().Bool("enrich", false, "补全内容/发送者/群名/时间（额外 API 调用，opt-in）")
 	searchMessagesCmd.Flags().StringP("output", "o", "", "输出格式（json，等价 --format json；保留向后兼容）")
 	addCardContentTypeFlag(searchMessagesCmd)

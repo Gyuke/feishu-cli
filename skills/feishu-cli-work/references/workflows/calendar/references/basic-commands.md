@@ -86,19 +86,19 @@ feishu-cli calendar delete-event <calendar_id> <event_id>
 
 ## 搜索日程
 
-走 `POST /open-apis/calendar/v4/calendars/{id}/events/search_event`。`--start`/`--end` 写入 `filter.time_range`（RFC3339），不是旧 `/events/search` 的顶层 TimeInfo。
+走 `POST /open-apis/calendar/v4/calendars/{id}/events/search_event`。`--calendar-id` 可省略（默认 `primary`），`--query` 可空（纯 filter 搜索）。`--start`/`--end` 写入 `filter.time_range`（RFC3339 或 YYYY-MM-DD；只给一边时补同一天边界；start>end 发网前失败）。
 
 ```bash
 feishu-cli calendar event-search \
-  --calendar-id <id> \
-  --query "关键词" \
+  [--calendar-id <id>] \
+  [--query "关键词"] \
   [--start "2024-01-01T00:00:00+08:00"] \
   [--end "2024-12-31T23:59:59+08:00"] \
   [--attendee-ids ou_xxx,oc_xxx,omm_xxx] \
   [--page-size 20]
 ```
 
-`--page-size` 范围 1-30（默认 20）。`--attendee-ids` 按前缀拆分：`ou_` → 用户、`oc_` → 群、`omm_` → 会议室。
+`--page-size` 范围 1-30（默认 20，越界报错不截断）。`--attendee-ids` 按前缀拆分：`ou_` → 用户、`oc_` → 群、`omm_` → 会议室。
 
 ## 回复日程邀请
 

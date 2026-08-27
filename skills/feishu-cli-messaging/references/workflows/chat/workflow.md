@@ -26,7 +26,8 @@
   feishu-cli auth check --scope "im:message:readonly im:message.group_msg:get_as_user"
   feishu-cli auth login --domain chat --recommend
   ```
-- **必需 User Token**（`reaction add/remove/list`、`pin/unpin/pins`、`search-chats`、`chat get/update/delete`）：未登录直接报错。
+- **必需 User Token**（`reaction add/remove/list`、`pin/unpin/pins`、`chat get/update/delete`）：未登录直接报错。
+- **身份可选 `--as bot|user|auto`**（`msg search-chats`）：current `POST /im/v2/chats/search` 支持 User 与 Bot。默认 auto（User 优先，未配置回落 Bot；已配置 User 但刷新失败 fail-closed）。`--as bot` 走 App Token。
 - **读类 · User 优先 Tenant 兜底**（`chat list`）：默认自动加载 User Token（列你本人加入的群），未登录回落 App Token（列 Bot 加入的群）。
 - **群成员身份可选**（`chat member list/add/remove`）：`--as auto` 默认 User 优先、Bot 兜底；外部群通常显式用 `--as bot`。
 - **固定 Bot 身份**（`chat create`、`chat link`）：当前命令没有 `--user-access-token` 或 `--as`，始终使用 App Token。
@@ -116,12 +117,12 @@ feishu-cli msg thread-messages <thread_id> --page-size 50 --sort ByCreateTimeAsc
 ## 搜索与定位
 
 ```bash
-feishu-cli msg search-chats --query "项目群" -o json   # POST /im/v2/chats/search
-feishu-cli search messages "关键词" --chat-type p2p_chat -o json   # POST /im/v1/messages/search
-feishu-cli search messages "关键词" --chat-ids oc_xxx -o json
+feishu-cli msg search-chats --query "项目群" --as auto -o json   # POST /im/v2/chats/search
+feishu-cli search messages "关键词" --chat-type p2p_chat --as auto -o json
+feishu-cli search messages --chat-ids oc_xxx --is-at-me -o json   # 可省略 query
 ```
 
-搜消息属于 `feishu-cli-platform`，走 current `POST /open-apis/im/v1/messages/search`（`filter.time_range` / `from_ids` / `chat_ids` / `include_attachment_types`）。本技能在阅读任务里顺带调用。`msg search-chats` 走 `POST /open-apis/im/v2/chats/search`，含连字符的关键词会自动加引号。`msg mget` 走 `GET /open-apis/im/v1/messages/mget`（`with_sender_name=true`，每批最多 50）。
+搜消息属于 `feishu-cli-platform`，走 current `POST /open-apis/im/v1/messages/search`（`filter.time_range` / `from_ids` / `chat_ids` / `include_attachment_types` / `exclude_from_types` / `is_at_me`）。`--as bot|user|auto`。`msg search-chats` 走 `POST /open-apis/im/v2/chats/search`，解析 `next_page_token`，含连字符的关键词会自动加引号。`msg mget` 走 `GET /open-apis/im/v1/messages/mget`（`with_sender_name=true`，每批最多 50）。
 
 ## 消息互动
 

@@ -780,6 +780,9 @@ const (
 // When query is provided, uses POST /open-apis/im/v2/chats/search.
 // When query is empty, falls back to List API.
 func SearchChats(opts SearchChatsOptions, userAccessToken string) (*SearchChatsResult, error) {
+	if _, err := ResolvePageSize(opts.PageSize, chatSearchDefaultPageSize, 1, chatSearchMaxPageSize); err != nil {
+		return nil, fmt.Errorf("搜索群聊失败: %w", err)
+	}
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
@@ -793,16 +796,6 @@ func SearchChats(opts SearchChatsOptions, userAccessToken string) (*SearchChatsR
 		return searchChatsWithSearchAPI(client, opts, userAccessToken)
 	}
 	return searchChatsWithListAPI(client, opts, userAccessToken)
-}
-
-func clampChatSearchPageSize(pageSize int) int {
-	if pageSize <= 0 {
-		return chatSearchDefaultPageSize
-	}
-	if pageSize > chatSearchMaxPageSize {
-		return chatSearchMaxPageSize
-	}
-	return pageSize
 }
 
 func normalizeChatSearchQuery(query string) string {
@@ -844,11 +837,15 @@ func chatInfoFromSearchItem(item map[string]any) *ChatInfo {
 
 // searchChatsWithSearchAPI uses POST /open-apis/im/v2/chats/search.
 func searchChatsWithSearchAPI(client *lark.Client, opts SearchChatsOptions, userAccessToken string) (*SearchChatsResult, error) {
+	pageSize, err := ResolvePageSize(opts.PageSize, chatSearchDefaultPageSize, 1, chatSearchMaxPageSize)
+	if err != nil {
+		return nil, fmt.Errorf("搜索群聊失败: %w", err)
+	}
 	body := map[string]any{
 		"query": normalizeChatSearchQuery(opts.Query),
 	}
 	q := url.Values{}
-	q.Set("page_size", strconv.Itoa(clampChatSearchPageSize(opts.PageSize)))
+	q.Set("page_size", strconv.Itoa(pageSize))
 	if opts.PageToken != "" {
 		q.Set("page_token", opts.PageToken)
 	}
@@ -867,9 +864,10 @@ func searchChatsWithSearchAPI(client *lark.Client, opts SearchChatsOptions, user
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
-			Items     []map[string]any `json:"items"`
-			PageToken string           `json:"page_token"`
-			HasMore   bool             `json:"has_more"`
+			Items         []map[string]any `json:"items"`
+			PageToken     string           `json:"page_token"`
+			NextPageToken string           `json:"next_page_token"`
+			HasMore       bool             `json:"has_more"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
@@ -879,8 +877,12 @@ func searchChatsWithSearchAPI(client *lark.Client, opts SearchChatsOptions, user
 		return nil, fmt.Errorf("搜索群聊失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
+	pageToken := apiResp.Data.PageToken
+	if pageToken == "" {
+		pageToken = apiResp.Data.NextPageToken
+	}
 	result := &SearchChatsResult{
-		PageToken: apiResp.Data.PageToken,
+		PageToken: pageToken,
 		HasMore:   apiResp.Data.HasMore,
 	}
 	for _, item := range apiResp.Data.Items {

@@ -19,6 +19,19 @@ func TestSearchMessagesFlags(t *testing.T) {
 	if f := searchMessagesCmd.Flags().Lookup("ids-only"); f != nil {
 		t.Error("--ids-only 已移除，不应再注册")
 	}
+	if f := searchMessagesCmd.Flags().Lookup("as"); f == nil || f.DefValue != "auto" {
+		t.Fatal("缺少 --as auto")
+	}
+	if f := searchMessagesCmd.Flags().Lookup("is-at-me"); f == nil {
+		t.Fatal("缺少 --is-at-me")
+	}
+	if f := searchMessagesCmd.Flags().Lookup("exclude-from-type"); f == nil {
+		t.Fatal("缺少 --exclude-from-type")
+	}
+	uid := searchMessagesCmd.Flags().Lookup("user-id-type")
+	if uid == nil || !uid.Hidden {
+		t.Fatal("--user-id-type 应隐藏：current endpoint 忽略它")
+	}
 }
 
 // TestSearchMessagesHelpMentionsEnrich 验证 Use/Long 反映 --enrich opt-in 且不再提 --ids-only。

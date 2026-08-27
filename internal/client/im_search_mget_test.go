@@ -224,6 +224,120 @@ func TestBatchGetMessagesMissingIDStrict(t *testing.T) {
 	}
 }
 
+func TestSearchChatsNextPageTokenFallback(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{
+			"code":0,"msg":"ok",
+			"data":{"items":[{"meta_data":{"chat_id":"oc_1","name":"n"}}],
+			"has_more":true,"next_page_token":"n2"}
+		}`)
+	})
+	res, err := SearchChats(SearchChatsOptions{Query: "n", PageSize: 20}, testUserToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasMore || res.PageToken != "n2" {
+		t.Errorf("next_page_token fallback = %#v", res)
+	}
+	_ = got
+}
+
+func TestSearchChatsPageSizeRejected(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{"code":0}`)
+	})
+	_, err := SearchChats(SearchChatsOptions{Query: "n", PageSize: 101}, testUserToken)
+	if err == nil {
+		t.Fatal("page-size 101 must fail")
+	}
+	if len(got()) != 0 {
+		t.Fatalf("invalid page-size must not hit network, got %d", len(got()))
+	}
+}
+
+func TestSearchMessagesExtraFiltersAndLink(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{"code":0,"msg":"ok","data":{"items":[],"has_more":false}}`)
+	})
+	_, err := SearchMessages(SearchMessagesOptions{
+		Query:           "",
+		ChatIDs:         []string{"oc_1"},
+		MessageType:     "link",
+		FromType:        "user",
+		ExcludeFromType: "bot",
+		IsAtMe:          true,
+		PageSize:        20,
+	}, testUserToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(got()[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	filter, _ := body["filter"].(map[string]any)
+	if filter["is_at_me"] != true {
+		t.Errorf("is_at_me = %#v", filter["is_at_me"])
+	}
+	if types, _ := filter["include_attachment_types"].([]any); len(types) != 1 || types[0] != "link" {
+		t.Errorf("attachment = %#v", filter["include_attachment_types"])
+	}
+	if types, _ := filter["exclude_from_types"].([]any); len(types) != 1 || types[0] != "bot" {
+		t.Errorf("exclude_from_types = %#v", filter["exclude_from_types"])
+	}
+}
+
+func TestSearchMessagesPageSizeRejected(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{"code":0}`)
+	})
+	_, err := SearchMessages(SearchMessagesOptions{Query: "x", PageSize: 51}, testUserToken)
+	if err == nil {
+		t.Fatal("page-size 51 must fail")
+	}
+	if len(got()) != 0 {
+		t.Fatalf("invalid page-size must not hit network, got %d", len(got()))
+	}
+}
+
+func TestSearchMessagesInvalidTimeBeforeNetwork(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{"code":0}`)
+	})
+	_, err := SearchMessages(SearchMessagesOptions{Query: "x", StartTime: "not-a-time"}, testUserToken)
+	if err == nil {
+		t.Fatal("invalid time must fail")
+	}
+	if len(got()) != 0 {
+		t.Fatalf("invalid time must not hit network, got %d", len(got()))
+	}
+	_, err = SearchMessages(SearchMessagesOptions{
+		Query:     "x",
+		StartTime: "2026-04-27T00:00:00+08:00",
+		EndTime:   "2026-04-20T00:00:00+08:00",
+	}, testUserToken)
+	if err == nil {
+		t.Fatal("start>end must fail")
+	}
+}
+
+func TestPaginationCursorNoProgress(t *testing.T) {
+	more, token, err := PaginationCursor(true, "", "n2", "")
+	if err != nil || !more || token != "n2" {
+		t.Errorf("fallback next_page_token: more=%v token=%q err=%v", more, token, err)
+	}
+	if _, _, err := PaginationCursor(true, "", "", "prev"); err == nil {
+		t.Fatal("empty cursor with has_more must fail")
+	}
+	if _, _, err := PaginationCursor(true, "same", "", "same"); err == nil {
+		t.Fatal("repeated cursor must fail")
+	}
+	more, token, err = PaginationCursor(false, "", "n2", "p")
+	if err != nil || more || token != "n2" {
+		t.Errorf("has_more=false still surfaces token: %v %q %v", more, token, err)
+	}
+}
+
 func TestNormalizeChatSearchQuery(t *testing.T) {
 	if got := normalizeChatSearchQuery("hello"); got != "hello" {
 		t.Errorf("plain = %q", got)

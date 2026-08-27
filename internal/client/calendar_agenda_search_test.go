@@ -152,17 +152,90 @@ func TestSearchEventsBusinessCode(t *testing.T) {
 	}
 }
 
-func TestSearchEventsPageSizeClamped(t *testing.T) {
+func TestSearchEventsPageSizeRejected(t *testing.T) {
 	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
 		writeJSON(w, http.StatusOK, `{"code":0,"msg":"ok","data":{"items":[]}}`)
 	})
 	_, _, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "cal_x", Query: "x", PageSize: 99}, testUserToken)
+	if err == nil {
+		t.Fatal("page-size 99 must fail, not clamp")
+	}
+	if len(got()) != 0 {
+		t.Fatalf("invalid page-size must not hit network, got %d", len(got()))
+	}
+}
+
+func TestSearchEventsDefaultPrimaryAndEmptyQuery(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{"code":0,"msg":"ok","data":{"items":[]}}`)
+	})
+	_, _, err := SearchEventsWithParams(SearchEventsParams{}, testUserToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	reqs := got()
-	if reqs[0].Query.Get("page_size") != "30" {
-		t.Errorf("page_size = %s, want 30", reqs[0].Query.Get("page_size"))
+	if len(reqs) != 1 {
+		t.Fatalf("request count = %d", len(reqs))
+	}
+	if reqs[0].Path != "/open-apis/calendar/v4/calendars/primary/events/search_event" {
+		t.Errorf("path = %s", reqs[0].Path)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(reqs[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["query"] != "" {
+		t.Errorf("empty query = %#v", body["query"])
+	}
+}
+
+func TestParseSearchEventTimeRange(t *testing.T) {
+	start, end, err := ParseSearchEventTimeRange("2026-04-20", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(start, "2026-04-20T00:00:00") || !strings.HasPrefix(end, "2026-04-20T23:59:59") {
+		t.Errorf("one-sided start: %s %s", start, end)
+	}
+	start, end, err = ParseSearchEventTimeRange("", "2026-04-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(start, "2026-04-27T00:00:00") || !strings.HasPrefix(end, "2026-04-27T23:59:59") {
+		t.Errorf("one-sided end: %s %s", start, end)
+	}
+	if _, _, err := ParseSearchEventTimeRange("2026-04-27", "2026-04-20"); err == nil {
+		t.Fatal("start>end must fail")
+	}
+	if _, _, err := ParseSearchEventTimeRange("not-a-date", "2026-04-20"); err == nil {
+		t.Fatal("invalid start must fail")
+	}
+}
+
+func TestParseAgendaDateRangeDSTAndOrder(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip(err)
+	}
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, loc)
+	start, end, err := ParseAgendaDateRange("2026-03-08", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.Format("2006-01-02") != "2026-03-08" {
+		t.Errorf("start day = %s", start)
+	}
+	y, m, d := end.In(loc).Date()
+	h, min, sec := end.In(loc).Clock()
+	if y != 2026 || m != time.March || d != 8 || h != 23 || min != 59 || sec != 59 {
+		t.Errorf("DST-safe end = %s, want 2026-03-08 23:59:59", end.In(loc))
+	}
+	unsafe := start.Add(24*time.Hour - time.Second)
+	if unsafe.Equal(end) {
+		t.Error("Add(24h-1s) matched calendar end; this TZ may not exercise DST")
+	}
+	if _, _, err := ParseAgendaDateRange("2026-03-09", "2026-03-08", now); err == nil {
+		t.Fatal("start>end must fail")
 	}
 }
 
