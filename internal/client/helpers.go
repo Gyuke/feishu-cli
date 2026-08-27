@@ -71,31 +71,39 @@ func Int64Val(p *int64) int64 {
 	return *p
 }
 
-// IsRateLimitError 判断错误是否为频率限制错误
+// IsRateLimitError 判断错误是否为频率限制错误（基于结构化 API/HTTP 码或明确限流短语，词边界安全）
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "429") ||
-		strings.Contains(msg, "99991400") ||
-		strings.Contains(msg, "frequency limit") ||
-		strings.Contains(msg, "rate limit")
+	if HasAPICode(err, 99991400) || HasAPICode(err, 429) || HasHTTPStatus(err, 429) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "frequency limit") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "too many requests")
 }
 
-// IsRetryableError 判断错误是否可重试（服务端临时错误）
+// IsRetryableError 判断错误是否可重试（服务端临时错误或限流，基于结构化 API/HTTP 码或明确短语）
 func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "500") ||
-		strings.Contains(msg, "502") ||
-		strings.Contains(msg, "503") ||
-		strings.Contains(msg, "429") ||
-		strings.Contains(msg, "internal error") ||
-		strings.Contains(msg, "rate limit") ||
-		strings.Contains(msg, "frequency limit")
+	if IsRateLimitError(err) {
+		return true
+	}
+	for _, code := range []int{500, 502, 503, 504} {
+		if HasAPICode(err, code) || HasHTTPStatus(err, code) {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "internal error") ||
+		strings.Contains(msg, "internal server error") ||
+		strings.Contains(msg, "bad gateway") ||
+		strings.Contains(msg, "service unavailable") ||
+		strings.Contains(msg, "gateway timeout")
 }
 
 // IsPermanentError 判断错误是否为永久性错误（不应重试）

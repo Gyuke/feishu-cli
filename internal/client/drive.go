@@ -275,7 +275,8 @@ func DownloadFromURL(url string, outputPath string, timeout ...time.Duration) er
 	return saveToFile(resp.Body, outputPath)
 }
 
-// saveToFile 将 reader 内容写入文件，限制最大大小
+// saveToFile 将 reader 内容写入文件，限制最大大小 (maxDownloadSize)
+// 恰好 100MB 允许写入；严格大于 100MB 则报错并删除不完整文件
 func saveToFile(reader io.Reader, outputPath string) error {
 	outFile, err := os.Create(outputPath)
 	if err != nil {
@@ -283,7 +284,7 @@ func saveToFile(reader io.Reader, outputPath string) error {
 	}
 	defer outFile.Close()
 
-	limitedReader := io.LimitReader(reader, maxDownloadSize)
+	limitedReader := io.LimitReader(reader, maxDownloadSize+1)
 	written, err := io.Copy(outFile, limitedReader)
 	if err != nil {
 		outFile.Close()
@@ -291,7 +292,7 @@ func saveToFile(reader io.Reader, outputPath string) error {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
 
-	if written >= maxDownloadSize {
+	if written > maxDownloadSize {
 		outFile.Close()
 		os.Remove(outputPath)
 		return fmt.Errorf("文件超过大小限制 (%d MB)", maxDownloadSize/(1024*1024))
@@ -408,6 +409,10 @@ func listFolderRecursiveInner(folderToken, relBase, userAccessToken string, out 
 			if relBase != "" {
 				rel = relBase + "/" + f.Name
 			}
+			if existing, exists := out[rel]; exists {
+				return fmt.Errorf("远端存在重复相对路径 %q: 发现多个条目 (token %s[%s] 与 token %s[%s])，为防止静默覆盖导致数据丢失，已中止操作",
+					rel, existing.FileToken, existing.Type, f.Token, f.Type)
+			}
 			out[rel] = DriveRemoteEntry{FileToken: f.Token, Type: f.Type, RelPath: rel}
 			if f.Type == "folder" {
 				if err := listFolderRecursiveInner(f.Token, rel, userAccessToken, out); err != nil {
@@ -424,7 +429,8 @@ func listFolderRecursiveInner(folderToken, relBase, userAccessToken string, out 
 }
 
 // HashRemoteFile 流式下载远端文件并计算 SHA-256。
-// 仅用于 status 比对，不落地到磁盘；流式读取使内存峰值保持在 O(64KB)，避免大文件 OOM。
+// 覆盖完整远端内容（流式读取使内存峰值保持在 O(64KB)，避免大文件 OOM），
+// 在下载或读取失败时显式 fail closed，绝不静默只 hash 前缀。
 func HashRemoteFile(fileToken, userAccessToken string) (string, error) {
 	c, err := GetClient()
 	if err != nil {
@@ -438,8 +444,11 @@ func HashRemoteFile(fileToken, userAccessToken string) (string, error) {
 	if !resp.Success() {
 		return "", fmt.Errorf("下载远端文件以计算哈希失败 (token=%s): code=%d, msg=%s", fileToken, resp.Code, resp.Msg)
 	}
+	if resp.File == nil {
+		return "", fmt.Errorf("下载远端文件以计算哈希失败 (token=%s): 响应内容为空", fileToken)
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(resp.File, maxDownloadSize)); err != nil {
+	if _, err := io.Copy(h, resp.File); err != nil {
 		return "", fmt.Errorf("读取远端文件流以计算哈希失败 (token=%s): %w", fileToken, err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

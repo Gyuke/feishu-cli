@@ -23,7 +23,25 @@ func HasAPICode(err error, code int) bool {
 // apiCodePattern 构造某错误码的匹配正则（缓存无必要：调用频率极低）。
 func apiCodePattern(code int) *regexp.Regexp {
 	n := strconv.Itoa(code)
-	// 形态一：code=<N>（本仓统一错误格式）
-	// 形态二："code": <N> / "code":<N>（HTTP 错误分支透出的 raw JSON body）
-	return regexp.MustCompile(fmt.Sprintf(`(code=%s\b)|("code"\s*:\s*%s\b)`, n, n))
+	// 形态一：\bcode\s*[:=]\s*<N>\b（本仓统一错误格式 code=N 及 SDK code: N）
+	// 形态二："code"\s*:\s*<N>\b（HTTP 错误分支透出的 raw JSON body）
+	return regexp.MustCompile(fmt.Sprintf(`(?i)\bcode\s*[:=]\s*%s\b|"code"\s*:\s*%s\b`, n, n))
+}
+
+// HasHTTPStatus 判断 err 的错误链文本中是否携带指定的 HTTP 状态码（词边界安全）。
+//
+// 匹配形态：
+// - HTTP <N> / HTTP 状态码 <N> / HTTP status <N>
+// - status code: <N> / status code <N> / status: <N>
+// 避免命中 log_id / token / body 中的无关同数字串。
+func HasHTTPStatus(err error, status int) bool {
+	if err == nil {
+		return false
+	}
+	return httpStatusPattern(status).MatchString(err.Error())
+}
+
+func httpStatusPattern(status int) *regexp.Regexp {
+	n := strconv.Itoa(status)
+	return regexp.MustCompile(fmt.Sprintf(`(?i)\b(?:HTTP|status)\s*(?:状态码|code)?\s*[:=]?\s*%s\b`, n))
 }

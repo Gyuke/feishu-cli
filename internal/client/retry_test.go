@@ -163,9 +163,13 @@ func TestClassifyError_RateLimit(t *testing.T) {
 		wantRetry        bool
 		wantFailure      bool
 	}{
-		{"429 with RetryOnRateLimit", fmt.Errorf("429"), true, true, false},
-		{"429 without RetryOnRateLimit", fmt.Errorf("429"), false, true, true},
-		{"99991400 with RetryOnRateLimit", fmt.Errorf("99991400 frequency limit"), true, true, false},
+		{"HTTP 429 with RetryOnRateLimit", fmt.Errorf("HTTP 429"), true, true, false},
+		{"HTTP 429 without RetryOnRateLimit", fmt.Errorf("HTTP 429"), false, true, true},
+		{"code=429 with RetryOnRateLimit", fmt.Errorf("code=429, msg=too many requests"), true, true, false},
+		{"99991400 with RetryOnRateLimit", fmt.Errorf("code=99991400 frequency limit"), true, true, false},
+		{"raw json body code 99991400", fmt.Errorf(`{"code": 99991400, "msg": "rate limit"}`), true, true, false},
+		{"log_id contains 429 does not classify as rate limit", fmt.Errorf("code=10000, msg=failed, log_id=20260429123456"), true, false, true},
+		{"token contains 429 does not classify as rate limit", fmt.Errorf("token=boxcn429abcdef error"), true, false, true},
 	}
 
 	for _, tt := range tests {
@@ -199,19 +203,41 @@ func TestClassifyError_Permanent(t *testing.T) {
 }
 
 func TestClassifyError_Retryable(t *testing.T) {
-	tests := []error{
-		fmt.Errorf("500 internal error"),
-		fmt.Errorf("502 bad gateway"),
-		fmt.Errorf("503 service unavailable"),
+	retryableTests := []error{
+		fmt.Errorf("HTTP 500"),
+		fmt.Errorf("HTTP 状态码 502"),
+		fmt.Errorf("code=503, msg=service unavailable"),
+		fmt.Errorf("code: 504, msg=gateway timeout"),
+		fmt.Errorf(`{"code": 500, "msg": "internal server error"}`),
+		fmt.Errorf("request failed: bad gateway"),
+		fmt.Errorf("HTTP 429"),
 	}
 
-	for _, err := range tests {
+	for _, err := range retryableTests {
 		d := ClassifyError(err, false)
 		if !d.ShouldRetry {
 			t.Errorf("可重试错误 %q 应该重试", err)
 		}
 		if !d.IsRealFailure {
 			t.Errorf("服务端错误 %q 应计为真实失败", err)
+		}
+	}
+
+	nonRetryableTests := []error{
+		fmt.Errorf("创建文件夹失败: code=10000, msg=Invalid folder name, log_id=20260827123450000000000000000000"),
+		fmt.Errorf("token=boxcn502abcdef upload error"),
+		fmt.Errorf("token=fld503xyz not found"),
+		fmt.Errorf("operation failed with code=10024, log_id=20260504123456"),
+		fmt.Errorf("normal business error with log_id 500123"),
+	}
+
+	for _, err := range nonRetryableTests {
+		d := ClassifyError(err, false)
+		if d.ShouldRetry {
+			t.Errorf("非可重试错误（如含 500/502/503 的 log_id/token）%q 不应重试", err)
+		}
+		if !d.IsRealFailure {
+			t.Errorf("业务错误 %q 应计为真实失败", err)
 		}
 	}
 }
@@ -338,5 +364,24 @@ func TestGetRetryWaitDuration_ExponentialGrowth(t *testing.T) {
 			t.Errorf("attempt %d 的最大等待时间 %.2f 不应明显小于 attempt %d 的 %.2f",
 				attempt+1, maxWait[attempt+1], attempt, maxWait[attempt])
 		}
+	}
+}
+
+// TestDoWithRetry_NonIdempotentWriteSafety 验证非幂等写操作遇到包含 500/429 的普通 log_id/token 时不被误重试
+func TestDoWithRetry_NonIdempotentWriteSafety(t *testing.T) {
+	calls := 0
+	result := DoWithRetry(func() (string, http.Header, error) {
+		calls++
+		// 模拟非幂等写操作返回了业务错误，但 log_id 含有 500
+		return "", nil, fmt.Errorf("创建节点失败: code=10020, msg=Invalid folder, log_id=20260827123450000000000000000000")
+	}, RetryConfig{
+		MaxRetries: 3,
+	})
+
+	if result.Err == nil {
+		t.Fatal("期望返回错误，但得到了成功")
+	}
+	if calls != 1 {
+		t.Fatalf("非幂等错误不应因为 log_id 含有 500 而被重试，期望调用 1 次，实际调用了 %d 次", calls)
 	}
 }
