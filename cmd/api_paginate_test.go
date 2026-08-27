@@ -64,7 +64,7 @@ func TestMergeAPIPages_PreservesLargeInts(t *testing.T) {
 			},
 		},
 	}
-	merged, err := mergeAPIPages(pages, false)
+	merged, err := mergeAPIPages(pages, false, "items")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestMergeAPIPages_TruncatedPreservesCursor(t *testing.T) {
 			},
 		},
 	}
-	merged, err := mergeAPIPages(pages, true)
+	merged, err := mergeAPIPages(pages, true, "items")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +399,80 @@ func TestRunAPI_PageAllAmbiguousArraysError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("不得继续翻页, calls=%d", calls)
+	}
+}
+
+func TestMergeAPIPages_MismatchDoesNotSkip(t *testing.T) {
+	pages := []map[string]any{
+		{"data": map[string]any{"items": []any{map[string]any{"id": "1"}}, "has_more": true}},
+		{"data": map[string]any{"records": []any{map[string]any{"id": "2"}}, "has_more": false}},
+	}
+	if _, err := mergeAPIPages(pages, false, "items"); err == nil {
+		t.Fatal("字段不一致不得静默跳过第 2 页")
+	}
+}
+
+func TestRunAPI_PageAllMismatchedFieldError(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+	calls := 0
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-fake","expire":7200}`)
+			return
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page_token") == "" {
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"1"}],"has_more":true,"page_token":"n1"}}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"records":[{"id":"2"}],"has_more":false}}`)
+	})
+	defer cleanup()
+	cmd := newTestAPICmd()
+	apiAs = "bot"
+	apiPageAll = true
+	apiPageDelayMs = 0
+	err := cmd.RunE(cmd, []string{"GET", "/open-apis/im/v1/chats"})
+	if err == nil || !strings.Contains(err.Error(), "列表字段") {
+		t.Fatalf("两页字段不一致应非零退出, err=%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d want 2", calls)
+	}
+}
+
+func TestRunAPI_PageAllTerminalMissingFieldError(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+	calls := 0
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-fake","expire":7200}`)
+			return
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page_token") == "" {
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"1"}],"has_more":true,"page_token":"n1"}}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"has_more":false}}`)
+	})
+	defer cleanup()
+	cmd := newTestAPICmd()
+	apiAs = "bot"
+	apiPageAll = true
+	apiPageDelayMs = 0
+	err := cmd.RunE(cmd, []string{"GET", "/open-apis/im/v1/chats"})
+	if err == nil || !strings.Contains(err.Error(), "列表字段") {
+		t.Fatalf("终页缺少列表字段应非零退出, err=%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d want 2", calls)
 	}
 }
 

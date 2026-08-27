@@ -555,6 +555,7 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 	var lastResp *larkcore.ApiResp
 	token := initial
 	truncated := false
+	listField := ""
 
 	for page := 1; ; page++ {
 		if limit > 0 && page > limit {
@@ -599,14 +600,24 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 		if data != nil {
 			hasMore, hasMoreOK = data["has_more"].(bool)
 		}
+		if page == 1 {
+			if hasMore {
+				field, ferr := resolveAPIArrayField(data)
+				if ferr != nil {
+					return fmt.Errorf("分页第 %d 页无法继续翻页: %w", page, ferr)
+				}
+				listField = field
+			}
+		} else {
+			if err := requireExactArrayField(data, listField, page); err != nil {
+				return err
+			}
+		}
 		pages = append(pages, obj)
 
 		if !hasMoreOK || !hasMore {
 			truncated = false
 			break
-		}
-		if _, err := resolveAPIArrayField(data); err != nil {
-			return fmt.Errorf("分页第 %d 页无法继续翻页: %w", page, err)
 		}
 		next, kind := pageCursorFromData(data)
 		if kind == "nonstring" {
@@ -629,7 +640,7 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 		}
 	}
 
-	merged, err := mergeAPIPages(pages, truncated)
+	merged, err := mergeAPIPages(pages, truncated, listField)
 	if err != nil {
 		return err
 	}
@@ -704,7 +715,20 @@ func resolveAPIArrayField(data map[string]any) (string, error) {
 	return "", fmt.Errorf("响应含多个未知列表字段 %s，拒绝按字母猜测", strings.Join(unknown, "/"))
 }
 
-func mergeAPIPages(pages []map[string]any, truncated bool) (map[string]any, error) {
+func requireExactArrayField(data map[string]any, field string, page int) error {
+	if field == "" {
+		return fmt.Errorf("分页第 %d 页缺少已锁定的列表字段", page)
+	}
+	if data == nil {
+		return fmt.Errorf("分页第 %d 页 data 不是对象，缺少列表字段 %q", page, field)
+	}
+	if _, ok := data[field].([]any); !ok {
+		return fmt.Errorf("分页第 %d 页列表字段 %q 缺失或不是数组", page, field)
+	}
+	return nil
+}
+
+func mergeAPIPages(pages []map[string]any, truncated bool, listField string) (map[string]any, error) {
 	if len(pages) == 0 {
 		return map[string]any{}, nil
 	}
@@ -719,22 +743,22 @@ func mergeAPIPages(pages []map[string]any, truncated bool) (map[string]any, erro
 		}
 		return nil, fmt.Errorf("分页聚合失败：首页 data 不是对象")
 	}
-	field, err := resolveAPIArrayField(data)
-	if err != nil {
-		if len(pages) == 1 && !truncated {
-			return first, nil
+	field := listField
+	if field == "" {
+		resolved, err := resolveAPIArrayField(data)
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
+		field = resolved
 	}
 	var merged []any
-	for _, p := range pages {
+	for i, p := range pages {
 		d, _ := p["data"].(map[string]any)
-		if d == nil {
-			continue
+		if err := requireExactArrayField(d, field, i+1); err != nil {
+			return nil, err
 		}
-		if items, ok := d[field].([]any); ok {
-			merged = append(merged, items...)
-		}
+		items, _ := d[field].([]any)
+		merged = append(merged, items...)
 	}
 	outData := make(map[string]any, len(data)+4)
 	for k, v := range data {
