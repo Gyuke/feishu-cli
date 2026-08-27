@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
@@ -33,73 +37,188 @@ type SearchMessagesResult struct {
 	HasMore    bool     // 是否有更多
 }
 
-// SearchMessages 搜索消息
-// 注意：此 API 需要 User Access Token
+const (
+	messagesSearchDefaultPageSize = 20
+	messagesSearchMaxPageSize     = 50
+)
+
+func clampMessagesSearchPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return messagesSearchDefaultPageSize
+	}
+	if pageSize > messagesSearchMaxPageSize {
+		return messagesSearchMaxPageSize
+	}
+	return pageSize
+}
+
+func isUnixSeconds(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeMessagesSearchTime(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if isUnixSeconds(s) {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			return time.Unix(n, 0).Format(time.RFC3339)
+		}
+	}
+	return s
+}
+
+func mapMessagesSearchChatType(chatType string) string {
+	switch chatType {
+	case "group_chat", "group":
+		return "group"
+	case "p2p_chat", "p2p":
+		return "p2p"
+	default:
+		return chatType
+	}
+}
+
+func mapMessagesSearchAttachmentType(messageType string) string {
+	switch messageType {
+	case "media":
+		return "video"
+	default:
+		return messageType
+	}
+}
+
+func extractSearchMessageID(item any) string {
+	switch v := item.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if meta, ok := v["meta_data"].(map[string]any); ok {
+			if id, _ := meta["message_id"].(string); id != "" {
+				return id
+			}
+		}
+		if id, _ := v["message_id"].(string); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// buildMessagesSearchBody 构造 POST /im/v1/messages/search 的 current filter body。
+func buildMessagesSearchBody(opts SearchMessagesOptions) (map[string]any, error) {
+	filter := map[string]any{}
+	start := normalizeMessagesSearchTime(opts.StartTime)
+	end := normalizeMessagesSearchTime(opts.EndTime)
+	if start != "" && end != "" {
+		st, err1 := time.Parse(time.RFC3339, start)
+		et, err2 := time.Parse(time.RFC3339, end)
+		if err1 == nil && err2 == nil && st.After(et) {
+			return nil, fmt.Errorf("搜索消息失败: 起始时间不能晚于结束时间")
+		}
+	}
+	if start != "" || end != "" {
+		tr := map[string]any{}
+		if start != "" {
+			tr["start_time"] = start
+		}
+		if end != "" {
+			tr["end_time"] = end
+		}
+		filter["time_range"] = tr
+	}
+	if len(opts.ChatIDs) > 0 {
+		filter["chat_ids"] = opts.ChatIDs
+	}
+	if len(opts.FromIDs) > 0 {
+		filter["from_ids"] = opts.FromIDs
+	}
+	if opts.MessageType != "" {
+		filter["include_attachment_types"] = []string{mapMessagesSearchAttachmentType(opts.MessageType)}
+	}
+	if opts.FromType != "" {
+		filter["from_types"] = []string{opts.FromType}
+	}
+	if chatType := mapMessagesSearchChatType(opts.ChatType); chatType != "" {
+		filter["chat_type"] = chatType
+	}
+	if len(opts.AtChatterIDs) > 0 {
+		filter["at_chatter_ids"] = opts.AtChatterIDs
+	}
+
+	body := map[string]any{"query": opts.Query}
+	if len(filter) > 0 {
+		body["filter"] = filter
+	}
+	return body, nil
+}
+
+// SearchMessages 搜索消息。
+// 走 current POST /open-apis/im/v1/messages/search（支持 User / Tenant 身份）。
 func SearchMessages(opts SearchMessagesOptions, userAccessToken string) (*SearchMessagesResult, error) {
-	client, err := GetClient()
+	cli, err := GetClient()
 	if err != nil {
 		return nil, err
 	}
 
-	bodyBuilder := larksearch.NewCreateMessageReqBodyBuilder().
-		Query(opts.Query)
-
-	if len(opts.FromIDs) > 0 {
-		bodyBuilder.FromIds(opts.FromIDs)
-	}
-	if len(opts.ChatIDs) > 0 {
-		bodyBuilder.ChatIds(opts.ChatIDs)
-	}
-	if opts.MessageType != "" {
-		bodyBuilder.MessageType(opts.MessageType)
-	}
-	if len(opts.AtChatterIDs) > 0 {
-		bodyBuilder.AtChatterIds(opts.AtChatterIDs)
-	}
-	if opts.FromType != "" {
-		bodyBuilder.FromType(opts.FromType)
-	}
-	if opts.ChatType != "" {
-		bodyBuilder.ChatType(opts.ChatType)
-	}
-	if opts.StartTime != "" {
-		bodyBuilder.StartTime(opts.StartTime)
-	}
-	if opts.EndTime != "" {
-		bodyBuilder.EndTime(opts.EndTime)
+	body, err := buildMessagesSearchBody(opts)
+	if err != nil {
+		return nil, err
 	}
 
-	reqBuilder := larksearch.NewCreateMessageReqBuilder().
-		Body(bodyBuilder.Build())
-
-	if opts.PageSize > 0 {
-		reqBuilder.PageSize(opts.PageSize)
-	}
+	q := url.Values{}
+	q.Set("page_size", strconv.Itoa(clampMessagesSearchPageSize(opts.PageSize)))
 	if opts.PageToken != "" {
-		reqBuilder.PageToken(opts.PageToken)
+		q.Set("page_token", opts.PageToken)
 	}
-	if opts.UserIDType != "" {
-		reqBuilder.UserIdType(opts.UserIDType)
-	}
+	apiPath := "/open-apis/im/v1/messages/search?" + q.Encode()
 
-	// 使用 User Access Token 调用 API
-	resp, err := client.Search.Message.Create(Context(), reqBuilder.Build(),
-		UserTokenOption(userAccessToken)...)
+	tokenType, tokenOpts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Post(Context(), apiPath, body, tokenType, tokenOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("搜索消息失败: %w", err)
 	}
-
-	if !resp.Success() {
-		return nil, fmt.Errorf("搜索消息失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("搜索消息失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
-	result := &SearchMessagesResult{
-		MessageIDs: resp.Data.Items,
-		PageToken:  StringVal(resp.Data.PageToken),
-		HasMore:    BoolVal(resp.Data.HasMore),
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items     []any  `json:"items"`
+			PageToken string `json:"page_token"`
+			HasMore   bool   `json:"has_more"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析搜索消息响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("搜索消息失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
-	return result, nil
+	ids := make([]string, 0, len(apiResp.Data.Items))
+	for _, item := range apiResp.Data.Items {
+		if id := extractSearchMessageID(item); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return &SearchMessagesResult{
+		MessageIDs: ids,
+		PageToken:  apiResp.Data.PageToken,
+		HasMore:    apiResp.Data.HasMore,
+	}, nil
 }
 
 // SearchAppsOptions 搜索应用的选项

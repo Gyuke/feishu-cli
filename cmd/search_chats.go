@@ -11,11 +11,11 @@ import (
 var searchChatsCmd = &cobra.Command{
 	Use:   "search-chats",
 	Short: "搜索群聊",
-	Long: `搜索飞书群聊列表。
+	Long: `搜索飞书群聊列表（POST /open-apis/im/v2/chats/search）。
 
 参数:
   --user-id-type   用户 ID 类型 (open_id/union_id/user_id)，默认 open_id
-  --query          关键词搜索
+  --query          关键词搜索（含连字符的词会自动加引号）
   --page-token     分页标记
   --page-size      分页大小 (1-100)，默认 50
   --output, -o     输出格式 (json)

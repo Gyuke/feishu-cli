@@ -11,14 +11,15 @@ import (
 var calendarEventSearchCmd = &cobra.Command{
 	Use:   "event-search",
 	Short: "搜索日程",
-	Long: `在指定日历中搜索日程。
+	Long: `在指定日历中搜索日程（POST /calendars/{id}/events/search_event）。
 
 参数:
   --calendar-id, -c   日历 ID（必填）
   --query, -q         搜索关键词（必填）
-  --start             搜索起始时间，RFC3339 格式（可选）
-  --end               搜索结束时间，RFC3339 格式（可选）
-  --page-size         每页数量（可选）
+  --start             搜索起始时间，RFC3339 格式（可选，写入 filter.time_range）
+  --end               搜索结束时间，RFC3339 格式（可选，写入 filter.time_range）
+  --attendee-ids      参与人 ID，逗号分隔（ou_/oc_/omm_，可选）
+  --page-size         每页数量（1-30，默认 20）
   --page-token        分页标记（可选）
 
 示例:
@@ -36,11 +37,20 @@ var calendarEventSearchCmd = &cobra.Command{
 		query, _ := cmd.Flags().GetString("query")
 		startTime, _ := cmd.Flags().GetString("start")
 		endTime, _ := cmd.Flags().GetString("end")
+		attendeeIDs, _ := cmd.Flags().GetString("attendee-ids")
 		pageToken, _ := cmd.Flags().GetString("page-token")
 		pageSize, _ := cmd.Flags().GetInt("page-size")
 		output, _ := cmd.Flags().GetString("output")
 
-		events, nextPageToken, err := client.SearchEvents(calendarID, query, startTime, endTime, pageToken, pageSize, token)
+		events, nextPageToken, err := client.SearchEventsWithParams(client.SearchEventsParams{
+			CalendarID:  calendarID,
+			Query:       query,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			AttendeeIDs: splitAndTrim(attendeeIDs),
+			PageToken:   pageToken,
+			PageSize:    pageSize,
+		}, token)
 		if err != nil {
 			return err
 		}
@@ -81,9 +91,10 @@ func init() {
 	calendarCmd.AddCommand(calendarEventSearchCmd)
 	calendarEventSearchCmd.Flags().StringP("calendar-id", "c", "", "日历 ID（必填）")
 	calendarEventSearchCmd.Flags().StringP("query", "q", "", "搜索关键词（必填）")
-	calendarEventSearchCmd.Flags().String("start", "", "搜索起始时间，RFC3339 格式")
-	calendarEventSearchCmd.Flags().String("end", "", "搜索结束时间，RFC3339 格式")
-	calendarEventSearchCmd.Flags().Int("page-size", 0, "每页数量")
+	calendarEventSearchCmd.Flags().String("start", "", "搜索起始时间，RFC3339 格式（filter.time_range.start_time）")
+	calendarEventSearchCmd.Flags().String("end", "", "搜索结束时间，RFC3339 格式（filter.time_range.end_time）")
+	calendarEventSearchCmd.Flags().String("attendee-ids", "", "参与人 ID，逗号分隔（ou_ 用户 / oc_ 群 / omm_ 会议室）")
+	calendarEventSearchCmd.Flags().Int("page-size", 0, "每页数量（1-30）")
 	calendarEventSearchCmd.Flags().String("page-token", "", "分页标记")
 	calendarEventSearchCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	calendarEventSearchCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")

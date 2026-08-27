@@ -29,8 +29,8 @@ var searchMessagesCmd = &cobra.Command{
   --message-type  消息类型过滤（file/image/media）
   --chat-type     会话类型（group_chat/p2p_chat）
   --from-type     发送者类型（bot/user）
-  --start-time    消息发送起始时间（Unix 时间戳，秒）
-  --end-time      消息发送结束时间（Unix 时间戳，秒）
+  --start-time    消息发送起始时间（RFC3339 或 Unix 秒，写入 filter.time_range）
+  --end-time      消息发送结束时间（RFC3339 或 Unix 秒，写入 filter.time_range）
   --page-size     每页数量（默认 20）
   --page-token    分页 token
   --page-all      自动翻页拉取全部结果（配合 --page-limit 限制页数）
@@ -249,8 +249,8 @@ func init() {
 	searchMessagesCmd.Flags().String("message-type", "", "消息类型（file/image/media）")
 	searchMessagesCmd.Flags().String("chat-type", "", "会话类型（group_chat/p2p_chat）")
 	searchMessagesCmd.Flags().String("from-type", "", "发送者类型（bot/user）")
-	searchMessagesCmd.Flags().String("start-time", "", "消息发送起始时间（Unix 时间戳）")
-	searchMessagesCmd.Flags().String("end-time", "", "消息发送结束时间（Unix 时间戳）")
+	searchMessagesCmd.Flags().String("start-time", "", "消息发送起始时间（RFC3339 或 Unix 秒）")
+	searchMessagesCmd.Flags().String("end-time", "", "消息发送结束时间（RFC3339 或 Unix 秒）")
 	searchMessagesCmd.Flags().Int("page-size", 20, "每页数量")
 	searchMessagesCmd.Flags().String("page-token", "", "分页 token")
 	searchMessagesCmd.Flags().String("user-id-type", "open_id", "用户 ID 类型（open_id/union_id/user_id）")

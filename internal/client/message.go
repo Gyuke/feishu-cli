@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -772,9 +771,14 @@ type SearchChatsResult struct {
 	HasMore   bool
 }
 
+const (
+	chatSearchDefaultPageSize = 20
+	chatSearchMaxPageSize     = 100
+)
+
 // SearchChats searches for chats.
-// When query is provided, uses the Search API (server-side filtering).
-// When query is empty, falls back to List API with client-side filtering.
+// When query is provided, uses POST /open-apis/im/v2/chats/search.
+// When query is empty, falls back to List API.
 func SearchChats(opts SearchChatsOptions, userAccessToken string) (*SearchChatsResult, error) {
 	client, err := GetClient()
 	if err != nil {
@@ -791,42 +795,99 @@ func SearchChats(opts SearchChatsOptions, userAccessToken string) (*SearchChatsR
 	return searchChatsWithListAPI(client, opts, userAccessToken)
 }
 
-// searchChatsWithSearchAPI uses GET /open-apis/im/v1/chats/search for server-side query filtering.
+func clampChatSearchPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return chatSearchDefaultPageSize
+	}
+	if pageSize > chatSearchMaxPageSize {
+		return chatSearchMaxPageSize
+	}
+	return pageSize
+}
+
+func normalizeChatSearchQuery(query string) string {
+	if !strings.Contains(query, "-") {
+		return query
+	}
+	if unquoted, err := strconv.Unquote(query); err == nil {
+		query = unquoted
+	}
+	return strconv.Quote(query)
+}
+
+func chatInfoFromSearchItem(item map[string]any) *ChatInfo {
+	meta, _ := item["meta_data"].(map[string]any)
+	if meta == nil {
+		meta = item
+	}
+	info := &ChatInfo{}
+	if v, _ := meta["chat_id"].(string); v != "" {
+		info.ChatID = v
+	}
+	if v, _ := meta["name"].(string); v != "" {
+		info.Name = v
+	}
+	if v, _ := meta["description"].(string); v != "" {
+		info.Description = v
+	}
+	if v, _ := meta["owner_id"].(string); v != "" {
+		info.OwnerID = v
+	}
+	if v, ok := meta["external"].(bool); ok {
+		info.External = v
+	}
+	if info.ChatID == "" && info.Name == "" {
+		return nil
+	}
+	return info
+}
+
+// searchChatsWithSearchAPI uses POST /open-apis/im/v2/chats/search.
 func searchChatsWithSearchAPI(client *lark.Client, opts SearchChatsOptions, userAccessToken string) (*SearchChatsResult, error) {
-	reqBuilder := larkim.NewSearchChatReqBuilder().
-		UserIdType(opts.UserIDType).
-		Query(opts.Query)
-
-	if opts.PageSize > 0 {
-		reqBuilder.PageSize(opts.PageSize)
+	body := map[string]any{
+		"query": normalizeChatSearchQuery(opts.Query),
 	}
+	q := url.Values{}
+	q.Set("page_size", strconv.Itoa(clampChatSearchPageSize(opts.PageSize)))
 	if opts.PageToken != "" {
-		reqBuilder.PageToken(opts.PageToken)
+		q.Set("page_token", opts.PageToken)
 	}
+	apiPath := "/open-apis/im/v2/chats/search?" + q.Encode()
 
-	resp, err := client.Im.Chat.Search(Context(), reqBuilder.Build(), UserTokenOption(userAccessToken)...)
+	tokenType, tokenOpts := resolveTokenOpts(userAccessToken)
+	resp, err := client.Post(Context(), apiPath, body, tokenType, tokenOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("搜索群聊失败: %w", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("搜索群聊失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
 
-	if !resp.Success() {
-		return nil, fmt.Errorf("搜索群聊失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items     []map[string]any `json:"items"`
+			PageToken string           `json:"page_token"`
+			HasMore   bool             `json:"has_more"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析搜索群聊响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("搜索群聊失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
 	result := &SearchChatsResult{
-		PageToken: StringVal(resp.Data.PageToken),
-		HasMore:   BoolVal(resp.Data.HasMore),
+		PageToken: apiResp.Data.PageToken,
+		HasMore:   apiResp.Data.HasMore,
 	}
-	for _, chat := range resp.Data.Items {
-		result.Items = append(result.Items, &ChatInfo{
-			ChatID:      StringVal(chat.ChatId),
-			Name:        StringVal(chat.Name),
-			Description: StringVal(chat.Description),
-			OwnerID:     StringVal(chat.OwnerId),
-			External:    BoolVal(chat.External),
-		})
+	for _, item := range apiResp.Data.Items {
+		if info := chatInfoFromSearchItem(item); info != nil {
+			result.Items = append(result.Items, info)
+		}
 	}
-
 	return result, nil
 }
 
@@ -1321,65 +1382,111 @@ type BatchGetMessagesResult struct {
 	MergeForwardSubMessages map[string][]*larkim.Message
 }
 
-// BatchGetMessages 批量获取消息详情，并发调用 GetMessage（限 5 并发，保持入参顺序）。
+const messagesMGetBatchSize = 50
+
+// BatchGetMessages 批量获取消息详情，使用 GET /im/v1/messages/mget，每批最多 50 个 ID。
 //
-// cardContentType 透传给每次 GetMessage 调用；空字符串则维持原渲染版返回。
-// 每次 GetMessage 内部会自动展开 merge_forward 子消息，结果聚合到返回值的 map 中。
-// 任一消息获取失败即整批返回错误（严格模式）。
+// cardContentType 透传到 query；空字符串则不传，保持原渲染版返回。
+// 每批成功后统一展开 merge_forward。严格模式：批次失败或入参 ID 缺失即报错。
 func BatchGetMessages(messageIDs []string, userAccessToken, cardContentType string) (*BatchGetMessagesResult, error) {
 	return batchGetMessages(messageIDs, userAccessToken, cardContentType, false)
 }
 
-// BatchGetMessagesBestEffort 与 BatchGetMessages 相同，但单条 GetMessage 失败时跳过该条
-// （对应 Messages[i] 留 nil），不中断整批——用于 enrich「尽力补全」语义：搜索结果会跨
-// 大量会话返回消息 ID，个别消息可能因撤回 / 退群 / 无可见性而 GetMessage 失败，best-effort
-// 保证一条坏消息不会让整页 / 整次 --page-all 富化结果归零。
+// BatchGetMessagesBestEffort 与 BatchGetMessages 相同，但批次失败或个别 ID 缺失时跳过
+// （对应 Messages[i] 留 nil），不中断整批——用于 enrich「尽力补全」语义。
 func BatchGetMessagesBestEffort(messageIDs []string, userAccessToken, cardContentType string) (*BatchGetMessagesResult, error) {
 	return batchGetMessages(messageIDs, userAccessToken, cardContentType, true)
 }
 
-func batchGetMessages(messageIDs []string, userAccessToken, cardContentType string, bestEffort bool) (*BatchGetMessagesResult, error) {
-	const batchGetMessagesConcurrency = 5
-	results := make([]*larkim.Message, len(messageIDs))
-	errs := make([]error, len(messageIDs))
-	subMap := make(map[string][]*larkim.Message)
-	var subMu sync.Mutex
-
-	sem := make(chan struct{}, batchGetMessagesConcurrency)
-	var wg sync.WaitGroup
-	for i, id := range messageIDs {
-		i, id := i, id
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			msgResult, err := GetMessage(id, userAccessToken, cardContentType)
-			if err != nil {
-				errs[i] = fmt.Errorf("获取消息 %s 失败: %w", id, err)
-				return
-			}
-			results[i] = msgResult.Message
-			if msgResult.Message != nil && len(msgResult.SubMessages) > 0 {
-				containerID := StringVal(msgResult.Message.MessageId)
-				if containerID != "" {
-					subMu.Lock()
-					subMap[containerID] = msgResult.SubMessages
-					subMu.Unlock()
-				}
-			}
-		}()
+func buildMessagesMGetPath(ids []string, cardContentType string) string {
+	q := url.Values{}
+	q.Set("with_sender_name", "true")
+	if cardContentType != "" {
+		q.Set("card_msg_content_type", cardContentType)
 	}
-	wg.Wait()
-	if !bestEffort {
-		for _, err := range errs {
-			if err != nil {
-				return nil, err
+	for _, id := range ids {
+		q.Add("message_ids", id)
+	}
+	return "/open-apis/im/v1/messages/mget?" + q.Encode()
+}
+
+func mgetMessages(ids []string, userAccessToken, cardContentType string) ([]*larkim.Message, []byte, error) {
+	cli, err := GetClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Get(Context(), buildMessagesMGetPath(ids, cardContentType), nil, tokenType, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("批量获取消息失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.RawBody, fmt.Errorf("批量获取消息失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+
+	var parsed listMessagesRawResponse
+	if err := json.Unmarshal(resp.RawBody, &parsed); err != nil {
+		return nil, resp.RawBody, fmt.Errorf("批量获取消息失败: 解析响应失败: %w", err)
+	}
+	if parsed.Code != 0 {
+		return nil, resp.RawBody, fmt.Errorf("批量获取消息失败: code=%d, msg=%s", parsed.Code, parsed.Msg)
+	}
+	harvestSenderNames(resp.RawBody)
+	return parsed.Data.Items, resp.RawBody, nil
+}
+
+func chunkStrings(items []string, chunkSize int) [][]string {
+	if len(items) == 0 || chunkSize <= 0 {
+		return nil
+	}
+	chunks := make([][]string, 0, (len(items)+chunkSize-1)/chunkSize)
+	for start := 0; start < len(items); start += chunkSize {
+		end := start + chunkSize
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+	return chunks
+}
+
+func batchGetMessages(messageIDs []string, userAccessToken, cardContentType string, bestEffort bool) (*BatchGetMessagesResult, error) {
+	results := make([]*larkim.Message, len(messageIDs))
+	offset := 0
+	for _, batch := range chunkStrings(messageIDs, messagesMGetBatchSize) {
+		items, _, err := mgetMessages(batch, userAccessToken, cardContentType)
+		if err != nil {
+			if bestEffort {
+				offset += len(batch)
+				continue
+			}
+			return nil, err
+		}
+		found := make(map[string]*larkim.Message, len(items))
+		for _, msg := range items {
+			if msg == nil {
+				continue
+			}
+			id := StringVal(msg.MessageId)
+			if id != "" {
+				found[id] = msg
 			}
 		}
+		for i, id := range batch {
+			msg, ok := found[id]
+			if !ok {
+				if bestEffort {
+					continue
+				}
+				return nil, fmt.Errorf("获取消息 %s 失败: 消息不存在", id)
+			}
+			results[offset+i] = msg
+		}
+		offset += len(batch)
 	}
+
 	out := &BatchGetMessagesResult{Messages: results}
-	if len(subMap) > 0 {
+	if subMap := expandMergeForwardForContainers(results, userAccessToken); len(subMap) > 0 {
 		out.MergeForwardSubMessages = subMap
 	}
 	return out, nil

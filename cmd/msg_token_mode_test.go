@@ -93,7 +93,7 @@ func TestMsgListContainerIDFallsBackToTenantTokenWhenNotLoggedIn(t *testing.T) {
 	var searchCalled bool
 
 	cleanup := stubCmdFeishuServer(t, tenantTokenHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/open-apis/search/v2/message" {
+		if r.URL.Path == "/open-apis/im/v1/messages/search" {
 			searchCalled = true
 		}
 		if r.URL.Path != "/open-apis/im/v1/messages" {
@@ -154,7 +154,7 @@ func TestMsgHistoryContainerIDFallsBackToTenantTokenWhenNotLoggedIn(t *testing.T
 
 	cleanup := stubCmdFeishuServer(t, tenantTokenHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/open-apis/search/v2/message":
+		case r.URL.Path == "/open-apis/im/v1/messages/search":
 			searchCalled = true
 		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/"):
 			contactCalled = true

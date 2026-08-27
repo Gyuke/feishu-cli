@@ -45,8 +45,17 @@ func TestListMessagesViaSearchKeepsMergeForwardSubMessages(t *testing.T) {
 	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/open-apis/search/v2/message":
-			_, _ = fmt.Fprintf(w, `{"code":0,"msg":"success","data":{"items":["%s"],"has_more":false,"page_token":""}}`, rootID)
+		case r.URL.Path == "/open-apis/im/v1/messages/search":
+			_, _ = fmt.Fprintf(w, `{"code":0,"msg":"success","data":{"items":[{"meta_data":{"message_id":"%s"}}],"has_more":false,"page_token":""}}`, rootID)
+		case r.URL.Path == "/open-apis/im/v1/messages/mget":
+			got := r.URL.Query().Get("card_msg_content_type")
+			if got != client.CardMsgContentTypeUser && got != client.CardMsgContentTypeRaw {
+				t.Errorf("mget card_msg_content_type = %q, want %q or %q", got, client.CardMsgContentTypeUser, client.CardMsgContentTypeRaw)
+			}
+			if r.URL.Query().Get("with_sender_name") != "true" {
+				t.Errorf("mget with_sender_name = %q, want true", r.URL.Query().Get("with_sender_name"))
+			}
+			_, _ = fmt.Fprintf(w, `{"code":0,"msg":"success","data":{"items":[{"message_id":"%s","msg_type":"merge_forward","body":{"content":"placeholder"}}]}}`, rootID)
 		case r.URL.Path == "/open-apis/im/v1/messages/"+rootID:
 			got := r.URL.Query().Get("card_msg_content_type")
 			if got != client.CardMsgContentTypeUser && got != client.CardMsgContentTypeRaw {

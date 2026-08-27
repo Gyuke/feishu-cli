@@ -3,7 +3,11 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	larkcalendar "github.com/larksuite/oapi-sdk-go/v3/service/calendar/v4"
@@ -568,76 +572,191 @@ func MgetInstanceRelationInfo(calendarID string, instanceIDs []string, needNotes
 	return result, nil
 }
 
-// SearchEvents 搜索日程
+const (
+	searchEventDefaultPageSize = 20
+	searchEventMaxPageSize     = 30
+)
+
+// SearchEventsParams 是 current search_event 端点的请求参数。
+type SearchEventsParams struct {
+	CalendarID  string
+	Query       string
+	StartTime   string // RFC3339，写入 filter.time_range.start_time
+	EndTime     string // RFC3339，写入 filter.time_range.end_time
+	AttendeeIDs []string
+	PageToken   string
+	PageSize    int
+}
+
+type searchEventTimeRange struct {
+	StartTime string `json:"start_time,omitempty"`
+	EndTime   string `json:"end_time,omitempty"`
+}
+
+type searchEventFilter struct {
+	AttendeeUserIDs []string              `json:"attendee_user_ids,omitempty"`
+	AttendeeChatIDs []string              `json:"attendee_chat_ids,omitempty"`
+	MeetingRoomIDs  []string              `json:"meeting_room_ids,omitempty"`
+	TimeRange       *searchEventTimeRange `json:"time_range,omitempty"`
+}
+
+type searchEventRequestBody struct {
+	Query  string             `json:"query"`
+	Filter *searchEventFilter `json:"filter,omitempty"`
+}
+
+func buildSearchEventFilter(startTime, endTime string, attendeeIDs []string) *searchEventFilter {
+	var userIDs, chatIDs, roomIDs []string
+	for _, id := range attendeeIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(id, "ou_"):
+			userIDs = append(userIDs, id)
+		case strings.HasPrefix(id, "oc_"):
+			chatIDs = append(chatIDs, id)
+		case strings.HasPrefix(id, "omm_"):
+			roomIDs = append(roomIDs, id)
+		default:
+			userIDs = append(userIDs, id)
+		}
+	}
+	var tr *searchEventTimeRange
+	if startTime != "" || endTime != "" {
+		tr = &searchEventTimeRange{StartTime: startTime, EndTime: endTime}
+	}
+	if len(userIDs) == 0 && len(chatIDs) == 0 && len(roomIDs) == 0 && tr == nil {
+		return nil
+	}
+	return &searchEventFilter{
+		AttendeeUserIDs: userIDs,
+		AttendeeChatIDs: chatIDs,
+		MeetingRoomIDs:  roomIDs,
+		TimeRange:       tr,
+	}
+}
+
+func clampSearchEventPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return searchEventDefaultPageSize
+	}
+	if pageSize > searchEventMaxPageSize {
+		return searchEventMaxPageSize
+	}
+	return pageSize
+}
+
+func searchEventTimeText(info *struct {
+	Date     string `json:"date"`
+	DateTime string `json:"date_time"`
+	Timezone string `json:"timezone"`
+}) string {
+	if info == nil {
+		return ""
+	}
+	if info.DateTime != "" {
+		return info.DateTime
+	}
+	return info.Date
+}
+
+// SearchEvents 搜索日程（POST /calendars/{id}/events/search_event）。
 func SearchEvents(calendarID, query string, startTime, endTime string, pageToken string, pageSize int, userAccessToken string) ([]*CalendarEvent, string, error) {
-	client, err := GetClient()
+	return SearchEventsWithParams(SearchEventsParams{
+		CalendarID: calendarID,
+		Query:      query,
+		StartTime:  startTime,
+		EndTime:    endTime,
+		PageToken:  pageToken,
+		PageSize:   pageSize,
+	}, userAccessToken)
+}
+
+// SearchEventsWithParams 按 current search_event 契约搜索日程。
+func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) ([]*CalendarEvent, string, error) {
+	cli, err := GetClient()
 	if err != nil {
 		return nil, "", err
 	}
-
-	bodyBuilder := larkcalendar.NewSearchCalendarEventReqBodyBuilder().
-		Query(query)
-
-	filterBuilder := larkcalendar.NewEventSearchFilterBuilder()
-	hasFilter := false
-
-	if startTime != "" {
-		startTs, err := parseTimeToTimestamp(startTime)
-		if err != nil {
-			return nil, "", fmt.Errorf("解析开始时间失败: %w", err)
-		}
-		startTimeInfo := larkcalendar.NewTimeInfoBuilder().Timestamp(startTs).Build()
-		filterBuilder.StartTime(startTimeInfo)
-		hasFilter = true
+	if strings.TrimSpace(params.CalendarID) == "" {
+		return nil, "", fmt.Errorf("搜索日程失败: 日历 ID 不能为空")
 	}
 
-	if endTime != "" {
-		endTs, err := parseTimeToTimestamp(endTime)
-		if err != nil {
-			return nil, "", fmt.Errorf("解析结束时间失败: %w", err)
-		}
-		endTimeInfo := larkcalendar.NewTimeInfoBuilder().Timestamp(endTs).Build()
-		filterBuilder.EndTime(endTimeInfo)
-		hasFilter = true
+	body := searchEventRequestBody{
+		Query:  params.Query,
+		Filter: buildSearchEventFilter(params.StartTime, params.EndTime, params.AttendeeIDs),
 	}
 
-	if hasFilter {
-		bodyBuilder.Filter(filterBuilder.Build())
+	q := url.Values{}
+	q.Set("page_size", strconv.Itoa(clampSearchEventPageSize(params.PageSize)))
+	if params.PageToken != "" {
+		q.Set("page_token", params.PageToken)
 	}
+	apiPath := fmt.Sprintf("/open-apis/calendar/v4/calendars/%s/events/search_event?%s",
+		url.PathEscape(params.CalendarID), q.Encode())
 
-	reqBuilder := larkcalendar.NewSearchCalendarEventReqBuilder().
-		CalendarId(calendarID).
-		Body(bodyBuilder.Build())
-
-	if pageSize > 0 {
-		reqBuilder.PageSize(pageSize)
-	}
-	if pageToken != "" {
-		reqBuilder.PageToken(pageToken)
-	}
-
-	resp, err := client.Calendar.CalendarEvent.Search(Context(), reqBuilder.Build(), UserTokenOption(userAccessToken)...)
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Post(Context(), apiPath, body, tokenType, opts...)
 	if err != nil {
 		return nil, "", fmt.Errorf("搜索日程失败: %w", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("搜索日程失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
 
-	if !resp.Success() {
-		return nil, "", fmt.Errorf("搜索日程失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []struct {
+				MetaData *struct {
+					EventID  string `json:"event_id"`
+					Summary  string `json:"summary"`
+					AppLink  string `json:"app_link"`
+					IsAllDay bool   `json:"is_all_day"`
+					Start    *struct {
+						Date     string `json:"date"`
+						DateTime string `json:"date_time"`
+						Timezone string `json:"timezone"`
+					} `json:"start"`
+					End *struct {
+						Date     string `json:"date"`
+						DateTime string `json:"date_time"`
+						Timezone string `json:"timezone"`
+					} `json:"end"`
+				} `json:"meta_data"`
+			} `json:"items"`
+			PageToken string `json:"page_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, "", fmt.Errorf("解析搜索日程响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, "", fmt.Errorf("搜索日程失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
 	var events []*CalendarEvent
-	if resp.Data != nil && resp.Data.Items != nil {
-		for _, item := range resp.Data.Items {
-			events = append(events, convertEvent(item))
+	for _, item := range apiResp.Data.Items {
+		if item.MetaData == nil {
+			continue
 		}
+		meta := item.MetaData
+		ev := &CalendarEvent{
+			EventID:   meta.EventID,
+			Summary:   meta.Summary,
+			AppLink:   meta.AppLink,
+			StartTime: searchEventTimeText(meta.Start),
+			EndTime:   searchEventTimeText(meta.End),
+		}
+		if meta.Start != nil && meta.Start.Timezone != "" {
+			ev.TimeZone = meta.Start.Timezone
+		}
+		events = append(events, ev)
 	}
-
-	var nextPageToken string
-	if resp.Data != nil {
-		nextPageToken = StringVal(resp.Data.PageToken)
-	}
-
-	return events, nextPageToken, nil
+	return events, apiResp.Data.PageToken, nil
 }
 
 // AddEventAttendees 添加日程参与人
@@ -827,126 +946,214 @@ type AgendaEvent struct {
 	IsAllDay       bool   `json:"is_all_day,omitempty"`
 }
 
-// ListCalendarAgenda 获取日程实例视图（展开重复日程为独立实例）
-// 使用 raw HTTP 方式调用 instance_view API（SDK 未封装此接口）
-func ListCalendarAgenda(calendarID string, startTime, endTime int64, pageSize int, pageToken string, userAccessToken string) ([]*AgendaEvent, string, bool, error) {
-	client, err := GetClient()
+const (
+	maxInstanceViewSpanSeconds       = 40 * 24 * 60 * 60
+	minSplitWindowSeconds            = 2 * 60 * 60
+	maxInstanceViewSplitDepth        = 10
+	larkErrCalendarTimeRangeExceeded = 193103 // instance_view 查询窗口超过 40 天
+	larkErrCalendarTooManyInstances  = 193104 // instance_view 单窗口超过 1000 个实例
+)
+
+type agendaTimeInfo struct {
+	Timestamp string `json:"timestamp"`
+	Date      string `json:"date"`
+	Timezone  string `json:"timezone"`
+}
+
+type agendaRawItem struct {
+	EventID        string          `json:"event_id"`
+	Summary        string          `json:"summary"`
+	StartTime      *agendaTimeInfo `json:"start_time"`
+	EndTime        *agendaTimeInfo `json:"end_time"`
+	Status         string          `json:"status"`
+	FreeBusyStatus string          `json:"free_busy_status"`
+	SelfRSVP       string          `json:"self_rsvp_status"`
+}
+
+func instanceViewPath(calendarID string, startTime, endTime int64) string {
+	q := url.Values{}
+	q.Set("start_time", strconv.FormatInt(startTime, 10))
+	q.Set("end_time", strconv.FormatInt(endTime, 10))
+	return fmt.Sprintf("/open-apis/calendar/v4/calendars/%s/events/instance_view?%s",
+		url.PathEscape(calendarID), q.Encode())
+}
+
+func fetchInstanceViewRange(calendarID string, startTime, endTime int64, depth int, userAccessToken string) ([]agendaRawItem, error) {
+	if depth > maxInstanceViewSplitDepth {
+		return nil, fmt.Errorf("获取日程视图失败: 拆分次数过多")
+	}
+	if startTime > endTime {
+		return nil, nil
+	}
+	span := endTime - startTime
+	if span > maxInstanceViewSpanSeconds {
+		mid := startTime + span/2
+		return fetchInstanceViewSplit(calendarID, startTime, mid, endTime, depth, userAccessToken)
+	}
+
+	cli, err := GetClient()
 	if err != nil {
-		return nil, "", false, err
+		return nil, err
 	}
-
-	// 构建 URL 和查询参数
-	apiPath := fmt.Sprintf("/open-apis/calendar/v4/calendars/%s/events/instance_view?start_time=%s&end_time=%s",
-		calendarID,
-		strconv.FormatInt(startTime, 10),
-		strconv.FormatInt(endTime, 10),
-	)
-	if pageSize > 0 {
-		apiPath += fmt.Sprintf("&page_size=%d", pageSize)
-	}
-	if pageToken != "" {
-		apiPath += "&page_token=" + pageToken
-	}
-
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-
-	resp, err := client.Get(Context(), apiPath, nil, tokenType, opts...)
+	resp, err := cli.Get(Context(), instanceViewPath(calendarID, startTime, endTime), nil, tokenType, opts...)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("获取日程视图失败: %w", err)
+		return nil, fmt.Errorf("获取日程视图失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取日程视图失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
-	if resp.StatusCode != 200 {
-		return nil, "", false, fmt.Errorf("获取日程视图失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
-	}
-
-	// 解析响应
 	var apiResp struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
-			Items     []json.RawMessage `json:"items"`
-			PageToken string            `json:"page_token"`
-			HasMore   bool              `json:"has_more"`
+			Items []agendaRawItem `json:"items"`
 		} `json:"data"`
 	}
-
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
-		return nil, "", false, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
-
 	if apiResp.Code != 0 {
-		return nil, "", false, fmt.Errorf("获取日程视图失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
-	}
-
-	// 逐个解析事件实例，提取时间字段
-	var events []*AgendaEvent
-	for _, raw := range apiResp.Data.Items {
-		var item struct {
-			EventID   string `json:"event_id"`
-			Summary   string `json:"summary"`
-			StartTime *struct {
-				Timestamp string `json:"timestamp"`
-				Date      string `json:"date"`
-				Timezone  string `json:"timezone"`
-			} `json:"start_time"`
-			EndTime *struct {
-				Timestamp string `json:"timestamp"`
-				Date      string `json:"date"`
-				Timezone  string `json:"timezone"`
-			} `json:"end_time"`
-			Status         string `json:"status"`
-			FreeBusyStatus string `json:"free_busy_status"`
-			SelfRSVP       string `json:"self_rsvp_status"`
+		apiErr := fmt.Errorf("获取日程视图失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+		switch apiResp.Code {
+		case larkErrCalendarTimeRangeExceeded:
+			mid := startTime + span/2
+			if mid <= startTime {
+				return nil, apiErr
+			}
+			return fetchInstanceViewSplit(calendarID, startTime, mid, endTime, depth, userAccessToken)
+		case larkErrCalendarTooManyInstances:
+			if span <= minSplitWindowSeconds {
+				return nil, apiErr
+			}
+			mid := startTime + span/2
+			return fetchInstanceViewSplit(calendarID, startTime, mid, endTime, depth, userAccessToken)
+		default:
+			return nil, apiErr
 		}
+	}
+	return apiResp.Data.Items, nil
+}
 
-		if err := json.Unmarshal(raw, &item); err != nil {
+func fetchInstanceViewSplit(calendarID string, startTime, mid, endTime int64, depth int, userAccessToken string) ([]agendaRawItem, error) {
+	left, err := fetchInstanceViewRange(calendarID, startTime, mid, depth+1, userAccessToken)
+	if err != nil {
+		return nil, err
+	}
+	right, err := fetchInstanceViewRange(calendarID, mid+1, endTime, depth+1, userAccessToken)
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
+}
+
+func agendaTimeKey(info *agendaTimeInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.Timestamp != "" {
+		return info.Timestamp
+	}
+	return info.Date
+}
+
+func agendaStartUnix(info *agendaTimeInfo) int64 {
+	if info == nil {
+		return 0
+	}
+	if info.Timestamp != "" {
+		n, err := strconv.ParseInt(info.Timestamp, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+	if info.Date != "" {
+		if t, err := time.ParseInLocation("2006-01-02", info.Date, time.UTC); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
+}
+
+func exclusiveAllDayEndDate(dateStr string) string {
+	t, err := time.ParseInLocation("2006-01-02", dateStr, time.UTC)
+	if err != nil {
+		return dateStr
+	}
+	return t.Add(-1 * time.Second).Format("2006-01-02")
+}
+
+func convertAgendaRawItem(item agendaRawItem) *AgendaEvent {
+	event := &AgendaEvent{
+		EventID:        item.EventID,
+		Summary:        item.Summary,
+		Status:         item.Status,
+		FreeBusyStatus: item.FreeBusyStatus,
+		SelfRSVP:       item.SelfRSVP,
+	}
+	if item.StartTime != nil {
+		tz := item.StartTime.Timezone
+		if item.StartTime.Timestamp != "" {
+			event.StartTime = timestampToRFC3339(item.StartTime.Timestamp, tz)
+		} else if item.StartTime.Date != "" {
+			event.StartTime = item.StartTime.Date
+			event.IsAllDay = true
+		}
+	}
+	if item.EndTime != nil {
+		tz := item.EndTime.Timezone
+		if item.EndTime.Timestamp != "" {
+			event.EndTime = timestampToRFC3339(item.EndTime.Timestamp, tz)
+		} else if item.EndTime.Date != "" {
+			event.EndTime = exclusiveAllDayEndDate(item.EndTime.Date)
+		}
+	}
+	return event
+}
+
+func dedupeAndSortAgendaItems(items []agendaRawItem) []agendaRawItem {
+	seen := make(map[string]bool, len(items))
+	out := make([]agendaRawItem, 0, len(items))
+	for _, item := range items {
+		key := item.EventID + "|" + agendaTimeKey(item.StartTime) + "|" + agendaTimeKey(item.EndTime)
+		if seen[key] {
 			continue
 		}
+		seen[key] = true
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return agendaStartUnix(out[i].StartTime) < agendaStartUnix(out[j].StartTime)
+	})
+	return out
+}
 
-		event := &AgendaEvent{
-			EventID:        item.EventID,
-			Summary:        item.Summary,
-			Status:         item.Status,
-			FreeBusyStatus: item.FreeBusyStatus,
-			SelfRSVP:       item.SelfRSVP,
-		}
-
-		// 提取开始时间：优先 timestamp，回退 date（全天日程）
-		if item.StartTime != nil {
-			tz := ""
-			if item.StartTime.Timezone != "" {
-				tz = item.StartTime.Timezone
-			}
-			if item.StartTime.Timestamp != "" {
-				event.StartTime = timestampToRFC3339(item.StartTime.Timestamp, tz)
-			} else if item.StartTime.Date != "" {
-				event.StartTime = item.StartTime.Date
-				event.IsAllDay = true
-			}
-		}
-
-		// 提取结束时间
-		if item.EndTime != nil {
-			tz := ""
-			if item.EndTime.Timezone != "" {
-				tz = item.EndTime.Timezone
-			}
-			if item.EndTime.Timestamp != "" {
-				event.EndTime = timestampToRFC3339(item.EndTime.Timestamp, tz)
-			} else if item.EndTime.Date != "" {
-				event.EndTime = item.EndTime.Date
-			}
-		}
-
-		events = append(events, event)
+// ListCalendarAgenda 获取日程实例视图（展开重复日程为独立实例）。
+// instance_view 无服务端分页：pageSize/pageToken 被忽略，窗口超过 40 天或命中
+// 193104 时由客户端拆分、去重；全天结束日按排他日期转为含当日。
+func ListCalendarAgenda(calendarID string, startTime, endTime int64, pageSize int, pageToken string, userAccessToken string) ([]*AgendaEvent, string, bool, error) {
+	_ = pageSize
+	_ = pageToken
+	if strings.TrimSpace(calendarID) == "" {
+		calendarID = "primary"
 	}
 
-	var nextPageToken string
-	var hasMore bool
-	nextPageToken = apiResp.Data.PageToken
-	hasMore = apiResp.Data.HasMore
+	items, err := fetchInstanceViewRange(calendarID, startTime, endTime, 0, userAccessToken)
+	if err != nil {
+		return nil, "", false, err
+	}
+	items = dedupeAndSortAgendaItems(items)
 
-	return events, nextPageToken, hasMore, nil
+	events := make([]*AgendaEvent, 0, len(items))
+	for _, item := range items {
+		if item.Status == "cancelled" {
+			continue
+		}
+		events = append(events, convertAgendaRawItem(item))
+	}
+	// instance_view 无伪分页：切分在客户端完成，对外始终一页。
+	return events, "", false, nil
 }
 
 // 辅助函数：转换日程对象

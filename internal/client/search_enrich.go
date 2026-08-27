@@ -176,9 +176,9 @@ func SearchMessagesEnriched(opts SearchMessagesOptions, userAccessToken, cardCon
 		return nil, searchRes, nil
 	}
 
-	// 用 best-effort 批量取详情：搜索跨大量会话，个别消息可能因撤回 / 退群 / 无可见性
-	// 而 GetMessage 失败，best-effort 跳过失败的（Messages[i] 留 nil），不让一条坏消息
-	// 拖垮整页 / 整次 --page-all 富化（与本模块 ResolveSenderNames/ResolveChatNames 的容错风格一致）。
+	// 用 best-effort 批量取详情：走 /im/v1/messages/mget（每批最多 50）。
+	// 搜索跨大量会话，个别消息可能因撤回 / 退群 / 无可见性缺失，best-effort 跳过失败的
+	// （Messages[i] 留 nil），不让一条坏消息拖垮整页 / 整次 --page-all 富化。
 	batch, err := BatchGetMessagesBestEffort(searchRes.MessageIDs, userAccessToken, cardContentType)
 	if err != nil {
 		return nil, searchRes, err

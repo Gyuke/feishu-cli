@@ -19,9 +19,9 @@ var calendarAgendaCmd = &cobra.Command{
 
 可选参数:
   --start-date    起始日期，格式 YYYY-MM-DD（默认今天）
-  --end-date      结束日期，格式 YYYY-MM-DD（默认起始日期的下一天）
-  --page-size     每页数量
-  --page-token    分页标记
+  --end-date      结束日期，格式 YYYY-MM-DD（默认起始日期当天，包含端）
+  --page-size     已忽略（instance_view 无服务端分页）
+  --page-token    已忽略（instance_view 无服务端分页）
   --output, -o    输出格式（json）
 
 示例:
@@ -160,8 +160,8 @@ func init() {
 	calendarCmd.AddCommand(calendarAgendaCmd)
 	calendarAgendaCmd.Flags().String("start-date", "", "起始日期，格式 YYYY-MM-DD（默认今天）")
 	calendarAgendaCmd.Flags().String("end-date", "", "结束日期，格式 YYYY-MM-DD（默认起始日期的下一天）")
-	calendarAgendaCmd.Flags().Int("page-size", 0, "每页数量")
-	calendarAgendaCmd.Flags().String("page-token", "", "分页标记")
+	calendarAgendaCmd.Flags().Int("page-size", 0, "已忽略：instance_view 无服务端分页")
+	calendarAgendaCmd.Flags().String("page-token", "", "已忽略：instance_view 无服务端分页")
 	calendarAgendaCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	calendarAgendaCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")
 }

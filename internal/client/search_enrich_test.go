@@ -78,9 +78,9 @@ func TestSearchMessagesEnrichedIntegration(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/open-apis/search/v2/message":
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":["om_1"],"has_more":false,"page_token":""}}`)
-		case r.URL.Path == "/open-apis/im/v1/messages/om_1":
+		case r.URL.Path == "/open-apis/im/v1/messages/search":
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"meta_data":{"message_id":"om_1"}}],"has_more":false,"page_token":""}}`)
+		case r.URL.Path == "/open-apis/im/v1/messages/mget":
 			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{
 				"message_id":"om_1","msg_type":"text","create_time":"1700000000000","chat_id":"oc_1",
 				"sender":{"id":"ou_sender","sender_type":"user","id_type":"open_id"},
@@ -147,16 +147,14 @@ func TestSearchMessagesEnrichedBestEffort(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/open-apis/search/v2/message":
-			// 三条结果，中间一条不可读
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":["om_ok1","om_bad","om_ok2"],"has_more":false,"page_token":""}}`)
-		case "/open-apis/im/v1/messages/om_ok1":
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"message_id":"om_ok1","msg_type":"text","create_time":"1700000000000","chat_id":"oc_1","body":{"content":"{\"text\":\"first\"}"}}]}}`)
-		case "/open-apis/im/v1/messages/om_bad":
-			// 模拟不可读消息（撤回/退群/无可见性）→ GetMessage 返回 error
-			_, _ = io.WriteString(w, `{"code":230002,"msg":"message not found"}`)
-		case "/open-apis/im/v1/messages/om_ok2":
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"message_id":"om_ok2","msg_type":"text","create_time":"1700000001000","chat_id":"oc_1","body":{"content":"{\"text\":\"third\"}"}}]}}`)
+		case "/open-apis/im/v1/messages/search":
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"meta_data":{"message_id":"om_ok1"}},{"meta_data":{"message_id":"om_bad"}},{"meta_data":{"message_id":"om_ok2"}}],"has_more":false,"page_token":""}}`)
+		case "/open-apis/im/v1/messages/mget":
+			// mget 只回可读消息，om_bad 缺失；best-effort 跳过该条
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[
+				{"message_id":"om_ok1","msg_type":"text","create_time":"1700000000000","chat_id":"oc_1","body":{"content":"{\"text\":\"first\"}"}},
+				{"message_id":"om_ok2","msg_type":"text","create_time":"1700000001000","chat_id":"oc_1","body":{"content":"{\"text\":\"third\"}"}}
+			]}}`)
 		case "/open-apis/im/v1/chats/oc_1":
 			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"name":"群","chat_id":"oc_1"}}`)
 		default:
