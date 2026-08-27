@@ -104,6 +104,7 @@ feishu-cli auth login --domain <domain> --recommend
 feishu-cli auth refresh
 feishu-cli auth logout
 feishu-cli auth token --as user|bot|auto    # v1.29+ 导出 token 给 curl/Python 用
+feishu-cli auth token --bind-legacy-app --as user  # 把旧版未绑定 app_id 的 token.json 绑到当前应用
 feishu-cli config init
 feishu-cli config get app_id
 feishu-cli config create-app --save
@@ -119,8 +120,18 @@ feishu-cli profile current
 | `--as` | 输出 | 适用场景 |
 |---|---|---|
 | `user` | User Access Token（`eyJhbGc...`，自动刷新） | 真人身份调 API，含 `auth login` 授权过的 scope |
-| `bot` | Tenant Access Token（`t-g10...`，2h 有效） | App 身份，调 tenant scope API |
+| `bot` | Tenant Access Token（`t-g10...`，2h 有效；Accounts OAuth v3 `client_credentials`） | App 身份，调 tenant scope API |
 | `auto`（默认） | 优先 user，没有再回退 bot | 兼容兜底 |
+
+`--as bot` 与 `--user-access-token` 不能同时出现（会报错，而不是静默覆盖）。
+
+旧版 `token.json` 没有 `app_id` 时：access 仍有效可以继续用；一旦需要刷新，必须先：
+
+```bash
+feishu-cli auth token --bind-legacy-app --as user
+```
+
+或重新 `auth login`。绑定不会改 token 本身，也不会把另一套 App 的 token 偷偷接到当前应用。
 
 ```bash
 # 给 curl 用
@@ -270,6 +281,9 @@ feishu-cli auth login --recommend                                # 全部域（�
 | `missing_refresh_token` | 开通 `offline_access` 后 `auth logout && auth login` |
 | `99991672` | access token 无效或过期，重新登录 |
 | `99991679` | 应用未开通 scope，先在开放平台开通权限 |
+| `token.json 未绑定 app_id` | 执行 `auth token --bind-legacy-app` 或重新 `auth login`，不要手改 token 文件把别的 App 填进去 |
+| `token.json 绑定的 app_id 与当前应用不一致` | 切回匹配的 `--profile` / `--bot-app-id`，或对该应用重新登录 |
+| `拒绝自定义远端 host` / `拒绝非 loopback 的 HTTP` | 默认只允许官方 HTTPS。确认不是配错 `base_url` 之后，才设 `FEISHU_ALLOW_CUSTOM_BASE_URL=1`（远端 HTTP 另需 `FEISHU_ALLOW_INSECURE_HTTP=1`） |
 
 ## 环境诊断（doctor）
 
@@ -389,5 +403,6 @@ profile 名校验规则 `[A-Za-z0-9_-]{1,64}`（禁止 `.` / `..` / `profiles` /
 5. 错误信息明确指向 scope/token 时直接 `auth check`；只有错误不明确（"突然不工作"/网络异常）才用 `doctor` 缩小问题面，不要混用。
 6. 用户可能有多个飞书 Bot、或没指明用哪个时，先 `feishu-cli profile list --json`。看 `effective` 和 `env_overrides`，不要猜。
 7. 单次指定用 `feishu-cli --profile <name> <cmd>`（或 `FEISHU_PROFILE=<name>`）。不要为了跑一条业务去 `profile use`——会改全局指针。
-8. `--as bot` 只选身份，不选 App。看到 `env_overrides.app_id/app_secret=true` 必须告诉用户：环境变量仍会覆盖所选 profile 的 App 凭证；要用 profile YAML 中的凭证必须先 unset 对应变量。
+8. `--as bot` 只选身份，不选 App。看到 `env_overrides.app_id/app_secret=true` 必须告诉用户：环境变量仍会覆盖所选 profile 的 App 凭证；要用 profile YAML 中的凭证必须先 unset 对应变量。不要把 `--as bot` 和 `--user-access-token` 一起传。
 9. `app_id` 可以出现在回复里；`app_secret` / 裸 token / `device_code` 禁止写入回复或文件。
+10. 自定义 `base_url`、明文 HTTP、带 body 的跨源重定向默认拒绝。未得到用户明确授权不要设置 `FEISHU_ALLOW_*` opt-in。

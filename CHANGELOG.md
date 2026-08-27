@@ -4,6 +4,17 @@
 
 版本格式：[MAJOR.MINOR.PATCH](https://semver.org/lang/zh-CN/)
 
+## [Unreleased]
+
+### 修复 — 认证 / Token / SDK 传输安全
+
+- SDK client 用 SHA-256 指纹检测 App Secret 变化：同长度轮换也会重建 client，进程内不保存 secret 明文。
+- `auth token --as bot` 改为官方 Accounts OAuth v3 `POST /oauth/v3/token`（`grant_type=client_credentials`，form 编码），带超时、响应体大小限制、HTTP 与业务错误校验。
+- 显式 `--user-access-token` 与 `--as bot` 同时出现时直接报错，不再静默忽略其中一方。
+- `token.json` 改为 0600 临时文件 + fsync + rename 原子写入；刷新在跨进程文件锁下执行 reload → check → refresh → commit，写失败保留旧文件。
+- `token.json` 增加 `app_id` 绑定：与当前选中 App 不一致时 fail closed。旧版无绑定文件在 **access 仍有效时可读**；**刷新前**必须显式 `feishu-cli auth token --bind-legacy-app`（或重新 `auth login`），不会静默换主体。
+- `base_url` 默认只允许官方 HTTPS（`open.feishu.cn` / `open.larksuite.com`）；loopback HTTP 仅用于本机开发/测试。自定义远端 host、非 loopback HTTP、HTTPS→HTTP 或带 body 的跨源重定向必须分别设置 `FEISHU_ALLOW_CUSTOM_BASE_URL` / `FEISHU_ALLOW_INSECURE_HTTP` / `FEISHU_ALLOW_CROSS_ORIGIN_REDIRECT`（或对应配置项）。跨源重定向会剥离 `Authorization`，避免 App Secret 被外送。
+
 ## [v1.36.0] - 2026-07-22
 
 本版为一次全域能力补齐：消息读取发送者名字服务端回填、CLI 交互健壮性守卫、OKR 全量接线、多维表格结构化过滤 DSL、电子表格类型保真读取闭环、大文档选择性读取、卡片交互回调与审批 v4 事件订阅，以及邮件/会议/纪要/云盘/任务/日历多域新命令。

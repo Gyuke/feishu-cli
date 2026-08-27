@@ -681,11 +681,14 @@ feishu-cli auth logout
 - 要真正拿到某个 scope，仍然必须先在飞书开放平台应用权限管理页面开通它
 
 **Token 管理**：
-- Token 保存在 `~/.feishu-cli/token.json`，Access Token 有效期约 2 小时
-- Access Token 过期时自动使用 Refresh Token 刷新（Refresh Token 有效期 30 天）
+- Token 保存在 `~/.feishu-cli/token.json`（0600，原子写入），Access Token 有效期约 2 小时
+- Access Token 过期时自动使用 Refresh Token 刷新（跨进程锁，避免两个进程消耗同一 refresh token）
+- 新登录写入的 `token.json` 带 `app_id` 绑定；与当前 App 不一致时拒绝使用。升级前遗留的无绑定文件：access 未过期仍可用，刷新前需 `feishu-cli auth token --bind-legacy-app`（不更换 token）或重新 `auth login`
+- `auth token --as bot` 走官方 Accounts OAuth v3 `client_credentials`；不可与 `--user-access-token` 同时使用
 - `offline_access` 由 CLI 自动追加，无需手动声明
 - Token 优先级：`--user-access-token` 参数 > `FEISHU_USER_ACCESS_TOKEN` 环境变量 > `token.json` > `config.yaml`
 - 审批任务查询会缓存当前登录用户资料到 `~/.feishu-cli/user_profile.json`，登录态变化或执行 `auth logout` 时会自动清理
+- `base_url` 默认仅官方 HTTPS。自定义远端 / 明文 HTTP / 带 body 跨源重定向需显式 opt-in（`FEISHU_ALLOW_CUSTOM_BASE_URL`、`FEISHU_ALLOW_INSECURE_HTTP`、`FEISHU_ALLOW_CROSS_ORIGIN_REDIRECT`）
 
 </details>
 
