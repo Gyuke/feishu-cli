@@ -150,6 +150,11 @@ func TestNormalizeAPIPath(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "完整 URL 必须 https",
+			input:   "http://open.feishu.cn/open-apis/foo",
+			wantErr: true,
+		},
+		{
 			name:    "空字符串报错",
 			input:   "",
 			wantErr: true,
@@ -212,6 +217,7 @@ func TestParseQueryParams(t *testing.T) {
 		{"纯空白", "   ", map[string]string{}, false},
 		{"简单字符串", `{"a":"1","b":"x"}`, map[string]string{"a": "1", "b": "x"}, false},
 		{"整数自动转字符串", `{"page_size":100}`, map[string]string{"page_size": "100"}, false},
+		{"大整数不四舍五入", `{"message_id":9007199254740993}`, map[string]string{"message_id": "9007199254740993"}, false},
 		{"小数保留", `{"x":1.5}`, map[string]string{"x": "1.5"}, false},
 		{"布尔值", `{"flag":true}`, map[string]string{"flag": "true"}, false},
 		{"null 被跳过", `{"a":"1","b":null}`, map[string]string{"a": "1"}, false},
@@ -448,6 +454,24 @@ func TestRunAPI_PreflightValidation(t *testing.T) {
 			wantErrSub: "解析 --params 失败",
 		},
 		{
+			name:       "非法 --timeout",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiTimeoutSec = 0 },
+			wantErrSub: "--timeout 必须 > 0",
+		},
+		{
+			name:       "非法 --page-limit",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiPageLimit = -1 },
+			wantErrSub: "--page-limit 必须 >= 0",
+		},
+		{
+			name:       "非法 --page-delay",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiPageDelayMs = -1 },
+			wantErrSub: "--page-delay 必须 >= 0",
+		},
+		{
 			name:       "非法 --data JSON",
 			args:       []string{"POST", "/open-apis/im/v1/messages"},
 			setup:      func(cmd *cobra.Command) { apiData = "not-json" },
@@ -457,6 +481,7 @@ func TestRunAPI_PreflightValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			resetAPIFlags()
 			atomic.StoreInt32(&serverHits, 0)
 			cmd := newTestAPICmd()
 			tc.setup(cmd)

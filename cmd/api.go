@@ -124,6 +124,16 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", apiAs)
 	}
 
+	if apiPageLimit < 0 {
+		return fmt.Errorf("--page-limit 必须 >= 0，得到 %d", apiPageLimit)
+	}
+	if apiPageDelayMs < 0 {
+		return fmt.Errorf("--page-delay 必须 >= 0，得到 %d", apiPageDelayMs)
+	}
+	if apiTimeoutSec <= 0 {
+		return fmt.Errorf("--timeout 必须 > 0，得到 %d", apiTimeoutSec)
+	}
+
 	// 校验 --format / --jq 参数合法性（在网络请求与 token 刷新前验证）
 	if apiFormat != "" || apiJQ != "" {
 		if _, err := output.NewOptions(apiFormat, apiJQ); err != nil {
@@ -322,6 +332,9 @@ func normalizeAPIPath(raw string) (string, larkcore.QueryParams, error) {
 		if err != nil {
 			return "", nil, fmt.Errorf("解析 URL 失败: %w", err)
 		}
+		if u.Scheme != "https" {
+			return "", nil, fmt.Errorf("完整 URL 仅支持 https，得到 %q", u.Scheme)
+		}
 		if !isOfficialOpenAPIHost(u.Hostname()) {
 			return "", nil, fmt.Errorf("完整 URL 仅支持官方 OpenAPI host（open.feishu.cn / open.larksuite.com / open.larkoffice.com），得到 %q", u.Hostname())
 		}
@@ -373,8 +386,10 @@ func parseQueryParams(raw string) (larkcore.QueryParams, error) {
 	if strings.TrimSpace(raw) == "" {
 		return q, nil
 	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return nil, fmt.Errorf("--params 必须是 JSON 对象: %w", err)
 	}
 	for k, v := range obj {
@@ -383,8 +398,9 @@ func parseQueryParams(raw string) (larkcore.QueryParams, error) {
 			q.Set(k, tv)
 		case bool:
 			q.Set(k, fmt.Sprintf("%v", tv))
-		case float64: // JSON 数字默认 float64
-			// 整数尽量不带小数点
+		case json.Number:
+			q.Set(k, tv.String())
+		case float64: // 兼容非 UseNumber 路径
 			if tv == float64(int64(tv)) {
 				q.Set(k, fmt.Sprintf("%d", int64(tv)))
 			} else {
@@ -394,15 +410,25 @@ func parseQueryParams(raw string) (larkcore.QueryParams, error) {
 			// 跳过 null
 		case []any:
 			for _, item := range tv {
-				q.Add(k, fmt.Sprintf("%v", item))
+				q.Add(k, stringifyQueryValue(item))
 			}
 		default:
-			// 对象/嵌套 → 序列化为 JSON 字符串
 			b, _ := json.Marshal(tv)
 			q.Set(k, string(b))
 		}
 	}
 	return q, nil
+}
+
+func stringifyQueryValue(v any) string {
+	switch tv := v.(type) {
+	case json.Number:
+		return tv.String()
+	case string:
+		return tv
+	default:
+		return fmt.Sprintf("%v", tv)
+	}
 }
 
 // loadAPIBody 解析 --data / --data-file（互斥）
@@ -520,16 +546,19 @@ func cloneQueryParams(src larkcore.QueryParams) larkcore.QueryParams {
 
 func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, body any, tokenTypes []larkcore.AccessTokenType, userToken string) error {
 	limit := apiPageLimit
-	if limit < 0 {
-		limit = 10
-	}
+	initial := queryParams.Get("page_token")
 	seen := map[string]struct{}{}
+	if initial != "" {
+		seen[initial] = struct{}{}
+	}
 	var pages []map[string]any
 	var lastResp *larkcore.ApiResp
-	token := ""
+	token := initial
+	truncated := false
 
 	for page := 1; ; page++ {
 		if limit > 0 && page > limit {
+			truncated = len(pages) > 0
 			break
 		}
 		q := cloneQueryParams(queryParams)
@@ -573,7 +602,11 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 		pages = append(pages, obj)
 
 		if !hasMoreOK || !hasMore {
+			truncated = false
 			break
+		}
+		if _, err := resolveAPIArrayField(data); err != nil {
+			return fmt.Errorf("分页第 %d 页无法继续翻页: %w", page, err)
 		}
 		next, kind := pageCursorFromData(data)
 		if kind == "nonstring" {
@@ -587,12 +620,19 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 		}
 		seen[next] = struct{}{}
 		token = next
-		if apiPageDelayMs > 0 && (limit == 0 || page < limit) {
+		if limit > 0 && page == limit {
+			truncated = true
+			break
+		}
+		if apiPageDelayMs > 0 {
 			time.Sleep(time.Duration(apiPageDelayMs) * time.Millisecond)
 		}
 	}
 
-	merged := mergeAPIPages(pages)
+	merged, err := mergeAPIPages(pages, truncated)
+	if err != nil {
+		return err
+	}
 	raw, err := marshalPreserveNumbers(merged)
 	if err != nil {
 		return err
@@ -627,45 +667,64 @@ func pageCursorFromData(data map[string]any) (token string, kind string) {
 	return "", "missing"
 }
 
-func findAPIArrayField(data map[string]any) string {
+func resolveAPIArrayField(data map[string]any) (string, error) {
+	if data == nil {
+		return "", fmt.Errorf("响应 data 不是对象，无法识别列表字段")
+	}
 	known := []string{
 		"items", "files", "events", "rooms", "records", "nodes",
 		"members", "departments", "calendar_list", "acl_list", "freebusy_list",
 		"users",
 	}
+	var knownHits []string
 	for _, name := range known {
 		if _, ok := data[name].([]any); ok {
-			return name
+			knownHits = append(knownHits, name)
 		}
 	}
-	var candidates []string
+	if len(knownHits) == 1 {
+		return knownHits[0], nil
+	}
+	if len(knownHits) > 1 {
+		return "", fmt.Errorf("响应含多个可识别列表字段 %s，拒绝猜测", strings.Join(knownHits, "/"))
+	}
+	var unknown []string
 	for k, v := range data {
 		if _, ok := v.([]any); ok {
-			candidates = append(candidates, k)
+			unknown = append(unknown, k)
 		}
 	}
-	sort.Strings(candidates)
-	if len(candidates) > 0 {
-		return candidates[0]
+	if len(unknown) == 1 {
+		return unknown[0], nil
 	}
-	return ""
+	if len(unknown) == 0 {
+		return "", fmt.Errorf("响应没有可识别的列表数组，拒绝继续翻页")
+	}
+	sort.Strings(unknown)
+	return "", fmt.Errorf("响应含多个未知列表字段 %s，拒绝按字母猜测", strings.Join(unknown, "/"))
 }
 
-func mergeAPIPages(pages []map[string]any) map[string]any {
+func mergeAPIPages(pages []map[string]any, truncated bool) (map[string]any, error) {
 	if len(pages) == 0 {
-		return map[string]any{}
+		return map[string]any{}, nil
 	}
-	if len(pages) == 1 {
-		return pages[0]
+	if len(pages) == 1 && !truncated {
+		return pages[0], nil
 	}
 	first := pages[0]
 	data, ok := first["data"].(map[string]any)
 	if !ok {
-		return first
+		if len(pages) == 1 {
+			return first, nil
+		}
+		return nil, fmt.Errorf("分页聚合失败：首页 data 不是对象")
 	}
-	field := findAPIArrayField(data)
-	if field == "" {
-		return pages[len(pages)-1]
+	field, err := resolveAPIArrayField(data)
+	if err != nil {
+		if len(pages) == 1 && !truncated {
+			return first, nil
+		}
+		return nil, err
 	}
 	var merged []any
 	for _, p := range pages {
@@ -677,24 +736,43 @@ func mergeAPIPages(pages []map[string]any) map[string]any {
 			merged = append(merged, items...)
 		}
 	}
-	outData := make(map[string]any, len(data)+2)
+	outData := make(map[string]any, len(data)+4)
 	for k, v := range data {
 		outData[k] = v
 	}
 	outData[field] = merged
 	lastHasMore := false
+	var lastData map[string]any
 	if last, ok := pages[len(pages)-1]["data"].(map[string]any); ok {
+		lastData = last
 		lastHasMore, _ = last["has_more"].(bool)
 	}
 	outData["has_more"] = lastHasMore
-	delete(outData, "page_token")
-	delete(outData, "next_page_token")
+	outData["page_count"] = len(pages)
+	exhausted := !truncated && !lastHasMore
+	if exhausted {
+		delete(outData, "page_token")
+		delete(outData, "next_page_token")
+		delete(outData, "truncated")
+	} else {
+		outData["truncated"] = true
+		delete(outData, "page_token")
+		delete(outData, "next_page_token")
+		if lastData != nil {
+			if v, ok := lastData["page_token"]; ok {
+				outData["page_token"] = v
+			}
+			if v, ok := lastData["next_page_token"]; ok {
+				outData["next_page_token"] = v
+			}
+		}
+	}
 	result := make(map[string]any, len(first)+1)
 	for k, v := range first {
 		result[k] = v
 	}
 	result["data"] = outData
-	return result
+	return result, nil
 }
 
 func marshalPreserveNumbers(v any) ([]byte, error) {
