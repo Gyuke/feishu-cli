@@ -91,12 +91,13 @@ build-windows:
 run: build
 	./$(BUILD_DIR)/$(BINARY_NAME)
 
-## update-meta: Fetch latest API metadata from open.feishu.cn
+## update-meta: Fetch latest API metadata from open.feishu.cn (build-time embed baseline)
 update-meta:
 	@echo "Fetching API metadata from open.feishu.cn..."
-	@curl -s "https://open.feishu.cn/api/tools/open/api_definition?protocol=meta" | \
+	@curl -sS --max-time 10 "https://open.feishu.cn/api/tools/open/api_definition?protocol=meta" | \
 		python3 -c "import sys,json; json.dump(json.load(sys.stdin)['data'], open('internal/registry/meta_data.json','w'), ensure_ascii=False)" \
 		&& echo "Done. $$(wc -c < internal/registry/meta_data.json | tr -d ' ') bytes written."
+	@echo "Runtime overlay still uses the same public endpoint (opt-out: FEISHU_CLI_REMOTE_META=off)."
 
 ## init-config: Initialize configuration file
 init-config: build

@@ -22,61 +22,35 @@ func CollectScopesForProjects(projects []string, identity string) []string {
 		if spec == nil {
 			continue
 		}
-		resources, ok := spec["resources"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for _, resSpec := range resources {
-			resMap, ok := resSpec.(map[string]interface{})
-			if !ok {
-				continue
+		resources, _ := spec["resources"].(map[string]interface{})
+		walkResourceMethods(resources, func(methodMap map[string]interface{}) {
+			if !methodSupportedForIdentity(methodMap, identity) {
+				return
 			}
-			methods, ok := resMap["methods"].(map[string]interface{})
-			if !ok {
-				continue
+			scopes, ok := methodMap["scopes"].([]interface{})
+			if !ok || len(scopes) == 0 {
+				return
 			}
-			for _, methodSpec := range methods {
-				methodMap, ok := methodSpec.(map[string]interface{})
+			bestScope := ""
+			bestScore := -1
+			for _, s := range scopes {
+				str, ok := s.(string)
 				if !ok {
 					continue
 				}
-				if tokens, ok := methodMap["accessTokens"].([]interface{}); ok {
-					supported := false
-					for _, t := range tokens {
-						if ts, ok := t.(string); ok && ts == IdentityToAccessToken(identity) {
-							supported = true
-							break
-						}
-					}
-					if !supported {
-						continue
-					}
+				score := DefaultScopeScore
+				if v, exists := priorities[str]; exists {
+					score = v
 				}
-				scopes, ok := methodMap["scopes"].([]interface{})
-				if !ok || len(scopes) == 0 {
-					continue
-				}
-				bestScope := ""
-				bestScore := -1
-				for _, s := range scopes {
-					str, ok := s.(string)
-					if !ok {
-						continue
-					}
-					score := DefaultScopeScore
-					if v, exists := priorities[str]; exists {
-						score = v
-					}
-					if score > bestScore {
-						bestScore = score
-						bestScope = str
-					}
-				}
-				if bestScope != "" {
-					scopeSet[bestScope] = true
+				if score > bestScore {
+					bestScore = score
+					bestScope = str
 				}
 			}
-		}
+			if bestScope != "" {
+				scopeSet[bestScope] = true
+			}
+		})
 	}
 
 	result := make([]string, 0, len(scopeSet))

@@ -27,11 +27,13 @@ type MergedRegistry struct {
 	Services []map[string]interface{} `json:"services"`
 }
 
-// Init initializes the registry by loading embedded data.
-// Safe to call multiple times (sync.Once).
+// Init initializes the registry: embedded baseline first, then optional remote overlay.
+// Remote fetch errors never fail Init. Safe to call multiple times (sync.Once).
 func Init() {
 	initOnce.Do(func() {
+		configuredBrand = resolveBrand()
 		loadEmbeddedIntoMerged()
+		applyRemoteOverlay()
 		rebuildProjectList()
 	})
 }
@@ -44,12 +46,16 @@ func loadEmbeddedIntoMerged() {
 	if err := json.Unmarshal(embeddedMetaJSON, &reg); err != nil {
 		return
 	}
+	embeddedVersion = reg.Version
+	runtimeVersion = reg.Version
+	overlaySource = ""
 	for _, svc := range reg.Services {
 		name, ok := svc["name"].(string)
 		if !ok || name == "" {
 			continue
 		}
 		mergedServices[name] = svc
+		embeddedServices[name] = svc
 	}
 }
 
@@ -202,7 +208,8 @@ func GetScopeScore(scope string) int {
 }
 
 // CollectAllScopesFromMeta collects all unique scopes from meta_data.json
-// for the given identity. Results are deduplicated and sorted.
+// for the given identity, recursively walking nested resources.
+// Results are deduplicated and sorted.
 func CollectAllScopesFromMeta(identity string) []string {
 	scopeSet := make(map[string]bool)
 	for _, project := range ListFromMetaProjects() {
@@ -210,47 +217,21 @@ func CollectAllScopesFromMeta(identity string) []string {
 		if spec == nil {
 			continue
 		}
-		resources, ok := spec["resources"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for _, resSpec := range resources {
-			resMap, ok := resSpec.(map[string]interface{})
+		resources, _ := spec["resources"].(map[string]interface{})
+		walkResourceMethods(resources, func(methodMap map[string]interface{}) {
+			if !methodSupportedForIdentity(methodMap, identity) {
+				return
+			}
+			scopes, ok := methodMap["scopes"].([]interface{})
 			if !ok {
-				continue
+				return
 			}
-			methods, ok := resMap["methods"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-			for _, methodSpec := range methods {
-				methodMap, ok := methodSpec.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if tokens, ok := methodMap["accessTokens"].([]interface{}); ok {
-					supported := false
-					for _, t := range tokens {
-						if ts, ok := t.(string); ok && ts == IdentityToAccessToken(identity) {
-							supported = true
-							break
-						}
-					}
-					if !supported {
-						continue
-					}
-				}
-				scopes, ok := methodMap["scopes"].([]interface{})
-				if !ok {
-					continue
-				}
-				for _, s := range scopes {
-					if str, ok := s.(string); ok {
-						scopeSet[str] = true
-					}
+			for _, s := range scopes {
+				if str, ok := s.(string); ok {
+					scopeSet[str] = true
 				}
 			}
-		}
+		})
 	}
 
 	result := make([]string, 0, len(scopeSet))
