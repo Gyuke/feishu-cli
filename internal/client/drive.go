@@ -30,15 +30,24 @@ func UploadMedia(filePath string, parentType string, parentNode string, fileName
 	return UploadMediaWithExtra(filePath, parentType, parentNode, fileName, "", firstString(userAccessToken))
 }
 
-// UploadMediaForImport 通过 medias/upload_all 上传临时媒体用于 drive import
-// parent_type 固定为 ccm_import_open，extra 携带 obj_type 和 file_extension
-// 官方实现：/open-apis/drive/v1/medias/upload_all，不会在用户云盘留下中间文件
-func UploadMediaForImport(filePath, fileName, objType, fileExtension, userAccessToken string) (string, error) {
-	client, err := GetClient()
-	if err != nil {
-		return "", err
-	}
+const (
+	driveImportMediaParentType = "ccm_import_open"
+)
 
+// DriveNeedsMultipart 判断是否超过 files/medias 单次上传 20MB 上限。
+func DriveNeedsMultipart(size int64) bool {
+	return size > int64(maxSingleUploadSize)
+}
+
+// UploadMediaForImport 通过 medias 上传临时媒体用于 drive import。
+//
+// 官方协议：
+//   - parent_type 固定 ccm_import_open，extra 携带 obj_type / file_extension
+//   - ≤20MB：POST /medias/upload_all，**省略 parent_node**（不要填 ccm_import_open）
+//   - >20MB：upload_prepare / upload_part / upload_finish，prepare 显式带 parent_node=""
+//
+// 不会在用户云盘留下中间文件。
+func UploadMediaForImport(filePath, fileName, objType, fileExtension, userAccessToken string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("打开文件失败: %w", err)
@@ -49,8 +58,6 @@ func UploadMediaForImport(filePath, fileName, objType, fileExtension, userAccess
 	if err != nil {
 		return "", fmt.Errorf("获取文件信息失败: %w", err)
 	}
-	fileSize := int(stat.Size())
-
 	if fileName == "" {
 		fileName = filepath.Base(filePath)
 	}
@@ -63,28 +70,155 @@ func UploadMediaForImport(filePath, fileName, objType, fileExtension, userAccess
 		return "", fmt.Errorf("构造 extra 字段失败: %w", err)
 	}
 
-	body := larkdrive.NewUploadAllMediaReqBodyBuilder().
-		FileName(fileName).
-		ParentType("ccm_import_open").
-		ParentNode("ccm_import_open").
-		Size(fileSize).
-		Extra(string(extraJSON)).
-		File(file).
-		Build()
+	if DriveNeedsMultipart(stat.Size()) {
+		return uploadMediaForImportMultipart(filePath, fileName, stat.Size(), string(extraJSON), userAccessToken)
+	}
+	return uploadMediaForImportAll(file, fileName, stat.Size(), string(extraJSON), userAccessToken)
+}
 
-	req := larkdrive.NewUploadAllMediaReqBuilder().Body(body).Build()
+func uploadMediaForImportAll(file io.Reader, fileName string, fileSize int64, extra, userAccessToken string) (string, error) {
+	cli, err := GetClient()
+	if err != nil {
+		return "", err
+	}
 
-	resp, err := client.Drive.Media.UploadAll(ContextWithTimeout(downloadTimeout), req, UserTokenOption(userAccessToken)...)
+	// upload_all 省略 parent_node，与官方 lark-cli 一致（staging 在隐式导入区）。
+	fd := larkcore.NewFormdata().
+		AddField("file_name", fileName).
+		AddField("parent_type", driveImportMediaParentType).
+		AddField("size", fmt.Sprintf("%d", fileSize)).
+		AddField("extra", extra).
+		AddFile("file", file)
+
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Post(ContextWithTimeout(downloadTimeout), "/open-apis/drive/v1/medias/upload_all", fd, tokenType, opts...)
 	if err != nil {
 		return "", fmt.Errorf("上传导入媒体失败: %w", err)
 	}
-	if !resp.Success() {
-		return "", fmt.Errorf("上传导入媒体失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("上传导入媒体失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
-	if resp.Data == nil || resp.Data.FileToken == nil {
+
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			FileToken string `json:"file_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return "", fmt.Errorf("解析导入媒体上传响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return "", fmt.Errorf("上传导入媒体失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	if apiResp.Data.FileToken == "" {
 		return "", fmt.Errorf("上传导入媒体成功但未返回 file_token")
 	}
-	return *resp.Data.FileToken, nil
+	return apiResp.Data.FileToken, nil
+}
+
+func uploadMediaForImportMultipart(filePath, fileName string, fileSize int64, extra, userAccessToken string) (string, error) {
+	cli, err := GetClient()
+	if err != nil {
+		return "", err
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+
+	// upload_prepare 必须显式发送 parent_node（即使为空字符串）。
+	prepareResp, err := cli.Post(Context(), "/open-apis/drive/v1/medias/upload_prepare", map[string]any{
+		"file_name":   fileName,
+		"parent_type": driveImportMediaParentType,
+		"parent_node": "",
+		"size":        fileSize,
+		"extra":       extra,
+	}, tokenType, opts...)
+	if err != nil {
+		return "", fmt.Errorf("初始化导入媒体分片上传失败: %w", err)
+	}
+	if prepareResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("初始化导入媒体分片上传失败: HTTP %d, body: %s", prepareResp.StatusCode, string(prepareResp.RawBody))
+	}
+
+	session, err := parseMarkdownMultipartSession(prepareResp.RawBody)
+	if err != nil {
+		return "", fmt.Errorf("初始化导入媒体分片上传失败: %w", err)
+	}
+	expectedBlocks := int((fileSize + session.BlockSize - 1) / session.BlockSize)
+	if session.BlockNum != expectedBlocks {
+		return "", fmt.Errorf("upload_prepare 返回的分片计划不一致: block_size=%d, block_num=%d, expected=%d, size=%d",
+			session.BlockSize, session.BlockNum, expectedBlocks, fileSize)
+	}
+
+	fmt.Fprintf(os.Stderr, "导入媒体分片上传: %s，%d 片 × %s\n", fileName, session.BlockNum, formatSize(int(session.BlockSize)))
+
+	src, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("打开文件失败: %w", err)
+	}
+	defer src.Close()
+
+	buffer := make([]byte, int(session.BlockSize))
+	remaining := fileSize
+	for seq := 0; seq < session.BlockNum; seq++ {
+		chunkSize := session.BlockSize
+		if remaining > 0 && chunkSize > remaining {
+			chunkSize = remaining
+		}
+		n, readErr := io.ReadFull(src, buffer[:int(chunkSize)])
+		if readErr != nil {
+			return "", fmt.Errorf("读取导入媒体分片失败: %w", readErr)
+		}
+		fd := larkcore.NewFormdata().
+			AddField("upload_id", session.UploadID).
+			AddField("seq", fmt.Sprintf("%d", seq)).
+			AddField("size", fmt.Sprintf("%d", n)).
+			AddFile("file", bytes.NewReader(buffer[:n]))
+		partResp, err := cli.Post(ContextWithTimeout(downloadTimeout), "/open-apis/drive/v1/medias/upload_part", fd, tokenType, opts...)
+		if err != nil {
+			return "", fmt.Errorf("上传导入媒体分片 %d/%d 失败: %w", seq+1, session.BlockNum, err)
+		}
+		if partResp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("上传导入媒体分片 %d/%d 失败: HTTP %d, body: %s", seq+1, session.BlockNum, partResp.StatusCode, string(partResp.RawBody))
+		}
+		if code, msg, isErr := parseJSONBusinessError(partResp.RawBody); isErr {
+			return "", fmt.Errorf("上传导入媒体分片 %d/%d 失败: code=%d, msg=%s", seq+1, session.BlockNum, code, msg)
+		}
+		fmt.Fprintf(os.Stderr, "  分片 %d/%d 上传完成 (%s)\n", seq+1, session.BlockNum, formatSize(n))
+		remaining -= int64(n)
+	}
+	if remaining != 0 {
+		return "", fmt.Errorf("upload_prepare 分片计划不一致: 结束后仍剩 %d 字节", remaining)
+	}
+
+	finishResp, err := cli.Post(Context(), "/open-apis/drive/v1/medias/upload_finish", map[string]any{
+		"upload_id": session.UploadID,
+		"block_num": session.BlockNum,
+	}, tokenType, opts...)
+	if err != nil {
+		return "", fmt.Errorf("完成导入媒体分片上传失败: %w", err)
+	}
+	if finishResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("完成导入媒体分片上传失败: HTTP %d, body: %s", finishResp.StatusCode, string(finishResp.RawBody))
+	}
+
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			FileToken string `json:"file_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(finishResp.RawBody, &apiResp); err != nil {
+		return "", fmt.Errorf("解析导入媒体 finish 响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return "", fmt.Errorf("完成导入媒体分片上传失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	if apiResp.Data.FileToken == "" {
+		return "", fmt.Errorf("分片上传完成但未返回 file_token")
+	}
+	return apiResp.Data.FileToken, nil
 }
 
 // UploadMediaWithExtra uploads a file to Feishu drive with extra parameter.
@@ -508,6 +642,41 @@ func CreateFolder(name string, folderToken string, userAccessToken ...string) (s
 	return token, url, nil
 }
 
+// GetRootFolderToken 解析当前身份的 Drive 根目录 token。
+// 官方协议：GET /open-apis/drive/explorer/v2/root_folder/meta，取 data.token。
+// drive move 省略 --folder-token 时必须先取真实 root，不能把空字符串交给 move API。
+func GetRootFolderToken(userAccessToken string) (string, error) {
+	cli, err := GetClient()
+	if err != nil {
+		return "", err
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Get(Context(), "/open-apis/drive/explorer/v2/root_folder/meta", nil, tokenType, opts...)
+	if err != nil {
+		return "", fmt.Errorf("获取根目录 token 失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("获取根目录 token 失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return "", fmt.Errorf("解析根目录元数据失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return "", fmt.Errorf("获取根目录 token 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	if strings.TrimSpace(apiResp.Data.Token) == "" {
+		return "", fmt.Errorf("root_folder/meta 未返回 token")
+	}
+	return apiResp.Data.Token, nil
+}
+
 // MoveFile 移动文件或文件夹
 func MoveFile(fileToken string, targetFolderToken string, fileType string) (string, error) {
 	return MoveFileWithToken(fileToken, targetFolderToken, fileType, "")
@@ -843,8 +1012,9 @@ func parseDownloadJSONError(header http.Header, body []byte) (int, string, bool)
 	return 0, "", false
 }
 
-// maxSingleUploadSize 单次上传的文件大小上限（20MB），超过此大小需使用分片上传
-const maxSingleUploadSize = 20 * 1024 * 1024
+// maxSingleUploadSize 单次上传的文件大小上限（20MB），超过此大小需使用分片上传。
+// 测试可覆盖该阈值以验证 20MB 边界走 multipart，而不必落 20MB 实物文件。
+var maxSingleUploadSize = 20 * 1024 * 1024
 
 // UploadFile 上传文件到飞书云空间，超过 20MB 自动使用分片上传（App Token）
 func UploadFile(filePath, parentToken, fileName string) (string, error) {

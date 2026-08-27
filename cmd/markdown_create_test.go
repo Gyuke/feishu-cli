@@ -24,7 +24,7 @@ func TestMarkdownCreateCmdRegistered(t *testing.T) {
 
 // TestMarkdownCreateFlagsDefaults 验证 flag 注册（content/content-file 二选一）
 func TestMarkdownCreateFlagsDefaults(t *testing.T) {
-	for _, n := range []string{"name", "content", "content-file", "folder-token", "output", "user-access-token"} {
+	for _, n := range []string{"name", "content", "content-file", "folder-token", "wiki-token", "dry-run", "output", "user-access-token"} {
 		if markdownCreateCmd.Flags().Lookup(n) == nil {
 			t.Errorf("--%s missing on create", n)
 		}
@@ -57,12 +57,39 @@ func TestMarkdownFetchCmdRegistered(t *testing.T) {
 	if len(ann) == 0 || ann[0] != "true" {
 		t.Errorf("--file-token should be required, ann=%v", ann)
 	}
-	for _, n := range []string{"output-path", "overwrite", "output"} {
+	for _, n := range []string{"output-path", "overwrite", "output", "version", "dry-run"} {
 		if markdownFetchCmd.Flags().Lookup(n) == nil {
 			t.Errorf("--%s missing on fetch", n)
 		}
 	}
 	if out := markdownFetchCmd.Flags().Lookup("output"); out != nil && out.Shorthand != "o" {
 		t.Errorf("--output shorthand=%q, want o", out.Shorthand)
+	}
+}
+
+func TestMarkdownPatchCmdRegistered(t *testing.T) {
+	if markdownPatchCmd.Use != "patch" {
+		t.Fatalf("Use = %q, want patch", markdownPatchCmd.Use)
+	}
+	found := false
+	for _, sub := range markdownCmd.Commands() {
+		if sub == markdownPatchCmd {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("markdownPatchCmd should be child of markdownCmd")
+	}
+	for _, n := range []string{"file-token", "pattern", "content", "regex", "dry-run"} {
+		if markdownPatchCmd.Flags().Lookup(n) == nil {
+			t.Errorf("--%s missing on patch", n)
+		}
+	}
+}
+
+func TestMarkdownOverwriteFlagsIncludeDryRun(t *testing.T) {
+	if markdownOverwriteCmd.Flags().Lookup("dry-run") == nil {
+		t.Fatal("--dry-run missing on overwrite")
 	}
 }

@@ -824,8 +824,11 @@ feishu-cli drive download --file-token boxxxx --output ./downloads/ --overwrite
 feishu-cli drive download --file-token boxxxx --output ./big.zip --timeout 30m  # 大文件自动 Range 分片兜底
 feishu-cli drive export --token docxxxx --doc-type docx --file-extension markdown --output-dir ./exports
 feishu-cli drive export --token sheetxxxx --doc-type sheet --file-extension csv --sub-id sheet_1 --output-dir ./out
+feishu-cli drive export --token sldxxxx --doc-type slides --file-extension pptx --output-dir ./out
 feishu-cli drive import --file report.docx --type docx --folder-token fldxxx
+feishu-cli drive import --file deck.pptx --type slides
 feishu-cli drive move --file-token fldxxx --type folder --folder-token fldyyy
+feishu-cli drive move --file-token boxxxx --type file   # 省略目标时先取真实 root token
 feishu-cli drive add-comment --doc docxxx --content '[{"type":"text","text":"评论"}]'
 
 # v1.29+ 新增 ⭐
@@ -967,9 +970,10 @@ feishu-cli sheet batch-set-style shtcnxxxx \
 
 # Drive 原生 Markdown 文件（不做 docx 块转换）
 feishu-cli markdown create --name README.md --content-file ./README.md --folder-token fldxxx
-feishu-cli markdown create --file ./README.md --folder-token fldxxx
+feishu-cli markdown create --file ./README.md --wiki-token wikcnxxx
 feishu-cli markdown fetch --file-token boxcnxxx --output-path ./remote.md
 feishu-cli markdown overwrite --file-token boxcnxxx --file ./remote.md
+feishu-cli markdown patch --file-token boxcnxxx --pattern "TODO" --content "DONE"
 feishu-cli markdown diff --file-token boxcnxxx --file ./local.md               # 远端最新 vs 本地
 feishu-cli markdown diff --file-token boxcnxxx --from-version 2 --to-version 5  # 远端版本 A vs B
 

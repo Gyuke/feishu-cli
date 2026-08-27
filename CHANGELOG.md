@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### 修复 / 协议对齐 — native Markdown 与 Drive import/export/move
+
+- **Markdown 源/历史下载**改为 `GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16`，支持 `--version`。
+- 新增 `markdown patch`；`create` 支持 `--wiki-token`；`create/overwrite/patch` 在 **20MB+1** 走 `files/upload_prepare/part/finish`，覆盖保留 `file_token`。
+- Markdown 命令改为 User Token 优先、未登录回退 Bot。
+- **Drive import**：`medias/upload_all` 省略 `parent_node`；>20MB prepare 显式 `parent_node=""`；`import_tasks` 始终带 `point.mount_type=1`；官方扩展名/大小矩阵（含 slides/base）；拒绝 wiki `--folder-token`。
+- **Drive export**：docx markdown 走 `POST /docs_ai/v1/documents/{token}/fetch`；补齐类型/格式矩阵（slides/pptx、bitable/base、wiki 解析）。
+- **Drive move**：省略 `--folder-token` 时先 `GET /drive/explorer/v2/root_folder/meta` 取真实根目录 token。
+- 保留 Drive 大文件 hash / 远端重复路径 fail-closed / 重试词边界分类（0073317）。
+
 ### 新增 — 官方 OpenAPI catalog overlay（可回退、可缓存、无凭证）
 
 - 编译期 `meta_data.json` 永远是离线 baseline；运行时可从官方 public `api_definition?protocol=meta` 拉 overlay。

@@ -15,9 +15,9 @@ var driveCmd = &cobra.Command{
 相对 file/media 命令的增强能力：
   - drive upload    支持自动分块（>20MB）
   - drive download  流式下载 + 路径校验 + --overwrite
-  - drive export    支持 sheet/bitable CSV 带 sub-id，docx → markdown 快捷路径，有界轮询 + resume
-  - drive import    分块上传媒体 + 有界轮询 + resume
-  - drive move      folder 移动时轮询 task_check
+  - drive export    支持 sheet/bitable CSV 带 sub-id，docx markdown 走 docs_ai fetch，有界轮询 + resume
+  - drive import    ccm_import_open 临时媒体（省略 parent_node）+ 官方格式/大小矩阵 + 有界轮询
+  - drive move      省略目标时先取真实 root token；folder 移动时轮询 task_check
   - drive add-comment 支持局部评论、wiki URL 解析、富文本 reply_elements
   - drive task-result 通用异步任务查询（import/export/task_check）
   - drive pull/push/status 云盘 ↔ 本地单向镜像（SHA-256 diff + 安全 --delete-* --yes 双确认）

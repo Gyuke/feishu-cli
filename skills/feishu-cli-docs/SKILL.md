@@ -5,7 +5,7 @@ description: >-
   docx/wiki/sheet 导出 Markdown/PDF/Word/Excel，以及云盘原生 .md 文件 CRUD。用户要求阅读、
   总结、创建、追加、覆盖、替换或删除文档内容，把 Markdown 导入飞书并转换 Mermaid/PlantUML/SVG、
   下载图片或导出本地文件、
-  比较和覆盖原生 Markdown 时必须使用本 Skill。
+  比较、覆盖或查找替换原生 Markdown 时必须使用本 Skill。
   本 Skill 只处理正文内容和文档/Markdown 文件转换。明确禁止用于文档评论、二进制文件导入、
   云盘目录和权限管理，这些使用 feishu-cli-storage；考勤等工作管理使用 feishu-cli-work；
   动态组件使用 feishu-cli-visual。
@@ -29,7 +29,7 @@ allowed-tools: Bash(feishu-cli:*), Bash(./feishu-cli:*), Bash(jq:*), Bash(python
 | 创建、追加、覆盖、替换或编辑 docx | `references/workflows/write/workflow.md` |
 | 把 Markdown 导入为飞书 docx | `references/workflows/import/workflow.md` |
 | 导出 docx/wiki/sheet 到本地文件 | `references/workflows/export/workflow.md` |
-| 上传、下载、覆盖或比较云盘原生 `.md` | `references/workflows/markdown/workflow.md` |
+| 上传、下载、覆盖、查找替换或比较云盘原生 `.md` | `references/workflows/markdown/workflow.md` |
 
 ## 关键边界
 

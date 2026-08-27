@@ -11,40 +11,142 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// 合法 doc-type / file-extension
-var driveExportAllowedDocTypes = []string{"doc", "docx", "sheet", "bitable"}
-var driveExportAllowedExtensions = []string{"docx", "pdf", "xlsx", "csv", "markdown"}
-
 var driveExportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "导出云文档为本地文件（有界轮询 + markdown 快捷路径 + resume）",
-	Long: `将 doc/docx/sheet/bitable 导出为本地文件。
+	Short: "导出云文档为本地文件（有界轮询 + docs_ai markdown + resume）",
+	Long: `将 doc/docx/sheet/bitable/slides 或 wiki 文档导出为本地文件。
 
-- markdown 导出走 /docs/v1/content 快捷路径（仅 docx）
+- markdown 导出走 POST /open-apis/docs_ai/v1/documents/{token}/fetch（format=markdown）
 - 其他格式走 export_tasks 异步任务：创建 → 有界轮询（最多 10 次，每次 5s） → 下载
-- 超时未完成时返回 next_command，可用 ` + "`drive task-result`" + ` 或 ` + "`drive export-download`" + ` 接力完成
+- wiki URL/token 先 get_node 再导出底层文档
+- 超时未完成时返回 next_command
+
+类型/格式矩阵:
+  doc     → docx, pdf
+  docx    → docx, pdf, markdown
+  sheet   → xlsx, csv
+  bitable → xlsx, csv, base
+  slides  → pptx, pdf
 
 必填:
-  --token          源文档 token
-  --doc-type       源文档类型: doc / docx / sheet / bitable
-  --file-extension 导出格式: docx / pdf / xlsx / csv / markdown
+  --file-extension  导出格式
+  --token 或 --url  源文档
 
 可选:
-  --sub-id         子表/工作表 ID（sheet/bitable → csv 时必填）
-  --output-dir     输出目录（默认当前目录）
-  --overwrite      已存在时覆盖
-  --user-access-token  覆盖登录态
-
-权限:
-  - User Access Token
-  - docs:document:export / drive:drive.metadata:readonly
+  --doc-type     裸 token 时必填；wiki 会先解析
+  --sub-id       sheet/bitable → csv 时必填
+  --only-schema  bitable → base 时只导出 schema
+  --file-name    本地文件名
+  --output-dir   输出目录（默认当前目录）
+  --overwrite    已存在时覆盖
+  --dry-run      只打印将要发出的请求
 
 示例:
   feishu-cli drive export --token docxxx --doc-type docx --file-extension markdown
-  feishu-cli drive export --token sheetxxx --doc-type sheet --file-extension csv --sub-id 0 --output-dir ./out`,
+  feishu-cli drive export --url https://xxx.feishu.cn/wiki/wikcnxxx --file-extension pdf
+  feishu-cli drive export --token sldxxx --doc-type slides --file-extension pptx`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
+		}
+
+		docToken, _ := cmd.Flags().GetString("token")
+		docURL, _ := cmd.Flags().GetString("url")
+		docType, _ := cmd.Flags().GetString("doc-type")
+		fileExtension, _ := cmd.Flags().GetString("file-extension")
+		subID, _ := cmd.Flags().GetString("sub-id")
+		onlySchema, _ := cmd.Flags().GetBool("only-schema")
+		preferredName, _ := cmd.Flags().GetString("file-name")
+		outputDir, _ := cmd.Flags().GetString("output-dir")
+		overwrite, _ := cmd.Flags().GetBool("overwrite")
+		output, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		docToken = strings.TrimSpace(docToken)
+		docURL = strings.TrimSpace(docURL)
+		docType = strings.ToLower(strings.TrimSpace(docType))
+		fileExtension = strings.ToLower(strings.TrimSpace(fileExtension))
+		preferredName = strings.TrimSpace(preferredName)
+
+		sourceType, sourceToken, resolvedType, err := normalizeDriveExportInput(docURL, docToken, docType)
+		if err != nil {
+			return err
+		}
+		if fileExtension == "" {
+			return fmt.Errorf("--file-extension 必填，允许: %s", driveExportFileExtensionValues)
+		}
+
+		if sourceType == "wiki" && resolvedType == "" {
+			switch fileExtension {
+			case "docx", "pdf", "xlsx", "csv", "markdown", "base", "pptx":
+			default:
+				return fmt.Errorf("不支持的 --file-extension %q，允许: %s", fileExtension, driveExportFileExtensionValues)
+			}
+			if onlySchema && fileExtension != "base" {
+				return fmt.Errorf("--only-schema 仅在导出 bitable 为 base 时使用")
+			}
+			if strings.TrimSpace(subID) != "" && fileExtension != "csv" {
+				return fmt.Errorf("--sub-id 仅在 sheet/bitable 导出 csv 时使用")
+			}
+		} else {
+			if err := validateDriveExportFormat(resolvedType, fileExtension, subID, onlySchema); err != nil {
+				return err
+			}
+		}
+
+		if outputDir == "" {
+			outputDir = "."
+		}
+
+		if dryRun {
+			var steps []dryRunStep
+			exportToken := sourceToken
+			exportType := resolvedType
+			if sourceType == "wiki" {
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    "/open-apis/wiki/v2/spaces/get_node",
+					Desc:   "Resolve wiki node to underlying document token",
+					Params: map[string]any{"token": sourceToken},
+				})
+				exportToken = "obj_token_from_step_0"
+				if exportType == "" {
+					exportType = "obj_type_from_step_0"
+				}
+			}
+			if fileExtension == "markdown" {
+				steps = append(steps, dryRunStep{
+					Method: "POST",
+					URL:    fmt.Sprintf("/open-apis/docs_ai/v1/documents/%s/fetch", exportToken),
+					Desc:   "fetch docx markdown",
+					Body:   map[string]any{"format": "markdown"},
+				})
+			} else {
+				body := map[string]any{
+					"token":          exportToken,
+					"type":           exportType,
+					"file_extension": fileExtension,
+				}
+				if strings.TrimSpace(subID) != "" {
+					body["sub_id"] = subID
+				}
+				if onlySchema {
+					body["only_schema"] = true
+				}
+				steps = append(steps, dryRunStep{
+					Method: "POST",
+					URL:    "/open-apis/drive/v1/export_tasks",
+					Body:   body,
+				})
+			}
+			extra := map[string]any{"output_dir": outputDir}
+			if sourceType == "wiki" {
+				extra["wiki_token"] = sourceToken
+			}
+			if preferredName != "" {
+				extra["file_name"] = ensureExportFileExtension(sanitizeExportName(preferredName, sourceToken), fileExtension)
+			}
+			return printDryRunPlan(cmd, "export cloud document", extra, steps)
 		}
 
 		token, err := requireUserToken(cmd, "drive export")
@@ -52,52 +154,59 @@ var driveExportCmd = &cobra.Command{
 			return err
 		}
 
-		docToken, _ := cmd.Flags().GetString("token")
-		docType, _ := cmd.Flags().GetString("doc-type")
-		fileExtension, _ := cmd.Flags().GetString("file-extension")
-		subID, _ := cmd.Flags().GetString("sub-id")
-		outputDir, _ := cmd.Flags().GetString("output-dir")
-		overwrite, _ := cmd.Flags().GetBool("overwrite")
-		output, _ := cmd.Flags().GetString("output")
-
-		// 参数校验
-		if docToken == "" {
-			return fmt.Errorf("--token 必填")
-		}
-		if err := validateEnum(docType, "--doc-type", driveExportAllowedDocTypes); err != nil {
-			return err
-		}
-		if err := validateEnum(fileExtension, "--file-extension", driveExportAllowedExtensions); err != nil {
-			return err
-		}
-		if fileExtension == "markdown" && docType != "docx" {
-			return fmt.Errorf("--file-extension markdown 仅支持 --doc-type docx")
-		}
-		if fileExtension == "csv" && (docType == "sheet" || docType == "bitable") && subID == "" {
-			return fmt.Errorf("导出 sheet/bitable 为 csv 时 --sub-id 必填")
-		}
-		if subID != "" && (fileExtension != "csv" || (docType != "sheet" && docType != "bitable")) {
-			return fmt.Errorf("--sub-id 仅在 sheet/bitable 导出 csv 时使用")
-		}
-
-		if outputDir == "" {
-			outputDir = "."
-		}
 		if err := os.MkdirAll(outputDir, 0o755); err != nil {
 			return fmt.Errorf("创建 --output-dir 失败: %w", err)
 		}
 
-		// Markdown 快捷路径：直接 /docs/v1/content
-		if fileExtension == "markdown" {
-			fmt.Fprintf(os.Stderr, "Markdown 快捷导出: %s\n", docToken)
-			content, err := client.FetchDocxMarkdownContent(docToken, token)
+		var wikiToken, wikiObjToken, wikiObjType string
+		if sourceType == "wiki" {
+			fmt.Fprintf(os.Stderr, "解析 wiki 节点: %s\n", sourceToken)
+			node, err := client.GetWikiNode(sourceToken, token)
 			if err != nil {
 				return err
 			}
+			objType := normalizeDriveExportDocType(node.ObjType)
+			if !isDriveExportDocType(objType) {
+				return fmt.Errorf("wiki 解析为 %q，drive export 仅支持 doc/docx/sheet/bitable/slides", objType)
+			}
+			if resolvedType != "" && resolvedType != objType {
+				return fmt.Errorf("wiki 解析为 %q，但 --doc-type 是 %q", objType, resolvedType)
+			}
+			resolvedType = objType
+			sourceToken = node.ObjToken
+			wikiToken = node.NodeToken
+			wikiObjToken = node.ObjToken
+			wikiObjType = objType
+			if err := validateDriveExportFormat(resolvedType, fileExtension, subID, onlySchema); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "已解析为 %s: %s\n", objType, node.ObjToken)
+		}
 
-			// 尝试取文档标题
-			title, _ := client.FetchDocMetaTitle(docToken, docType, token)
-			fileName := sanitizeExportName(title, docToken) + ".md"
+		annotateWiki := func(result map[string]any) map[string]any {
+			if wikiToken == "" {
+				return result
+			}
+			result["wiki_token"] = wikiToken
+			result["wiki_node"] = map[string]any{"obj_token": wikiObjToken, "obj_type": wikiObjType}
+			return result
+		}
+
+		if fileExtension == "markdown" {
+			fmt.Fprintf(os.Stderr, "Markdown 快捷导出 (docs_ai): %s\n", sourceToken)
+			content, err := client.FetchDocxMarkdownContent(sourceToken, token)
+			if err != nil {
+				return err
+			}
+			fileName := preferredName
+			if fileName == "" {
+				title, titleErr := client.FetchDocMetaTitle(sourceToken, resolvedType, token)
+				if titleErr != nil || strings.TrimSpace(title) == "" {
+					title = sourceToken
+				}
+				fileName = title
+			}
+			fileName = ensureExportFileExtension(sanitizeExportName(fileName, sourceToken), fileExtension)
 			savedPath := filepath.Join(outputDir, fileName)
 			if _, err := os.Stat(savedPath); err == nil && !overwrite {
 				return fmt.Errorf("文件已存在: %s（使用 --overwrite 覆盖）", savedPath)
@@ -105,15 +214,14 @@ var driveExportCmd = &cobra.Command{
 			if err := os.WriteFile(savedPath, []byte(content), 0o644); err != nil {
 				return fmt.Errorf("写文件失败: %w", err)
 			}
-
-			result := map[string]any{
-				"token":          docToken,
-				"doc_type":       docType,
+			result := annotateWiki(map[string]any{
+				"token":          sourceToken,
+				"doc_type":       resolvedType,
 				"file_extension": fileExtension,
 				"file_name":      fileName,
 				"saved_path":     savedPath,
 				"size_bytes":     len(content),
-			}
+			})
 			if output == "json" {
 				return printJSON(result)
 			}
@@ -121,33 +229,34 @@ var driveExportCmd = &cobra.Command{
 			return nil
 		}
 
-		// 常规异步流程
-		ticket, err := client.CreateExportTaskWithSubId(docToken, docType, fileExtension, subID, token)
+		ticket, err := client.CreateExportTaskEx(sourceToken, resolvedType, fileExtension, subID, onlySchema, token)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "创建导出任务: %s\n", ticket)
 
-		status, timedOut, err := client.WaitDriveExportWithBound(ticket, docToken, token)
+		status, timedOut, err := client.WaitDriveExportWithBound(ticket, sourceToken, token)
 		if err != nil {
 			return err
 		}
 
-		// 超时未完成 → 返回 resume 命令
 		if timedOut {
-			nextCmd := fmt.Sprintf("feishu-cli drive task-result --scenario export --ticket %s --file-token %s", ticket, docToken)
-			result := map[string]any{
+			nextCmd := fmt.Sprintf("feishu-cli drive task-result --scenario export --ticket %s --file-token %s", ticket, sourceToken)
+			result := annotateWiki(map[string]any{
 				"ticket":         ticket,
-				"token":          docToken,
-				"doc_type":       docType,
+				"token":          sourceToken,
+				"doc_type":       resolvedType,
 				"file_extension": fileExtension,
 				"ready":          false,
 				"timed_out":      true,
 				"next_command":   nextCmd,
-			}
+			})
 			if status != nil {
 				result["job_status"] = status.JobStatus
 				result["job_status_label"] = status.StatusLabel()
+			}
+			if preferredName != "" {
+				result["file_name"] = ensureExportFileExtension(sanitizeExportName(preferredName, sourceToken), fileExtension)
 			}
 			if output == "json" {
 				_ = printJSON(result)
@@ -157,8 +266,11 @@ var driveExportCmd = &cobra.Command{
 			return nil
 		}
 
-		// 任务就绪，下载
-		fileName := sanitizeExportName(status.FileName, docToken) + "." + mapExtensionToSuffix(fileExtension)
+		fileName := preferredName
+		if fileName == "" {
+			fileName = status.FileName
+		}
+		fileName = ensureExportFileExtension(sanitizeExportName(fileName, sourceToken), fileExtension)
 		savedPath := filepath.Join(outputDir, fileName)
 		if _, err := os.Stat(savedPath); err == nil && !overwrite {
 			return fmt.Errorf("文件已存在: %s（使用 --overwrite 覆盖）", savedPath)
@@ -173,15 +285,15 @@ var driveExportCmd = &cobra.Command{
 		if stat != nil {
 			size = stat.Size()
 		}
-		result := map[string]any{
+		result := annotateWiki(map[string]any{
 			"ticket":         ticket,
-			"token":          docToken,
-			"doc_type":       docType,
+			"token":          sourceToken,
+			"doc_type":       resolvedType,
 			"file_extension": fileExtension,
 			"file_name":      fileName,
 			"saved_path":     savedPath,
 			"size_bytes":     size,
-		}
+		})
 		if output == "json" {
 			return printJSON(result)
 		}
@@ -190,25 +302,68 @@ var driveExportCmd = &cobra.Command{
 	},
 }
 
-// sanitizeExportName 把标题清洗为安全文件名（无扩展名）
+func normalizeDriveExportInput(rawURL, token, docType string) (sourceType, sourceToken, resolvedType string, err error) {
+	if token == "" && rawURL == "" {
+		return "", "", "", fmt.Errorf("必须提供 --url 或 --token")
+	}
+	if token != "" && rawURL != "" {
+		return "", "", "", fmt.Errorf("--url 与 --token 互斥")
+	}
+	raw := token
+	if rawURL != "" {
+		raw = rawURL
+	}
+	if strings.Contains(raw, "://") {
+		parsedType, parsedToken, parseErr := parseDriveURL(raw, "")
+		if parseErr != nil {
+			return "", "", "", parseErr
+		}
+		sourceType = normalizeDriveExportDocType(parsedType)
+		sourceToken = parsedToken
+		if sourceType == "wiki" {
+			if docType == "wiki" {
+				return "wiki", sourceToken, "", nil
+			}
+			if docType != "" && !isDriveExportDocType(docType) && docType != "wiki" {
+				return "", "", "", fmt.Errorf("--doc-type %q 与 URL 类型 wiki 冲突", docType)
+			}
+			if docType != "" && docType != "wiki" {
+				return "wiki", sourceToken, normalizeDriveExportDocType(docType), nil
+			}
+			return "wiki", sourceToken, "", nil
+		}
+		if !isDriveExportDocType(sourceType) {
+			return "", "", "", fmt.Errorf("URL 类型 %q 不受 drive export 支持", parsedType)
+		}
+		if docType == "wiki" {
+			return "", "", "", fmt.Errorf("--doc-type wiki 与 URL 类型 %q 冲突", sourceType)
+		}
+		if docType != "" && normalizeDriveExportDocType(docType) != sourceType {
+			return "", "", "", fmt.Errorf("--doc-type %q 与 URL 类型 %q 冲突", docType, sourceType)
+		}
+		return sourceType, sourceToken, sourceType, nil
+	}
+	if rawURL != "" {
+		return "", "", "", fmt.Errorf("不支持的 --url %q，请使用飞书文档 URL", rawURL)
+	}
+	if docType == "" {
+		return "", "", "", fmt.Errorf("裸 token 必须提供 --doc-type（允许: %s）", driveExportInputDocTypeValues)
+	}
+	if docType == "wiki" {
+		return "wiki", token, "", nil
+	}
+	if !isDriveExportDocType(docType) {
+		return "", "", "", fmt.Errorf("不支持的 --doc-type %q，允许: %s", docType, driveExportInputDocTypeValues)
+	}
+	return normalizeDriveExportDocType(docType), token, normalizeDriveExportDocType(docType), nil
+}
+
 func sanitizeExportName(title, fallback string) string {
 	name := strings.TrimSpace(title)
 	if name == "" {
 		name = fallback
 	}
 	return safeOutputPath(name, "")
-}
-
-// mapExtensionToSuffix 把 --file-extension 值映射为本地文件后缀
-func mapExtensionToSuffix(ext string) string {
-	switch ext {
-	case "markdown":
-		return "md"
-	case "docx", "pdf", "xlsx", "csv":
-		return ext
-	default:
-		return ext
-	}
 }
 
 var driveExportDownloadCmd = &cobra.Command{
@@ -284,15 +439,19 @@ var driveExportDownloadCmd = &cobra.Command{
 
 func init() {
 	driveCmd.AddCommand(driveExportCmd)
-	driveExportCmd.Flags().String("token", "", "源文档 token（必填）")
-	driveExportCmd.Flags().String("doc-type", "", "源文档类型: doc/docx/sheet/bitable（必填）")
-	driveExportCmd.Flags().String("file-extension", "", "导出格式: docx/pdf/xlsx/csv/markdown（必填）")
+	driveExportCmd.Flags().String("token", "", "源文档 token（与 --url 二选一）")
+	driveExportCmd.Flags().String("url", "", "源文档 URL（与 --token 二选一；wiki URL 会先解析）")
+	driveExportCmd.Flags().String("doc-type", "", "源文档类型: doc/docx/sheet/bitable/slides/wiki")
+	driveExportCmd.Flags().String("file-extension", "", "导出格式: docx/pdf/xlsx/csv/markdown/base/pptx（必填）")
 	driveExportCmd.Flags().String("sub-id", "", "子表/工作表 ID（sheet/bitable 导出 csv 时必填）")
+	driveExportCmd.Flags().Bool("only-schema", false, "bitable 导出 base 时只导出 schema")
+	driveExportCmd.Flags().String("file-name", "", "本地文件名")
 	driveExportCmd.Flags().String("output-dir", ".", "输出目录")
 	driveExportCmd.Flags().Bool("overwrite", false, "已存在时覆盖")
+	driveExportCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	driveExportCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveExportCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
-	mustMarkFlagRequired(driveExportCmd, "token", "doc-type", "file-extension")
+	mustMarkFlagRequired(driveExportCmd, "file-extension")
 
 	driveCmd.AddCommand(driveExportDownloadCmd)
 	driveExportDownloadCmd.Flags().String("file-token", "", "导出文件 token（必填）")

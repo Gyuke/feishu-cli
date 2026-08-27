@@ -11,54 +11,44 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// 格式特定的文件大小上限（参考飞书官方 drive +import 实现）
-var driveImportSizeLimits = map[string]int64{
-	"docx":    20 * 1024 * 1024,  // 20MB
-	"sheet":   20 * 1024 * 1024,  // 20MB
-	"bitable": 100 * 1024 * 1024, // 100MB
-}
-
-var driveImportAllowedTypes = []string{"docx", "sheet", "bitable"}
-
 var driveImportCmd = &cobra.Command{
 	Use:   "import",
 	Short: "导入本地文件为云文档（分块上传 + 有界轮询 + resume）",
-	Long: `导入本地文件为云文档（docx/sheet/bitable）。
+	Long: `导入本地文件为云文档（docx/sheet/bitable/slides）。
 
 流程:
-  1. 上传本地文件到云盘（>20MB 自动走分块）
-  2. 创建 import_tasks 任务
+  1. 上传本地文件到临时媒体（>20MB 自动走 medias/upload_prepare/part/finish）
+  2. 创建 import_tasks 任务（始终携带 point.mount_type=1）
   3. 有界轮询（最多 30 次，每次 2s）
   4. 超时时返回 next_command 可用 drive task-result 继续
 
-格式大小限制:
-  - docx    : 20MB
-  - sheet   : 20MB
-  - bitable : 100MB
+官方格式/大小矩阵:
+  - .docx/.doc → docx，上限 600MB
+  - .pptx → slides，上限 500MB
+  - .xlsx → sheet/bitable，上限 800MB
+  - .csv → sheet 20MB / bitable 100MB
+  - .txt/.md/.mark/.markdown/.html/.xls/.base → 20MB
+  - .base 仅 bitable；.pptx 仅 slides
+
+upload_all 省略 parent_node；upload_prepare 显式 parent_node=""。
+--folder-token 若解析为 wiki 节点会被拒绝。省略时 point.mount_key 为空（根目录）。
 
 必填:
   --file        本地文件路径
-  --type        目标文档类型: docx / sheet / bitable
+  --type        目标文档类型: docx / sheet / bitable / slides
 
 可选:
-  --folder-token  目标文件夹 token
-  --name          导入后的文件名（默认本地文件名去扩展名）
-  --user-access-token  覆盖登录态
-
-权限:
-  - User Access Token
-  - docs:document:import / drive:file:upload
+  --folder-token   目标 Drive 文件夹 token
+  --name           导入后的文件名（默认本地文件名去扩展名）
+  --target-token   已有 bitable token（仅 --type bitable）
+  --dry-run        只打印将要发出的请求
 
 示例:
   feishu-cli drive import --file report.docx --type docx
-  feishu-cli drive import --file data.xlsx --type sheet --folder-token fldxxx`,
+  feishu-cli drive import --file data.xlsx --type sheet --folder-token fldxxx
+  feishu-cli drive import --file deck.pptx --type slides --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
-			return err
-		}
-
-		token, err := requireUserToken(cmd, "drive import")
-		if err != nil {
 			return err
 		}
 
@@ -66,12 +56,19 @@ var driveImportCmd = &cobra.Command{
 		targetType, _ := cmd.Flags().GetString("type")
 		folderToken, _ := cmd.Flags().GetString("folder-token")
 		name, _ := cmd.Flags().GetString("name")
+		targetToken, _ := cmd.Flags().GetString("target-token")
 		output, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		filePath = strings.TrimSpace(filePath)
+		targetType = strings.ToLower(strings.TrimSpace(targetType))
+		folderToken = strings.TrimSpace(folderToken)
+		targetToken = strings.TrimSpace(targetToken)
 
 		if filePath == "" {
 			return fmt.Errorf("--file 必填")
 		}
-		if err := validateEnum(targetType, "--type", driveImportAllowedTypes); err != nil {
+		if err := validateDriveImportSpec(filePath, targetType, folderToken, targetToken, ""); err != nil {
 			return err
 		}
 
@@ -79,46 +76,96 @@ var driveImportCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("读取文件失败: %w", err)
 		}
-		if stat.IsDir() {
-			return fmt.Errorf("--file 必须指向文件")
+		if !stat.Mode().IsRegular() {
+			return fmt.Errorf("--file 必须指向普通文件")
 		}
 
-		// 格式大小校验
-		if limit, ok := driveImportSizeLimits[targetType]; ok && stat.Size() > limit {
-			return fmt.Errorf("文件大小 %d 超过 %s 限制 %d", stat.Size(), targetType, limit)
+		ext := driveImportFileExtension(filePath, "")
+		if err := validateDriveImportFileSize(ext, targetType, stat.Size()); err != nil {
+			return err
 		}
 
-		// 文件扩展名识别
-		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
-		if ext == "" {
-			return fmt.Errorf("无法从文件名识别扩展名: %s", filePath)
+		fileName := driveImportDefaultFileName(filePath, name)
+		uploadedName := driveImportSourceFileName(filePath, "")
+		extra := fmt.Sprintf(`{"obj_type":"%s","file_extension":"%s"}`, targetType, ext)
+
+		if dryRun {
+			var steps []dryRunStep
+			if folderToken != "" {
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    "/open-apis/wiki/v2/spaces/get_node",
+					Desc:   "Validate whether --folder-token is a wiki node",
+					Params: map[string]any{"token": folderToken},
+				})
+			}
+			if client.DriveNeedsMultipart(stat.Size()) {
+				steps = append(steps,
+					dryRunStep{Method: "POST", URL: "/open-apis/drive/v1/medias/upload_prepare", Desc: "Initialize multipart upload", Body: map[string]any{
+						"file_name": uploadedName, "parent_type": "ccm_import_open", "parent_node": "", "size": stat.Size(), "extra": extra,
+					}},
+					dryRunStep{Method: "POST", URL: "/open-apis/drive/v1/medias/upload_part", Desc: "Upload file parts (repeated)", Body: map[string]any{
+						"upload_id": "<upload_id>", "seq": "<chunk_index>", "size": "<chunk_size>", "file": "<chunk_binary>",
+					}},
+					dryRunStep{Method: "POST", URL: "/open-apis/drive/v1/medias/upload_finish", Desc: "Finalize multipart upload", Body: map[string]any{
+						"upload_id": "<upload_id>", "block_num": "<block_num>",
+					}},
+				)
+			} else {
+				steps = append(steps, dryRunStep{
+					Method: "POST",
+					URL:    "/open-apis/drive/v1/medias/upload_all",
+					Desc:   "Upload file to get file_token (parent_node omitted)",
+					Body: map[string]any{
+						"file_name": uploadedName, "parent_type": "ccm_import_open", "size": stat.Size(), "extra": extra, "file": "@" + filePath,
+					},
+				})
+			}
+			taskBody := map[string]any{
+				"file_extension": ext,
+				"file_token":     "<file_token>",
+				"type":           targetType,
+				"file_name":      fileName,
+				"point": map[string]any{
+					"mount_type": 1,
+					"mount_key":  folderToken,
+				},
+			}
+			if targetType == "bitable" && targetToken != "" {
+				taskBody["token"] = targetToken
+			}
+			steps = append(steps,
+				dryRunStep{Method: "POST", URL: "/open-apis/drive/v1/import_tasks", Desc: "Create import task", Body: taskBody},
+				dryRunStep{Method: "GET", URL: "/open-apis/drive/v1/import_tasks/:ticket", Desc: "Poll import task result", Params: map[string]any{"ticket": "<ticket>"}},
+			)
+			return printDryRunPlan(cmd, "Upload file -> create import task -> poll status", map[string]any{
+				"type": targetType,
+				"size": stat.Size(),
+			}, steps)
 		}
 
-		// 导入名：默认去扩展名的本地文件名
-		fileName := name
-		if fileName == "" {
-			base := filepath.Base(filePath)
-			fileName = strings.TrimSuffix(base, filepath.Ext(base))
+		token, err := requireUserToken(cmd, "drive import")
+		if err != nil {
+			return err
 		}
 
-		// Step 1: 上传临时媒体（不落到用户云盘）
-		// 官方实现走 /medias/upload_all 端点 + parent_type=ccm_import_open + extra
-		fmt.Fprintf(os.Stderr, "上传临时媒体: %s (%d bytes)\n", filepath.Base(filePath), stat.Size())
-		uploadedName := filepath.Base(filePath)
+		if err := rejectDriveImportWikiFolderToken(folderToken, token); err != nil {
+			return err
+		}
+
+		fmt.Fprintf(os.Stderr, "上传临时媒体: %s (%s)\n", filepath.Base(filePath), formatByteSize(stat.Size()))
 		fileToken, err := client.UploadMediaForImport(filePath, uploadedName, targetType, ext, token)
 		if err != nil {
 			return fmt.Errorf("上传源文件失败: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "上传成功，file_token: %s\n", fileToken)
 
-		// Step 2: 创建导入任务
-		ticket, err := client.CreateImportTaskWithToken(fileToken, ext, fileName, targetType, folderToken, token)
+		ticket, err := client.CreateImportTaskEx(fileToken, ext, fileName, targetType, folderToken, targetToken, token)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "创建导入任务: %s\n", ticket)
 
-		// Step 3: 有界轮询
 		status, timedOut, err := client.WaitDriveImportWithBound(ticket, token)
 		if err != nil {
 			return err
@@ -145,13 +192,20 @@ var driveImportCmd = &cobra.Command{
 			return nil
 		}
 
-		// 任务就绪
+		resultType := targetType
+		if status != nil && status.Type != "" {
+			resultType = status.Type
+		}
 		result := map[string]any{
 			"ticket":     ticket,
 			"file_token": fileToken,
-			"type":       targetType,
+			"type":       resultType,
 			"doc_token":  status.DocToken,
+			"token":      status.DocToken,
 			"doc_url":    status.DocURL,
+		}
+		if status.DocURL != "" {
+			result["url"] = status.DocURL
 		}
 
 		if output == "json" {
@@ -159,7 +213,7 @@ var driveImportCmd = &cobra.Command{
 		}
 
 		fmt.Printf("导入成功!\n")
-		fmt.Printf("  类型:      %s\n", targetType)
+		fmt.Printf("  类型:      %s\n", resultType)
 		fmt.Printf("  doc_token: %s\n", status.DocToken)
 		if status.DocURL != "" {
 			fmt.Printf("  URL:       %s\n", status.DocURL)
@@ -168,12 +222,29 @@ var driveImportCmd = &cobra.Command{
 	},
 }
 
+func rejectDriveImportWikiFolderToken(folderToken, userToken string) error {
+	folderToken = strings.TrimSpace(folderToken)
+	if folderToken == "" {
+		return nil
+	}
+	node, err := client.GetWikiNode(folderToken, userToken)
+	if err != nil {
+		return nil
+	}
+	if node == nil || (node.ObjToken == "" && node.NodeToken == "") {
+		return nil
+	}
+	return fmt.Errorf("--folder-token 只支持 Drive 文件夹 token，但提供的 token 解析为 wiki 节点；请改用 Drive 文件夹或省略 --folder-token")
+}
+
 func init() {
 	driveCmd.AddCommand(driveImportCmd)
 	driveImportCmd.Flags().String("file", "", "本地文件路径（必填）")
-	driveImportCmd.Flags().String("type", "", "目标文档类型: docx/sheet/bitable（必填）")
-	driveImportCmd.Flags().String("folder-token", "", "目标文件夹 token")
+	driveImportCmd.Flags().String("type", "", "目标文档类型: docx/sheet/bitable/slides（必填）")
+	driveImportCmd.Flags().String("folder-token", "", "目标文件夹 token（省略表示根目录）")
 	driveImportCmd.Flags().String("name", "", "导入后的文件名（默认本地文件名去扩展名）")
+	driveImportCmd.Flags().String("target-token", "", "已有 bitable token（仅 --type bitable）")
+	driveImportCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	driveImportCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveImportCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveImportCmd, "file", "type")

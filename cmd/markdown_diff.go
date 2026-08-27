@@ -25,14 +25,12 @@ var markdownDiffCmd = &cobra.Command{
 	Short: "比对 Markdown 内容（远端版本之间，或远端 vs 本地文件），输出 unified diff",
 	Long: `下载远端 Markdown 内容并在本地计算 unified diff，不修改远端文件。
 
-三种比对模式（互斥，由参数组合决定）:
-  1. 远端最新 vs 本地文件:   --file-token <token> --file ./local.md
+三种比对模式（由参数组合决定）:
+  1. 远端 vs 本地文件:        --file-token <token> --file ./local.md（可加 --from-version）
   2. 远端某版本 vs 远端最新:  --file-token <token> --from-version <v>
   3. 远端版本 A vs 版本 B:    --file-token <token> --from-version <a> --to-version <b>
 
-注：模式 2/3（远端版本对比）需该文件具备版本历史快照——普通 .md（Drive 原生 Markdown）
-覆盖为原地替换、无数字版本，?version=N 会返回 404；版本对比主要适用 docx/sheet/bitable
-等有版本管理的文档。模式 1（远端最新 vs 本地文件）适用任意可下载的 .md。
+源/历史下载走 ` + "`GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16`" + `。
 
 可选:
   --context-lines  diff 每个 hunk 上下保留的未变更上下文行数（默认 3）
@@ -78,39 +76,49 @@ var markdownDiffCmd = &cobra.Command{
 			return err
 		}
 
+		if err := validateMarkdownDiffVersionValue(fromVersion, "--from-version"); err != nil {
+			return err
+		}
+		if err := validateMarkdownDiffVersionValue(toVersion, "--to-version"); err != nil {
+			return err
+		}
+
 		if dryRun {
-			plan := map[string]any{
-				"detection":     mode,
+			var steps []dryRunStep
+			switch mode {
+			case "local_vs_remote":
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    markdownPreviewDownloadPath(fileToken),
+					Desc:   "Download the specified/latest remote Markdown source file preview artifact",
+					Params: markdownPreviewParams(fromVersion),
+				})
+			default:
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    markdownPreviewDownloadPath(fileToken),
+					Desc:   "Download the base remote Markdown source file preview artifact",
+					Params: markdownPreviewParams(fromVersion),
+				})
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    markdownPreviewDownloadPath(fileToken),
+					Desc:   "Download the target remote Markdown source file preview artifact",
+					Params: markdownPreviewParams(toVersion),
+				})
+			}
+			extra := map[string]any{
+				"mode":          mode,
 				"file_token":    fileToken,
 				"context_lines": contextLines,
 			}
-			switch mode {
-			case "local_vs_remote":
-				plan["local_file"] = localFile
-				plan["remote"] = "latest"
-			case "remote_vs_remote":
-				plan["from_version"] = fromVersion
-				if toVersion != "" {
-					plan["to_version"] = toVersion
-				} else {
-					plan["to_version"] = "latest"
-				}
+			if localFile != "" {
+				extra["local_file"] = localFile
 			}
-			// dry-run 计划本就是结构化数据，默认 JSON 输出；--format/--jq 也尊重。
-			o, _, oerr := resolveMarkdownDiffOutput(cmd)
-			if oerr != nil {
-				return oerr
-			}
-			if o == nil {
-				o, _ = output.NewOptions(output.FormatJSON, "")
-			}
-			return output.Render(o, plan)
+			return printDryRunPlan(cmd, "Download the requested Markdown content and compute a unified diff locally", extra, steps)
 		}
 
-		token, err := requireUserToken(cmd, "markdown diff")
-		if err != nil {
-			return err
-		}
+		token := resolveOptionalUserTokenWithFallback(cmd)
 
 		var (
 			fromName, toName   string
@@ -119,35 +127,36 @@ var markdownDiffCmd = &cobra.Command{
 
 		switch mode {
 		case "local_vs_remote":
-			// base = 远端最新，target = 本地文件
-			fromName = "remote (latest)"
-			fromBytes, err = client.FetchFileContent(fileToken, token)
+			fromName = "a/" + fileToken
+			if fromVersion != "" {
+				fromName += "@version:" + fromVersion
+			} else {
+				fromName += "@latest"
+			}
+			fromBytes, err = fetchMarkdownPreviewContent(fileToken, fromVersion, token)
 			if err != nil {
 				return fmt.Errorf("下载远端内容失败: %w", err)
 			}
-			toName = "local: " + localFile
+			toName = "b/" + localFile
 			toBytes, err = os.ReadFile(localFile)
 			if err != nil {
 				return fmt.Errorf("读取本地文件失败: %w", err)
 			}
 		case "remote_vs_remote":
-			fromName = "remote@version=" + fromVersion
-			fromBytes, err = fetchMarkdownVersionContent(fileToken, fromVersion, token)
+			fromName = "a/" + fileToken + "@version:" + fromVersion
+			fromBytes, err = fetchMarkdownPreviewContent(fileToken, fromVersion, token)
 			if err != nil {
-				return fmt.Errorf("下载 from-version 内容失败（版本对比需该文件有版本历史快照；普通 .md 无数字版本，?version 会 404，仅 docx/sheet/bitable 等支持）: %w", err)
+				return fmt.Errorf("下载 from-version 内容失败: %w", err)
 			}
 			if toVersion != "" {
-				toName = "remote@version=" + toVersion
-				toBytes, err = fetchMarkdownVersionContent(fileToken, toVersion, token)
-				if err != nil {
-					return fmt.Errorf("下载 to-version 内容失败（版本对比需该文件有版本历史快照；普通 .md 无数字版本，?version 会 404）: %w", err)
-				}
+				toName = "b/" + fileToken + "@version:" + toVersion
+				toBytes, err = fetchMarkdownPreviewContent(fileToken, toVersion, token)
 			} else {
-				toName = "remote (latest)"
-				toBytes, err = client.FetchFileContent(fileToken, token)
-				if err != nil {
-					return fmt.Errorf("下载远端最新内容失败: %w", err)
-				}
+				toName = "b/" + fileToken + "@latest"
+				toBytes, err = fetchMarkdownPreviewContent(fileToken, "", token)
+			}
+			if err != nil {
+				return fmt.Errorf("下载远端目标内容失败: %w", err)
 			}
 		}
 
@@ -215,11 +224,11 @@ func resolveMarkdownDiffMode(localFile, fromVersion, toVersion string) (string, 
 	hasFrom := fromVersion != ""
 	hasTo := toVersion != ""
 
-	if hasTo && !hasFrom {
+	if hasTo && !hasFrom && !hasLocal {
 		return "", fmt.Errorf("--to-version 需要同时指定 --from-version")
 	}
-	if hasLocal && (hasFrom || hasTo) {
-		return "", fmt.Errorf("--file 与 --from-version/--to-version 互斥：本地比对 vs 远端版本比对只能选一种")
+	if hasLocal && hasTo {
+		return "", fmt.Errorf("--to-version 不能与 --file 同时使用")
 	}
 	if hasLocal {
 		return "local_vs_remote", nil
@@ -227,14 +236,13 @@ func resolveMarkdownDiffMode(localFile, fromVersion, toVersion string) (string, 
 	if hasFrom {
 		return "remote_vs_remote", nil
 	}
-	return "", fmt.Errorf("请指定 --from-version（远端版本比对），或 --from-version+--to-version，或 --file（远端最新 vs 本地文件）")
+	return "", fmt.Errorf("请指定 --from-version（远端版本比对），或 --from-version+--to-version，或 --file（远端 vs 本地文件）")
 }
 
-// fetchMarkdownVersionContent 下载远端文件指定版本的内容。
-// 远端版本下载 = GET /open-apis/drive/v1/files/{file_token}/download?version=N，
-// 即同一个 file_token + version 查询参数，不会产生新 token（lark dry-run 实证）。
-func fetchMarkdownVersionContent(fileToken, version, userAccessToken string) ([]byte, error) {
-	return client.FetchFileVersionContent(fileToken, version, userAccessToken)
+// fetchMarkdownPreviewContent 走官方 preview_download?preview_type=16[&version=N]。
+func fetchMarkdownPreviewContent(fileToken, version, userAccessToken string) ([]byte, error) {
+	data, _, err := client.FetchMarkdownSource(fileToken, version, userAccessToken)
+	return data, err
 }
 
 // markdownDiffHunk unified diff 的一个 hunk。

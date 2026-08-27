@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/client"
@@ -16,27 +15,23 @@ var markdownCreateCmd = &cobra.Command{
 	Short: "在 Drive 创建一个原生 Markdown (.md) 文件",
 	Long: `把一段 Markdown 内容（或本地 .md 文件）作为普通 Drive 文件上传，保留原始 Markdown 格式。
 
-底层调用 ` + "`/open-apis/drive/v1/files/upload_all`" + `（parent_type=explorer），与 ` + "`feishu-cli drive upload`" + ` 同一 endpoint，
-但本命令强制 .md 后缀、面向 AI agent 文档写盘场景。
+底层调用 ` + "`POST /open-apis/drive/v1/files/upload_all`" + `；>20MB 自动走 upload_prepare/part/finish。
+--wiki-token 时 parent_type=wiki。User Token 优先，未登录回退 Bot。
 
 必填:
-  --name           远端文件名（必须以 .md 结尾），与 --content 搭配使用
-  --content        Markdown 字符串内容（或用 --content-file 指向本地文件）
-  --content-file   本地 .md 文件路径（与 --content 二选一）
-  --file           兼容别名，等价于 --content-file
+  --content / --content-file / --file  三选一（content 与 file 互斥）
+  --name   使用 --content 时必填，且必须以 .md 结尾
 
 可选:
-  --folder-token        目标文件夹 token（默认 Drive 根目录）
-  --user-access-token   覆盖登录态
-
-权限:
-  - User Access Token
-  - drive:file:upload（或 drive:drive）
+  --folder-token   目标 Drive 文件夹（默认根目录；与 --wiki-token 互斥）
+  --wiki-token     目标 wiki 节点
+  --dry-run        只打印将要发出的请求
+  --user-access-token  覆盖登录态
 
 示例:
-  feishu-cli markdown create --name plan.md --content "# Plan\n\n- todo 1"
-  feishu-cli markdown create --content-file ./local.md --folder-token fldxxx
-  feishu-cli markdown create --name draft.md --content-file ./tmp.md --folder-token fldxxx`,
+  feishu-cli markdown create --name plan.md --content "# Plan"
+  feishu-cli markdown create --file ./local.md --folder-token fldxxx
+  feishu-cli markdown create --name draft.md --content "# wiki" --wiki-token wikcnxxx --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
@@ -47,91 +42,172 @@ var markdownCreateCmd = &cobra.Command{
 		contentFile, _ := cmd.Flags().GetString("content-file")
 		contentFileAlias, _ := cmd.Flags().GetString("file")
 		folderToken, _ := cmd.Flags().GetString("folder-token")
+		wikiToken, _ := cmd.Flags().GetString("wiki-token")
 		output, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		contentChanged := cmd.Flags().Changed("content")
+		fileChanged := cmd.Flags().Changed("content-file") || cmd.Flags().Changed("file")
 
 		var err error
 		contentFile, err = resolveMarkdownFileFlag(contentFile, contentFileAlias)
 		if err != nil {
 			return err
 		}
-		if content != "" && contentFile != "" {
-			return fmt.Errorf("--content 与 --content-file 不能同时使用")
+		if contentChanged && fileChanged {
+			return fmt.Errorf("--content 与 --content-file/--file 不能同时使用")
 		}
-		if content == "" && contentFile == "" {
+		if !contentChanged && !fileChanged {
 			return fmt.Errorf("请提供 --content 或 --content-file")
 		}
-
-		// 解析最终文件名：优先 --name；否则若是 --content-file 用本地文件 basename。
-		fileName := strings.TrimSpace(name)
-		if fileName == "" && contentFile != "" {
-			fileName = filepath.Base(contentFile)
+		folderToken = strings.TrimSpace(folderToken)
+		wikiToken = strings.TrimSpace(wikiToken)
+		if cmd.Flags().Changed("folder-token") && folderToken == "" {
+			return fmt.Errorf("--folder-token 不能为空；省略该 flag 以上传到 Drive 根目录")
 		}
-		if fileName == "" {
-			return fmt.Errorf("--name 必填（使用 --content 时）")
+		if cmd.Flags().Changed("wiki-token") && wikiToken == "" {
+			return fmt.Errorf("--wiki-token 不能为空")
 		}
-		if !strings.HasSuffix(strings.ToLower(fileName), ".md") {
-			return fmt.Errorf("--name 必须以 .md 结尾，得到 %q", fileName)
-		}
-
-		// 准备本地路径：--content 写临时 .md；--content-file 直接复用本地文件路径。
-		uploadPath := contentFile
-		var cleanup func()
-		if content != "" {
-			tmpFile, err := os.CreateTemp("", "feishu-md-*.md")
-			if err != nil {
-				return fmt.Errorf("创建临时文件失败: %w", err)
-			}
-			if _, err := tmpFile.WriteString(content); err != nil {
-				tmpFile.Close()
-				os.Remove(tmpFile.Name())
-				return fmt.Errorf("写入临时文件失败: %w", err)
-			}
-			if err := tmpFile.Close(); err != nil {
-				os.Remove(tmpFile.Name())
-				return fmt.Errorf("关闭临时文件失败: %w", err)
-			}
-			uploadPath = tmpFile.Name()
-			cleanup = func() { os.Remove(uploadPath) }
-			defer cleanup()
+		if folderToken != "" && wikiToken != "" {
+			return fmt.Errorf("--folder-token 与 --wiki-token 互斥")
 		}
 
-		stat, err := os.Stat(uploadPath)
+		fileName, err := markdownCreateSpecName(name, contentFile)
 		if err != nil {
-			return fmt.Errorf("读取本地文件失败: %w", err)
+			return err
 		}
-		if stat.IsDir() {
-			return fmt.Errorf("--content-file 必须指向文件，不是目录")
+
+		var size int64
+		if contentChanged {
+			size = int64(len(content))
+		} else {
+			stat, err := os.Stat(contentFile)
+			if err != nil {
+				return fmt.Errorf("读取本地文件失败: %w", err)
+			}
+			if stat.IsDir() {
+				return fmt.Errorf("--content-file 必须指向文件，不是目录")
+			}
+			if err := validateMarkdownFileName(fileName, "--name"); err != nil {
+				return err
+			}
+			size = stat.Size()
 		}
-		if stat.Size() == 0 {
+		if size == 0 {
 			return fmt.Errorf("Markdown 内容为空，不支持创建空 .md 文件")
 		}
 
-		token, err := requireUserToken(cmd, "markdown create")
+		spec := client.MarkdownUploadSpec{
+			FileName:    fileName,
+			FolderToken: folderToken,
+			WikiToken:   wikiToken,
+		}
+		parentType, parentNode := "explorer", folderToken
+		if wikiToken != "" {
+			parentType, parentNode = "wiki", wikiToken
+		}
+
+		if dryRun {
+			multipart := markdownNeedsMultipart(size)
+			steps := markdownUploadDryRunSteps(spec, size, multipart, contentFile)
+			steps = append(steps, dryRunStep{
+				Method: "POST",
+				URL:    "/open-apis/drive/v1/metas/batch_query",
+				Desc:   "Fetch the created Markdown file's real access URL",
+				Body: map[string]any{
+					"request_docs": []map[string]any{{
+						"doc_token": "<file_token from upload response>",
+						"doc_type":  "file",
+					}},
+					"with_url": true,
+				},
+			})
+			return printDryRunPlan(cmd, "upload markdown file", map[string]any{
+				"parent_type": parentType,
+				"parent_node": parentNode,
+				"size":        size,
+			}, steps)
+		}
+
+		token := resolveOptionalUserTokenWithFallback(cmd)
+		var result client.MarkdownUploadResult
+		if fileChanged {
+			result, err = client.UploadMarkdownFile(spec, contentFile, token)
+		} else {
+			result, err = client.UploadMarkdownContent(spec, []byte(content), token)
+		}
 		if err != nil {
 			return err
 		}
 
-		fileToken, err := client.UploadFileWithToken(uploadPath, folderToken, fileName, token)
-		if err != nil {
-			return err
-		}
-
-		result := map[string]any{
-			"file_token": fileToken,
+		out := map[string]any{
+			"file_token": result.FileToken,
 			"file_name":  fileName,
-			"size_bytes": stat.Size(),
+			"size_bytes": size,
+		}
+		if u, metaErr := client.FetchDocMetaURL(result.FileToken, "file", token); metaErr == nil && strings.TrimSpace(u) != "" {
+			out["url"] = u
+		} else if metaErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: 创建后查询 URL 失败: %v\n", metaErr)
 		}
 
 		if output == "json" {
-			return printJSON(result)
+			return printJSON(out)
 		}
-
 		fmt.Printf("Markdown 文件创建成功!\n")
 		fmt.Printf("  file_name:  %s\n", fileName)
-		fmt.Printf("  file_token: %s\n", fileToken)
-		fmt.Printf("  size:       %d bytes\n", stat.Size())
+		fmt.Printf("  file_token: %s\n", result.FileToken)
+		fmt.Printf("  size:       %d bytes\n", size)
+		if u, ok := out["url"].(string); ok && u != "" {
+			fmt.Printf("  url:        %s\n", u)
+		}
 		return nil
 	},
+}
+
+func markdownUploadDryRunSteps(spec client.MarkdownUploadSpec, size int64, multipart bool, filePath string) []dryRunStep {
+	parentType, parentNode := "explorer", spec.FolderToken
+	if spec.WikiToken != "" {
+		parentType, parentNode = "wiki", spec.WikiToken
+	}
+	fileField := "<markdown content>"
+	if filePath != "" {
+		fileField = "@" + filePath
+	}
+	if !multipart {
+		body := map[string]any{
+			"file_name":   spec.FileName,
+			"parent_type": parentType,
+			"parent_node": parentNode,
+			"size":        size,
+			"file":        fileField,
+		}
+		if spec.FileToken != "" {
+			body["file_token"] = spec.FileToken
+		}
+		return []dryRunStep{{
+			Method: "POST",
+			URL:    "/open-apis/drive/v1/files/upload_all",
+			Body:   body,
+		}}
+	}
+	prepare := map[string]any{
+		"file_name":   spec.FileName,
+		"parent_type": parentType,
+		"parent_node": parentNode,
+		"size":        size,
+	}
+	if spec.FileToken != "" {
+		prepare["file_token"] = spec.FileToken
+	}
+	return []dryRunStep{
+		{Method: "POST", URL: "/open-apis/drive/v1/files/upload_prepare", Desc: "Initialize multipart upload", Body: prepare},
+		{Method: "POST", URL: "/open-apis/drive/v1/files/upload_part", Desc: "Upload file parts (repeated)", Body: map[string]any{
+			"upload_id": "<upload_id>", "seq": "<chunk_index>", "size": "<chunk_size>", "file": "<chunk_binary>",
+		}},
+		{Method: "POST", URL: "/open-apis/drive/v1/files/upload_finish", Desc: "Finalize upload", Body: map[string]any{
+			"upload_id": "<upload_id>", "block_num": "<block_num>",
+		}},
+	}
 }
 
 func init() {
@@ -140,7 +216,9 @@ func init() {
 	markdownCreateCmd.Flags().String("content", "", "Markdown 字符串内容（与 --content-file 二选一）")
 	markdownCreateCmd.Flags().String("content-file", "", "本地 .md 文件路径（与 --content 二选一）")
 	markdownCreateCmd.Flags().String("file", "", "本地 .md 文件路径，兼容别名（等价于 --content-file）")
-	markdownCreateCmd.Flags().String("folder-token", "", "目标文件夹 token（默认 Drive 根目录）")
+	markdownCreateCmd.Flags().String("folder-token", "", "目标文件夹 token（默认 Drive 根目录；与 --wiki-token 互斥）")
+	markdownCreateCmd.Flags().String("wiki-token", "", "目标 wiki 节点 token（与 --folder-token 互斥）")
+	markdownCreateCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	markdownCreateCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	markdownCreateCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 }

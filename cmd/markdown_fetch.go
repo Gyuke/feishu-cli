@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
@@ -15,80 +16,73 @@ var markdownFetchCmd = &cobra.Command{
 	Short: "读取 Drive 中的原生 Markdown (.md) 文件内容",
 	Long: `下载一个 Drive 上的 .md 文件，按需要直接打印到 stdout 或保存到本地。
 
-底层走 ` + "`/open-apis/drive/v1/files/{file_token}/download`" + `（client.DownloadFileWithToken），
-与 ` + "`drive download`" + ` 同一 endpoint，但默认面向 .md 文本场景：未指定 --output-path 时直接打印为 UTF-8。
+底层走 ` + "`GET /open-apis/drive/v1/medias/{file_token}/preview_download?preview_type=16`" + `。
+可选 ` + "`--version`" + ` 下载历史版本。User Token 优先，未登录时回退 Bot/Tenant。
 
 必填:
   --file-token   Markdown 文件 token
 
 可选:
   --output-path  本地保存路径（缺省时打印到 stdout）
+  --version      历史版本号
   --output, -o   输出格式（json；不传 --output-path 时返回 content）
   --overwrite    本地路径已存在时是否覆盖
+  --dry-run      只打印将要发出的请求
   --user-access-token  覆盖登录态
 
 权限:
-  - User Access Token
+  - User 或 Bot
   - drive:file:download（或 drive:drive）
 
 示例:
-  feishu-cli markdown fetch --file-token boxcnxxx                 # 打印到 stdout
-  feishu-cli markdown fetch --file-token boxcnxxx --output-path ./local.md
-  feishu-cli markdown fetch --file-token boxcnxxx --output-path ./local.md --overwrite`,
+  feishu-cli markdown fetch --file-token boxcnxxx
+  feishu-cli markdown fetch --file-token boxcnxxx --output-path ./local.md --overwrite
+  feishu-cli markdown fetch --file-token boxcnxxx --version 7633658129540910621 --dry-run`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
 		}
 
-		token, err := requireUserToken(cmd, "markdown fetch")
+		fileToken, _ := cmd.Flags().GetString("file-token")
+		outputPath, _ := cmd.Flags().GetString("output-path")
+		version, _ := cmd.Flags().GetString("version")
+		overwrite, _ := cmd.Flags().GetBool("overwrite")
+		outputFormat, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		fileToken = strings.TrimSpace(fileToken)
+		outputPath = strings.TrimSpace(outputPath)
+		version = strings.TrimSpace(version)
+		if fileToken == "" {
+			return fmt.Errorf("--file-token 必填")
+		}
+		if err := validateMarkdownDiffVersionValue(version, "--version"); err != nil {
+			return err
+		}
+
+		if dryRun {
+			return printDryRunPlan(cmd, "download markdown source file preview artifact bytes", map[string]any{
+				"file_token": fileToken,
+				"output":     markdownFirstNonEmpty(outputPath, "<stdout>"),
+			}, []dryRunStep{{
+				Method: "GET",
+				URL:    markdownPreviewDownloadPath(fileToken),
+				Params: markdownPreviewParams(version),
+			}})
+		}
+
+		token := resolveOptionalUserTokenWithFallback(cmd)
+		data, fileName, err := client.FetchMarkdownSource(fileToken, version, token)
 		if err != nil {
 			return err
 		}
 
-		fileToken, _ := cmd.Flags().GetString("file-token")
-		outputPath, _ := cmd.Flags().GetString("output-path")
-		overwrite, _ := cmd.Flags().GetBool("overwrite")
-		outputFormat, _ := cmd.Flags().GetString("output")
-
-		if fileToken == "" {
-			return fmt.Errorf("--file-token 必填")
-		}
-
-		// 没传 --output → 落临时文件读完打印（直接给字符串）。
 		printToStdout := outputPath == ""
-		finalPath := outputPath
-		var cleanup func()
 		if printToStdout {
-			tmp, err := os.CreateTemp("", "feishu-md-fetch-*.md")
-			if err != nil {
-				return fmt.Errorf("创建临时文件失败: %w", err)
-			}
-			tmp.Close()
-			finalPath = tmp.Name()
-			cleanup = func() { os.Remove(finalPath) }
-			defer cleanup()
-		} else {
-			// 路径是目录时，拼上文件名（用 fileToken.md 兜底）。
-			if stat, err := os.Stat(finalPath); err == nil && stat.IsDir() {
-				finalPath = filepath.Join(finalPath, fileToken+".md")
-			}
-			if _, err := os.Stat(finalPath); err == nil && !overwrite {
-				return fmt.Errorf("本地文件已存在: %s（使用 --overwrite 覆盖）", finalPath)
-			}
-		}
-
-		if err := client.DownloadFileWithToken(fileToken, finalPath, token); err != nil {
-			return err
-		}
-
-		if printToStdout {
-			data, err := os.ReadFile(finalPath)
-			if err != nil {
-				return fmt.Errorf("读取下载文件失败: %w", err)
-			}
 			if outputFormat == "json" {
 				return printJSON(map[string]any{
 					"file_token": fileToken,
+					"file_name":  fileName,
 					"content":    string(data),
 					"size_bytes": len(data),
 				})
@@ -97,34 +91,54 @@ var markdownFetchCmd = &cobra.Command{
 			return nil
 		}
 
-		stat, _ := os.Stat(finalPath)
-		result := map[string]any{
-			"file_token": fileToken,
-			"saved_path": finalPath,
-			"size_bytes": int64(0),
+		finalPath := outputPath
+		if strings.HasSuffix(finalPath, string(os.PathSeparator)) || strings.HasSuffix(finalPath, "/") || strings.HasSuffix(finalPath, "\\") {
+			finalPath = filepath.Join(finalPath, fileName)
+		} else if stat, err := os.Stat(finalPath); err == nil && stat.IsDir() {
+			finalPath = filepath.Join(finalPath, fileName)
 		}
-		if stat != nil {
-			result["size_bytes"] = stat.Size()
+		if _, err := os.Stat(finalPath); err == nil && !overwrite {
+			return fmt.Errorf("本地文件已存在: %s（使用 --overwrite 覆盖）", finalPath)
+		}
+		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+			return fmt.Errorf("创建输出目录失败: %w", err)
+		}
+		if err := os.WriteFile(finalPath, data, 0o644); err != nil {
+			return fmt.Errorf("写文件失败: %w", err)
 		}
 
+		result := map[string]any{
+			"file_token": fileToken,
+			"file_name":  fileName,
+			"saved_path": finalPath,
+			"size_bytes": len(data),
+		}
 		if outputFormat == "json" {
 			return printJSON(result)
 		}
-
 		fmt.Printf("Markdown 文件下载成功!\n")
 		fmt.Printf("  保存路径: %s\n", finalPath)
-		if stat != nil {
-			fmt.Printf("  大小:     %d bytes\n", stat.Size())
-		}
+		fmt.Printf("  大小:     %d bytes\n", len(data))
 		return nil
 	},
+}
+
+func markdownFirstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func init() {
 	markdownCmd.AddCommand(markdownFetchCmd)
 	markdownFetchCmd.Flags().String("file-token", "", "Markdown 文件 token（必填）")
 	markdownFetchCmd.Flags().String("output-path", "", "本地保存路径（缺省时打印到 stdout）")
+	markdownFetchCmd.Flags().String("version", "", "历史版本号（走 preview_download 的 version 查询参数）")
 	markdownFetchCmd.Flags().Bool("overwrite", false, "本地路径已存在时是否覆盖")
+	markdownFetchCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	markdownFetchCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	markdownFetchCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(markdownFetchCmd, "file-token")

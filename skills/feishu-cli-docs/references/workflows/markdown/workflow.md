@@ -1,4 +1,4 @@
-# 飞书云盘原生 Markdown（markdown create/fetch/overwrite/diff）
+# 飞书云盘原生 Markdown（markdown create/fetch/overwrite/patch/diff）
 
 `markdown` 命令组把 Drive 上的 **`.md` 当作普通文件整体读写**，保留原始 Markdown 源码，**不做** Markdown ↔ 飞书 docx 块的转换。
 
@@ -20,7 +20,7 @@
 |------|------|------------|---------|
 | `doc import` | Markdown → 飞书 docx 块（标题/列表/表格/Callout/Mermaid 画板…） | docx（在线协同文档） | 给人读、要排版、要团队评论 |
 | `doc export` | docx → Markdown（块解析回 markdown 源码） | 本地 `.md` | 从飞书 docx 落盘到 Git |
-| `markdown create/fetch/overwrite` | 把 `.md` 整体上传/下载，**不转换** | file（Drive 普通文件） | AI agent 直接落盘原汁原味 `.md`、保留 fenced code block 缩进、当图床/密集代码块/版本管理用 |
+| `markdown create/fetch/overwrite/patch` | 把 `.md` 整体上传/下载，**不转换** | file（Drive 普通文件） | AI agent 直接落盘原汁原味 `.md`、保留 fenced code block 缩进、当图床/密集代码块/版本管理用 |
 
 **判断走哪条**：
 
@@ -30,7 +30,7 @@
 
 ## 前置条件
 
-- **认证**：所有 `markdown` 命令默认走 **User Access Token**（执行 `feishu-cli auth login` 登录）
+- **认证**：User Token 优先（`feishu-cli auth login`）；未登录时回退 Bot/Tenant，便于无人值守
 - **预检**：`feishu-cli auth check --scope "drive:file:upload drive:file:download"`
 
 ## 命令速查
@@ -45,8 +45,9 @@ feishu-cli markdown create --name plan.md --content "# Plan\n\n- todo 1"
 feishu-cli markdown create --content-file ./local.md
 feishu-cli markdown create --file ./local.md
 
-# 指定目标文件夹
+# 指定目标文件夹或 wiki 节点（二者互斥）
 feishu-cli markdown create --name draft.md --content-file ./tmp.md --folder-token fldxxx
+feishu-cli markdown create --name draft.md --content "# wiki" --wiki-token wikcnxxx
 
 # JSON 输出（拿 file_token 给后续步骤）
 feishu-cli markdown create --name plan.md --content-file ./plan.md -o json
@@ -60,7 +61,9 @@ feishu-cli markdown create --name plan.md --content-file ./plan.md -o json
 | `--content` | 字符串内容（与 `--content-file` 二选一） |
 | `--content-file` | 本地 `.md` 文件路径 |
 | `--file` | 兼容别名，等价于 `--content-file` |
-| `--folder-token` | 目标文件夹（缺省 Drive 根目录） |
+| `--folder-token` | 目标 Drive 文件夹（缺省根目录；与 `--wiki-token` 互斥） |
+| `--wiki-token` | 目标 wiki 节点（`parent_type=wiki`） |
+| `--dry-run` | 只打印将要发出的请求 |
 | `-o json` | JSON 输出（含 `file_token` / `file_name` / `size_bytes`） |
 | `--user-access-token` | 覆盖登录态 |
 
@@ -80,6 +83,9 @@ feishu-cli markdown fetch --file-token boxcnxxx --output-path ./local.md --overw
 
 # JSON 输出（含 content 字符串）
 feishu-cli markdown fetch --file-token boxcnxxx -o json
+
+# 历史版本（preview_download?preview_type=16&version=N）
+feishu-cli markdown fetch --file-token boxcnxxx --version 7633658129540910621
 ```
 
 **关键 flag**：
@@ -87,8 +93,10 @@ feishu-cli markdown fetch --file-token boxcnxxx -o json
 | flag | 说明 |
 |------|------|
 | `--file-token` | Markdown 文件 token（必填） |
-| `--output-path` | 本地保存路径；**目录时拼 `<fileToken>.md`**；缺省打印 stdout |
+| `--output-path` | 本地保存路径；**目录时用响应头文件名**；缺省打印 stdout |
+| `--version` | 历史版本号，走 `preview_download` 的 `version` 查询参数 |
 | `--overwrite` | 本地文件已存在时覆盖（缺省直接报错） |
+| `--dry-run` | 只打印将要发出的请求 |
 | `-o, --output json` | JSON 输出；不传 `--output-path` 时包含 `content` 字符串 |
 
 ### 3. `markdown overwrite` — 覆盖已有 .md（保 file_token）
@@ -111,14 +119,24 @@ feishu-cli markdown overwrite --file-token boxcnxxx --content-file ./new.md --na
 |------|------|
 | `--file-token` | 目标文件 token（必填） |
 | `--content` / `--content-file` | 新内容（二选一） |
-| `--name` | 覆盖后文件名（`.md` 结尾；`--content` 时必填；`--content-file` 缺省使用本地 basename） |
+| `--name` | 覆盖后文件名（`.md` 结尾；缺省通过 `metas/batch_query` 读取远端现有名） |
+| `--dry-run` | 只打印将要发出的请求 |
 | `-o json` | JSON 输出 |
 
-**核心价值**：`file_token` 保持不变 → 分享链接持久、其他人收藏的链接不失效；多次迭代场景（AI agent 每天更新同一份 `.md`）优于"删了重建"。
+**核心价值**：`file_token` 保持不变 → 分享链接持久、其他人收藏的链接不失效；多次迭代场景（AI agent 每天更新同一份 `.md`）优于"删了重建"。>20MB 自动走 `upload_prepare/part/finish`，仍保留同一 file_token。
+
+### 3.1 `markdown patch` — 查找替换后覆盖
+
+```bash
+feishu-cli markdown patch --file-token boxcnxxx --pattern "TODO" --content "DONE"
+feishu-cli markdown patch --file-token boxcnxxx --regex --pattern "v[0-9]+" --content "v2"
+```
+
+先 `preview_download?preview_type=16` 拉当前内容，本地 literal/RE2 替换；`match_count=0` 时不写回。
 
 ### 4. `markdown diff` — 本地比对远端最新/历史版本（只读，不改远端）
 
-下载远端 Markdown 内容并在本地计算 unified diff，**不修改远端文件**。三种比对模式（由参数组合决定，互斥）：
+下载远端 Markdown 内容并在本地计算 unified diff，**不修改远端文件**。源/历史走 `GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16`。三种比对模式：
 
 ```bash
 # 模式 1：远端最新 vs 本地文件
@@ -137,7 +155,7 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md --format table 
 feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼容写法，等价 --format json
 ```
 
-> **版本对比仅适用 docx/sheet/bitable**：Drive 原生 `.md` 的覆盖（`markdown overwrite`）是原地替换，不产生数字版本；`--from-version` / `--to-version`（模式 2/3）仅对 docx/sheet/bitable 等有版本记录的类型有效，对 `.md` 文件会 404。`.md` 场景请用模式 1（远端最新 vs 本地文件）。
+> `--from-version` / `--to-version` 必须是数字版本号；可与 `--file` 组合（远端指定版本 vs 本地）。`--to-version` 不能与 `--file` 同时使用。
 
 **关键 flag**：
 
@@ -193,13 +211,9 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼
 
 为绕开 SDK 限制，`internal/client/markdown.go:OverwriteFileWithToken` 用 `client.Post` + `*larkcore.Formdata` 自己拼 multipart（translator 检测到 `*Formdata` 会自动切到 FileUpload 多部分序列化路径，见 SDK `core/reqtranslator.go:payload`）。endpoint 仍是官方 `upload_all`。
 
-### 2. 文件大小上限 ≤ 20MB
+### 2. 单次上传 20MB 边界
 
-`upload_all` 单次上传 API 上限 **20MB**，本命令组只走单次上传路径：
-
-- `markdown create` 调 `client.UploadFileWithToken`：≤ 20MB 使用 `upload_all`，> 20MB 自动切到
-  `upload_prepare/upload_part/upload_finish` 分片管线
-- `markdown overwrite` **只支持 ≤ 20MB 小文件**，大文件覆盖需要分片接口，本命令组未实现。如果是几十 MB 的 `.md`（罕见，比如海量日志贴）走 `drive upload` 分片管线创建新文件，无法保留原 file_token。
+`upload_all` 单次上限 **20MB**。`create` / `overwrite` / `patch` 在 **恰好 20MB** 仍走 `upload_all`，**20MB+1** 自动切 `upload_prepare/upload_part/upload_finish`，覆盖路径同样携带 `file_token` 保留原文件。
 
 **`markdown diff` 另有独立的行数/矩阵上限**（与 20MB 上传上限无关，防 LCS 矩阵 OOM）：
 
@@ -223,9 +237,9 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼
 - `-o json` → 把 `{file_token, content, size_bytes}` 打到 stdout
 - 两者可叠加：落盘 + 同时 stdout JSON 摘要
 
-### 6. `--output-path` 是目录时的兜底文件名
+### 6. `--output-path` 是目录时的文件名
 
-`markdown fetch --output-path ./downloads/` 会拼成 `./downloads/<fileToken>.md`（不从响应头解析原文件名，与 `drive download` 行为一致）。要保留原文件名请自己加查询步骤再拼路径。
+`markdown fetch --output-path ./downloads/` 优先使用 `Content-Disposition` 文件名，缺省才回退 `<fileToken>.md`。
 
 ## 何时转走 `doc import/export`
 
@@ -235,17 +249,16 @@ feishu-cli markdown diff --file-token boxcnxxx --file ./local.md -o json   # 兼
 
 ## 何时转走 `drive upload`
 
-- **大文件 > 20MB**（罕见，但比如全量代码 dump、长 log）→ `feishu-cli drive upload --file xxx.md` 走分片，会创建新 file_token
 - **非 `.md` 扩展名**（`.mdx` / `.markdown` / `.txt`）→ `drive upload`
+- **二进制或非 Markdown 覆盖** → `drive upload --file-token`
 
 ## 权限要求
 
 | 命令 | 所需 scope |
 |------|------|
 | `markdown create` | `drive:file:upload`（或 `drive:drive`） |
-| `markdown fetch` | `drive:file:download`（或 `drive:drive`） |
-| `markdown overwrite` | `drive:file:upload` + `drive:drive.metadata:readonly`；且 User Token 对目标文件有编辑权限 |
-| `markdown diff` | `drive:file:download`（或 `drive:drive`） |
+| `markdown fetch` / `diff` | `drive:file:download`（或 `drive:drive`） |
+| `markdown overwrite` / `patch` | `drive:file:upload` + `drive:drive.metadata:readonly` + `drive:file:download` |
 
 **推荐做法**：执行 `feishu-cli auth login` 登录后，由 `auth check --scope "drive:file:upload drive:file:download"` 预检；缺 scope 时按提示 `auth login` 补申请。
 
@@ -284,10 +297,9 @@ feishu-cli doc import ./design.md --title "设计稿" --upload-images
 
 ## 注意事项
 
-- **默认 User Access Token**：所有 `markdown` 命令未登录时统一提示 `feishu-cli auth login`
-- **不做 Markdown 转换**：本命令组保留 `.md` 字节流不变，**不**做飞书 docx 块转换，**不**触发图床、画板渲染、Callout 等增强逻辑——需要这些走 `doc import`
-- **覆盖单次 ≤ 20MB**：`overwrite` 固定使用 `upload_all`；`create` 超过 20MB 会自动分片。
-  大文件覆盖未实现，只能用 `drive upload` 创建新的 file_token
+- **User 优先 + Bot 兜底**：已登录用 User Token；未登录回退 App Token
+- **不做 Markdown 转换**：本命令组保留 `.md` 字节流不变，**不**做飞书 docx 块转换
+- **>20MB 分片覆盖**：`overwrite`/`patch`/`create` 均支持 multipart，保留 file_token
 - **`fetch` 输出参数**：路径走 `--output-path`，格式走 `-o/--output`
 
 > `.md` 后缀强制、空内容拒绝两条已经在「核心 flag」与「踩坑」章节出现，这里不再重复，详见 [`overwrite` flag 表](#3-markdown-overwrite--覆盖已有-md保-file_token) 和 [`踩坑 §3/§4`](#3-md-后缀强制校验)。
@@ -299,14 +311,13 @@ feishu-cli doc import ./design.md --title "设计稿" --upload-images
 | 触发条件 | 错误信息 | 排查方向 |
 |---|---|---|
 | User Token 对目标文件无编辑权限 | `覆盖文件失败: code=<非 0>, msg=<飞书返回>`（常见 `1061004 forbidden`、`1061045 no permission`） | 在飞书云盘右键文件 → 共享 → 给当前用户加「可编辑」；或换文件所有者的 token；或检查 scope `drive:file:upload` 是否已授予 |
-| 文件大小超 20MB（`--content`） | `--content 大小 <N> 字节超过 20MB API 上限` | 切分文件或换 `drive upload`（会创建新 file_token，分享链接失效） |
-| 文件大小超 20MB（`--content-file`） | `--content-file 大小 <N> 字节超过 20MB API 上限，请切分或用多次 fetch+overwrite` | 同上；CLI 在读盘前 `os.Stat` 已拦截，不浪费上传带宽 |
+| 覆盖未返回 version | `覆盖 Markdown 失败: 未返回 version` | 服务端应在 overwrite 响应里带回 version；保留 log_id 排查 |
 | `--name` 不以 `.md` 结尾 | `--name 必须以 .md 结尾，得到 "xxx.txt"` | 改 `.md` 后缀；`.mdx` / `.markdown` 必须走 `drive upload` |
 | `--content-file` 路径不存在 | `读取本地文件失败: open <path>: no such file or directory` | 检查路径是否相对当前目录；建议传绝对路径 |
 | `--content-file` 是目录 | `--content-file 必须指向文件，不是目录` | 指向具体 `.md` 文件 |
 | 既给 `--content` 又给 `--content-file` | `--content 与 --content-file 不能同时使用` | 二选一 |
 | 都没给 | `请提供 --content 或 --content-file` | 至少传一个 |
-| `--content` 模式漏 `--name` | `使用 --content 时必须提供 --name 指定远端文件名（保留原名请加 --name <现有文件名>.md）` | 显式 `--name existing.md`（不会自动 fallback `fileToken.md`） |
+| `--content` 模式漏 `--name` 且远端 title 为空 | 回退 `<fileToken>.md` | 想保留原名可显式 `--name existing.md` |
 | 内容为空字节 | `Markdown 内容为空，不支持把 .md 覆盖为空文件` | 要清空语义传 `--content " "`（占位空格） |
 | HTTP 层异常 | `覆盖文件失败: HTTP <status>, body: <raw>` | 网络/代理问题，附带原始 body 便于排查 |
 | 响应解析失败 | `解析覆盖响应失败: <json error>` | 飞书侧返回非 JSON（极罕见，通常网关错误页） |
@@ -323,8 +334,8 @@ feishu-cli doc import ./design.md --title "设计稿" --upload-images
 
 **老 `drive upload/download` 仍然可用**（二进制、非 `.md` 走老路径），新能力集中在 `markdown overwrite`（保 file_token 覆盖）。
 
-## v1 PR quality-pass 加固
+## 官方协议要点
 
-- **`drive/v1/files/upload_all` 单次上传 ≤ 20MB**。`overwrite` 在 CLI 层做 20MB pre-check；
-  `create` 不做该限制，超过后由上传客户端自动切换分片协议
-- **`overwrite` 必须显式 `--name`**（用 `--content` 时）：不再 fallback `<fileToken>.md` 默默改名远端文件；保留原名请显式 `--name <existing>.md`
+- 源/历史下载：`GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16[&version=N]`
+- 创建/覆盖：`POST /files/upload_all`；>20MB 走 `upload_prepare/part/finish`。wiki 目标 `parent_type=wiki`
+- overwrite 未传 `--name` 时先 `POST /drive/v1/metas/batch_query` 读现有 title

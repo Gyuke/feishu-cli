@@ -65,7 +65,7 @@ feishu-cli drive download --file-token boxcnxxxx --output ./report.pdf --output-
 ### 2. 文档导出（含 markdown 快捷路径）
 
 ```bash
-# docx → markdown：走 /docs/v1/content 快捷路径，立即返回（不跑异步 export_tasks）
+# docx → markdown：走 POST /open-apis/docs_ai/v1/documents/{token}/fetch（format=markdown）
 feishu-cli drive export --token docxxxx --doc-type docx --file-extension markdown --output-dir ./exports
 
 # docx → pdf：走异步 export_tasks，有界轮询 10×5s，超时返回 next_command
@@ -79,8 +79,10 @@ feishu-cli drive export --token basexxxx --doc-type bitable --file-extension csv
 ```
 
 **支持的格式**：
-- `--doc-type`: `doc` / `docx` / `sheet` / `bitable`
-- `--file-extension`: `docx` / `pdf` / `xlsx` / `csv` / `markdown`（markdown 仅 docx 支持）
+- `--doc-type`: `doc` / `docx` / `sheet` / `bitable` / `slides` / `wiki`（wiki 先 get_node）
+- `--file-extension`: `docx` / `pdf` / `xlsx` / `csv` / `markdown` / `base` / `pptx`
+- 矩阵：doc→docx/pdf；docx→docx/pdf/markdown；sheet→xlsx/csv；bitable→xlsx/csv/base；slides→pptx/pdf
+- `--url` 可替代 `--token`；`--only-schema` 仅 bitable→base
 
 **超时后的 resume 流程**：
 ```bash
@@ -104,17 +106,19 @@ feishu-cli drive export-download --file-token boxxxx --file-name "报告.pdf" --
 ### 4. 文档导入
 
 ```bash
-# 本地文件 → 云文档（docx / sheet / bitable）
+# 本地文件 → 云文档（docx / sheet / bitable / slides）
 feishu-cli drive import --file report.docx --type docx
 feishu-cli drive import --file data.xlsx --type sheet --folder-token fldxxx
 feishu-cli drive import --file bigsheet.csv --type bitable --folder-token fldxxx
-
-# 注意：docx/sheet 导入上限 20MB，bitable 上限 100MB
+feishu-cli drive import --file deck.pptx --type slides
+feishu-cli drive import --file snapshot.base --type bitable --target-token bascnxxx
 ```
 
 **关键技术点**：
-- 走 **官方 `/medias/upload_all` 端点**（`parent_type=ccm_import_open` + `extra`），**不在用户云盘留下中间文件**（这是和老 `doc import-file` 的核心区别）
-- 格式特定大小限制：docx 20MB / sheet 20MB / bitable 100MB。docx/sheet 超过 20MB 会直接报错，不会自动绕过格式限制。
+- 走 **官方 `/medias/upload_all` 端点**（`parent_type=ccm_import_open` + `extra`），**省略 parent_node**；>20MB 走 `upload_prepare/part/finish` 且 **显式 `parent_node=""`**
+- `import_tasks` **始终携带** `point.mount_type=1`；省略 `--folder-token` 时 `mount_key` 为空（根目录）
+- wiki 节点不能当 `--folder-token`（会先 probe `wiki get_node`）
+- 官方大小矩阵：`.docx/.doc` 600MB、`.pptx` 500MB、`.xlsx` 800MB、`.csv` sheet 20MB / bitable 100MB、`.txt/.md/.html/.xls/.base` 20MB
 - 有界轮询 30×2s，超时返回 `next_command`
 
 ### 5. 移动（文件夹自动轮询）
@@ -125,6 +129,9 @@ feishu-cli drive move --file-token boxxxx --type docx --folder-token fldxxx
 
 # 文件夹移动（异步，自动轮询 task_check 30×2s）
 feishu-cli drive move --file-token fldxxx --type folder --folder-token fldyyy
+
+# 省略目标时先取真实 root token（GET /drive/explorer/v2/root_folder/meta）
+feishu-cli drive move --file-token boxxxx --type file
 ```
 
 **关键点**：
@@ -283,7 +290,7 @@ feishu-cli drive upload --file big_video.mp4 --folder-token fldxxx --name "会�
 ### 工作流 B：docx 批量导出 markdown
 
 ```bash
-# 通过 /docs/v1/content 快捷路径，秒出不用等
+# 通过 docs_ai fetch 快捷路径，秒出不用等
 for doc_id in doc1 doc2 doc3; do
   feishu-cli drive export --token $doc_id --doc-type docx --file-extension markdown --output-dir ./docs
 done
@@ -420,7 +427,8 @@ feishu-cli drive export --token $DOC_TOKEN --doc-type docx --file-extension mark
 - **导出有界轮询**：10 次 × 5 秒（总共 50 秒），超时**不报错**而是返回 `next_command`
 - **导入有界轮询**：30 次 × 2 秒（总共 60 秒），超时同上
 - **文件夹移动轮询**：30 次 × 2 秒
-- **格式特定大小限制**（import）：docx 20MB / sheet 20MB / bitable 100MB
+- **格式特定大小限制**（import）：按源扩展名，见上方矩阵（不再是笼统的 docx/sheet 20MB）
+- **drive move 省略 --folder-token**：先取真实根目录 token，不会把空字符串交给 move API
 - **add-comment 的 wiki 解析**：只支持 obj_type 为 `docx` 或 `doc` 的 wiki 节点；其他类型（sheet/bitable/mindnote 等）会报错
 - **局部评论**：仅 docx 支持 `--block-id` 锚点，doc（旧版文档）不支持
 - **文件名规则**：

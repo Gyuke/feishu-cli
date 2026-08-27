@@ -47,10 +47,11 @@ func TestResolveMarkdownDiffMode(t *testing.T) {
 		wantErr                   bool
 	}{
 		{"local vs remote", "a.md", "", "", "local_vs_remote", false},
+		{"local vs remote version", "a.md", "2", "", "local_vs_remote", false},
 		{"remote version vs latest", "", "3", "", "remote_vs_remote", false},
 		{"remote version vs version", "", "2", "5", "remote_vs_remote", false},
 		{"to without from", "", "", "5", "", true},
-		{"local + version mutually exclusive", "a.md", "2", "", "", true},
+		{"local + to-version rejected", "a.md", "", "5", "", true},
 		{"nothing", "", "", "", "", true},
 	}
 	for _, tc := range cases {

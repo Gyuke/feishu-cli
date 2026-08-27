@@ -18,29 +18,22 @@ var driveMoveCmd = &cobra.Command{
 
 - 文件移动：同步返回
 - 文件夹移动：异步任务，自动轮询 task_check（最多 30×2s），超时返回 task_id 可用 drive task-result 继续
+- 省略 --folder-token 时先 GET /open-apis/drive/explorer/v2/root_folder/meta 取真实根目录 token
 
 必填:
   --file-token     要移动的文件/文件夹 token
   --type           类型: file / docx / doc / sheet / bitable / mindnote / folder / slides
 
 可选:
-  --folder-token   目标文件夹 token（默认根目录）
+  --folder-token   目标文件夹 token（默认真实根目录）
+  --dry-run        只打印将要发出的请求
   --user-access-token  覆盖登录态
-
-权限:
-  - User Access Token
-  - drive:file:write
 
 示例:
   feishu-cli drive move --file-token boxxxx --type docx --folder-token fldxxx
-  feishu-cli drive move --file-token fldxxx --type folder --folder-token fldyyy`,
+  feishu-cli drive move --file-token fldxxx --type folder`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
-			return err
-		}
-
-		token, err := requireUserToken(cmd, "drive move")
-		if err != nil {
 			return err
 		}
 
@@ -48,12 +41,64 @@ var driveMoveCmd = &cobra.Command{
 		folderToken, _ := cmd.Flags().GetString("folder-token")
 		fileType, _ := cmd.Flags().GetString("type")
 		output, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 		if fileToken == "" {
 			return fmt.Errorf("--file-token 必填")
 		}
 		if err := validateEnum(fileType, "--type", driveMoveAllowedTypes); err != nil {
 			return err
+		}
+
+		if dryRun {
+			var steps []dryRunStep
+			dest := folderToken
+			if dest == "" {
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    "/open-apis/drive/explorer/v2/root_folder/meta",
+					Desc:   "Resolve the caller's real Drive root folder token",
+				})
+				dest = "<root_folder_token>"
+			}
+			steps = append(steps, dryRunStep{
+				Method: "POST",
+				URL:    "/open-apis/drive/v1/files/" + fileToken + "/move",
+				Desc:   "Move file/folder",
+				Body: map[string]any{
+					"type":         fileType,
+					"folder_token": dest,
+				},
+			})
+			if fileType == "folder" {
+				steps = append(steps, dryRunStep{
+					Method: "GET",
+					URL:    "/open-apis/drive/v1/files/task_check",
+					Desc:   "Poll async task status (for folder move)",
+					Params: map[string]any{"task_id": "<task_id>"},
+				})
+			}
+			return printDryRunPlan(cmd, "Move file or folder in Drive", map[string]any{
+				"file_token": fileToken,
+				"type":       fileType,
+			}, steps)
+		}
+
+		token, err := requireUserToken(cmd, "drive move")
+		if err != nil {
+			return err
+		}
+
+		if folderToken == "" {
+			fmt.Fprintf(os.Stderr, "未指定目标文件夹，获取根目录 token...\n")
+			rootToken, err := client.GetRootFolderToken(token)
+			if err != nil {
+				return err
+			}
+			if rootToken == "" {
+				return fmt.Errorf("获取根目录 token 失败：返回为空")
+			}
+			folderToken = rootToken
 		}
 
 		taskID, err := client.MoveFileWithToken(fileToken, folderToken, fileType, token)
@@ -67,7 +112,6 @@ var driveMoveCmd = &cobra.Command{
 			"folder_token": folderToken,
 		}
 
-		// 文件类型无 task_id，同步完成
 		if taskID == "" {
 			result["ready"] = true
 			if output == "json" {
@@ -77,7 +121,6 @@ var driveMoveCmd = &cobra.Command{
 			return nil
 		}
 
-		// 文件夹类型：轮询 task_check
 		result["task_id"] = taskID
 		fmt.Fprintf(os.Stderr, "文件夹移动任务: %s，开始轮询...\n", taskID)
 
@@ -116,7 +159,8 @@ func init() {
 	driveCmd.AddCommand(driveMoveCmd)
 	driveMoveCmd.Flags().String("file-token", "", "要移动的文件/文件夹 token（必填）")
 	driveMoveCmd.Flags().String("type", "", "类型: file/docx/doc/sheet/bitable/mindnote/folder/slides（必填）")
-	driveMoveCmd.Flags().String("folder-token", "", "目标文件夹 token（默认根目录）")
+	driveMoveCmd.Flags().String("folder-token", "", "目标文件夹 token（默认真实根目录）")
+	driveMoveCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	driveMoveCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	driveMoveCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(driveMoveCmd, "file-token", "type")

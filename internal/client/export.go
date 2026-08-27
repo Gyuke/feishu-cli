@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	larkdrive "github.com/larksuite/oapi-sdk-go/v3/service/drive/v1"
@@ -17,38 +19,55 @@ func CreateExportTask(docToken, docType, fileExtension, userAccessToken string) 
 // CreateExportTaskWithSubId 创建导出任务（支持子表 ID），返回任务 ticket
 // subId 用于将电子表格/多维表格导出为 CSV 时指定工作表/数据表 ID，为空时忽略
 func CreateExportTaskWithSubId(docToken, docType, fileExtension, subId, userAccessToken string) (string, error) {
-	client, err := GetClient()
+	return CreateExportTaskEx(docToken, docType, fileExtension, subId, false, userAccessToken)
+}
+
+// CreateExportTaskEx 创建导出任务，支持 bitable→base 的 only_schema。
+// SDK v3.5.3 的 ExportTask 没有 OnlySchema 字段，走 raw JSON 以对齐官方契约。
+func CreateExportTaskEx(docToken, docType, fileExtension, subId string, onlySchema bool, userAccessToken string) (string, error) {
+	cli, err := GetClient()
 	if err != nil {
 		return "", err
 	}
 
-	builder := larkdrive.NewExportTaskBuilder().
-		Token(docToken).
-		Type(docType).
-		FileExtension(fileExtension)
-
-	if subId != "" {
-		builder.SubId(subId)
+	body := map[string]any{
+		"token":          docToken,
+		"type":           docType,
+		"file_extension": fileExtension,
+	}
+	if strings.TrimSpace(subId) != "" {
+		body["sub_id"] = subId
+	}
+	if onlySchema {
+		body["only_schema"] = true
 	}
 
-	req := larkdrive.NewCreateExportTaskReqBuilder().
-		ExportTask(builder.Build()).
-		Build()
-
-	resp, err := client.Drive.ExportTask.Create(Context(), req, UserTokenOption(userAccessToken)...)
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Post(Context(), "/open-apis/drive/v1/export_tasks", body, tokenType, opts...)
 	if err != nil {
 		return "", fmt.Errorf("创建导出任务失败: %w", err)
 	}
-
-	if !resp.Success() {
-		return "", fmt.Errorf("创建导出任务失败: code=%d, msg=%s", resp.Code, resp.Msg)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("创建导出任务失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
-	if resp.Data == nil || resp.Data.Ticket == nil {
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Ticket string `json:"ticket"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return "", fmt.Errorf("解析导出任务响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return "", fmt.Errorf("创建导出任务失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	if apiResp.Data.Ticket == "" {
 		return "", fmt.Errorf("创建导出任务成功但未返回 ticket")
 	}
-
-	return *resp.Data.Ticket, nil
+	return apiResp.Data.Ticket, nil
 }
 
 // GetExportTask 查询导出任务状态，返回 jobStatus、fileToken、error
@@ -144,9 +163,15 @@ func CreateImportTask(fileToken, fileType, fileName, targetType, folderToken str
 	return CreateImportTaskWithToken(fileToken, fileType, fileName, targetType, folderToken, "")
 }
 
-// CreateImportTaskWithToken 创建导入任务，支持 User Access Token 覆盖
+// CreateImportTaskWithToken 创建导入任务，支持 User Access Token 覆盖。
+// 官方协议始终携带 point（mount_type=1）；省略 folderToken 时 mount_key 为空字符串，表示调用方根目录。
 func CreateImportTaskWithToken(fileToken, fileType, fileName, targetType, folderToken, userAccessToken string) (string, error) {
-	client, err := GetClient()
+	return CreateImportTaskEx(fileToken, fileType, fileName, targetType, folderToken, "", userAccessToken)
+}
+
+// CreateImportTaskEx 创建导入任务，支持 bitable --target-token（写入已有多维表格）。
+func CreateImportTaskEx(fileToken, fileType, fileName, targetType, folderToken, targetToken, userAccessToken string) (string, error) {
+	cli, err := GetClient()
 	if err != nil {
 		return "", err
 	}
@@ -154,24 +179,24 @@ func CreateImportTaskWithToken(fileToken, fileType, fileName, targetType, folder
 	taskBuilder := larkdrive.NewImportTaskBuilder().
 		FileExtension(fileType).
 		FileToken(fileToken).
-		Type(targetType)
+		Type(targetType).
+		Point(larkdrive.NewImportTaskMountPointBuilder().
+			MountType(1).
+			MountKey(folderToken).
+			Build())
 
 	if fileName != "" {
 		taskBuilder.FileName(fileName)
 	}
-
-	if folderToken != "" {
-		taskBuilder.Point(larkdrive.NewImportTaskMountPointBuilder().
-			MountType(1).
-			MountKey(folderToken).
-			Build())
+	if targetType == "bitable" && strings.TrimSpace(targetToken) != "" {
+		taskBuilder.Token(targetToken)
 	}
 
 	req := larkdrive.NewCreateImportTaskReqBuilder().
 		ImportTask(taskBuilder.Build()).
 		Build()
 
-	resp, err := client.Drive.ImportTask.Create(Context(), req, UserTokenOption(userAccessToken)...)
+	resp, err := cli.Drive.ImportTask.Create(Context(), req, UserTokenOption(userAccessToken)...)
 	if err != nil {
 		return "", fmt.Errorf("创建导入任务失败: %w", err)
 	}
@@ -362,6 +387,47 @@ func GetDriveExportStatus(ticket, docToken, userAccessToken string) (*DriveExpor
 	}, nil
 }
 
+// FetchDocMetaURL 批量查询文档元数据，返回可访问 URL（with_url=true）。
+func FetchDocMetaURL(docToken, docType, userAccessToken string) (string, error) {
+	cli, err := GetClient()
+	if err != nil {
+		return "", err
+	}
+	body := map[string]any{
+		"request_docs": []map[string]any{
+			{"doc_token": docToken, "doc_type": docType},
+		},
+		"with_url": true,
+	}
+	tokenType, opts := resolveTokenOpts(userAccessToken)
+	resp, err := cli.Post(Context(), "/open-apis/drive/v1/metas/batch_query", body, tokenType, opts...)
+	if err != nil {
+		return "", fmt.Errorf("查询文档 URL 失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("查询文档 URL 失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Metas []struct {
+				URL string `json:"url"`
+			} `json:"metas"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return "", fmt.Errorf("解析文档元数据响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return "", fmt.Errorf("查询文档 URL 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+	if len(apiResp.Data.Metas) == 0 {
+		return "", nil
+	}
+	return apiResp.Data.Metas[0].URL, nil
+}
+
 // FetchDocMetaTitle 批量查询文档元数据，返回标题
 // API: POST /open-apis/drive/v1/metas/batch_query
 func FetchDocMetaTitle(docToken, docType, userAccessToken string) (string, error) {
@@ -408,18 +474,18 @@ func FetchDocMetaTitle(docToken, docType, userAccessToken string) (string, error
 	return apiResp.Data.Metas[0].Title, nil
 }
 
-// FetchDocxMarkdownContent 通过 /docs/v1/content 直接获取 docx 的 Markdown 文本
-// API: GET /open-apis/docs/v1/content?doc_token=xxx&doc_type=docx&content_type=markdown
-// 用于 docx → markdown 的快捷导出路径，避开异步 export_tasks
+// FetchDocxMarkdownContent 通过 V2 docs_ai fetch 获取 docx 的 Markdown 文本。
+// 官方协议：POST /open-apis/docs_ai/v1/documents/{token}/fetch  body={"format":"markdown"}
+// 响应取 data.document.content；不启用 extra_param。
 func FetchDocxMarkdownContent(docToken, userAccessToken string) (string, error) {
-	client, err := GetClient()
+	cli, err := GetClient()
 	if err != nil {
 		return "", err
 	}
 
-	apiPath := fmt.Sprintf("/open-apis/docs/v1/content?doc_token=%s&doc_type=docx&content_type=markdown", docToken)
+	apiPath := fmt.Sprintf("/open-apis/docs_ai/v1/documents/%s/fetch", url.PathEscape(docToken))
 	tokenType, opts := resolveTokenOpts(userAccessToken)
-	resp, err := client.Get(Context(), apiPath, nil, tokenType, opts...)
+	resp, err := cli.Post(Context(), apiPath, map[string]any{"format": "markdown"}, tokenType, opts...)
 	if err != nil {
 		return "", fmt.Errorf("获取文档 Markdown 内容失败: %w", err)
 	}
@@ -431,7 +497,9 @@ func FetchDocxMarkdownContent(docToken, userAccessToken string) (string, error) 
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
-			Content string `json:"content"`
+			Document struct {
+				Content string `json:"content"`
+			} `json:"document"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
@@ -440,7 +508,7 @@ func FetchDocxMarkdownContent(docToken, userAccessToken string) (string, error) 
 	if apiResp.Code != 0 {
 		return "", fmt.Errorf("获取文档 Markdown 内容失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
-	return apiResp.Data.Content, nil
+	return apiResp.Data.Document.Content, nil
 }
 
 // WaitDriveExportWithBound 有界轮询导出任务

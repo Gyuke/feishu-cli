@@ -14,29 +14,23 @@ import (
 var markdownOverwriteCmd = &cobra.Command{
 	Use:   "overwrite",
 	Short: "覆盖 Drive 中已存在的 Markdown (.md) 文件",
-	Long: `把新的 Markdown 内容（字符串或本地文件）写到一个已存在的 .md 文件，file_token 保持不变。
+	Long: `把新的 Markdown 内容写到一个已存在的 .md 文件，file_token 保持不变。
 
-底层调 ` + "`POST /open-apis/drive/v1/files/upload_all`" + `，与 create 同一 endpoint，区别仅是多带 ` + "`file_token`" + ` 字段。
-飞书 Go SDK v3.5.3 的 ` + "`UploadAllFileReqBody`" + ` 没暴露 file_token，所以走自定义 multipart（见 internal/client/markdown.go）。
+底层调 ` + "`POST /open-apis/drive/v1/files/upload_all`" + `，带 file_token。>20MB 走分片。
+未传 --name 时通过 metas/batch_query 读取现有文件名。User Token 优先，未登录回退 Bot。
 
 必填:
   --file-token     目标 .md 文件 token
-  --content        新 Markdown 内容（与 --content-file 二选一）
-  --content-file   本地 .md 文件路径（与 --content 二选一）
-  --file           兼容别名，等价于 --content-file
+  --content / --content-file / --file  二选一
 
 可选:
-  --name           覆盖后文件名（必须 .md 结尾；使用 --content 时必填；--content-file 缺省使用本地 basename）
+  --name           覆盖后文件名（必须 .md 结尾；缺省读取远端现有名）
+  --dry-run        只打印将要发出的请求
   --user-access-token  覆盖登录态
-
-权限:
-  - User Access Token，且对目标文件有编辑权限
-  - drive:file:upload + drive:drive.metadata:readonly
 
 示例:
   feishu-cli markdown overwrite --file-token boxcnxxx --name existing.md --content "新内容"
-  feishu-cli markdown overwrite --file-token boxcnxxx --content-file ./new.md
-  feishu-cli markdown overwrite --file-token boxcnxxx --content-file ./new.md --name renamed.md`,
+  feishu-cli markdown overwrite --file-token boxcnxxx --file ./new.md`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
@@ -48,43 +42,39 @@ var markdownOverwriteCmd = &cobra.Command{
 		contentFile, _ := cmd.Flags().GetString("content-file")
 		contentFileAlias, _ := cmd.Flags().GetString("file")
 		output, _ := cmd.Flags().GetString("output")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		contentChanged := cmd.Flags().Changed("content")
+		fileChanged := cmd.Flags().Changed("content-file") || cmd.Flags().Changed("file")
 
 		var err error
 		contentFile, err = resolveMarkdownFileFlag(contentFile, contentFileAlias)
 		if err != nil {
 			return err
 		}
+		fileToken = strings.TrimSpace(fileToken)
 		if fileToken == "" {
 			return fmt.Errorf("--file-token 必填")
 		}
-		if content != "" && contentFile != "" {
-			return fmt.Errorf("--content 与 --content-file 不能同时使用")
+		if contentChanged && fileChanged {
+			return fmt.Errorf("--content 与 --content-file/--file 不能同时使用")
 		}
-		if content == "" && contentFile == "" {
+		if !contentChanged && !fileChanged {
 			return fmt.Errorf("请提供 --content 或 --content-file")
 		}
 
-		// 确定新文件名：优先 --name；其次 --content-file basename；不再兜底 fileToken.md
-		// （codex review 反馈：fallback fileToken.md 会默默重命名远端文件违反 help 承诺）
 		fileName := strings.TrimSpace(name)
 		if fileName == "" && contentFile != "" {
 			fileName = filepath.Base(contentFile)
 		}
-		if fileName == "" {
-			return fmt.Errorf("使用 --content 时必须提供 --name 指定远端文件名（保留原名请加 --name <现有文件名>.md）")
-		}
-		if !strings.HasSuffix(strings.ToLower(fileName), ".md") {
-			return fmt.Errorf("--name 必须以 .md 结尾，得到 %q", fileName)
+		if fileName != "" {
+			if err := validateMarkdownFileName(fileName, "--name"); err != nil {
+				return err
+			}
 		}
 
-		// 准备字节内容：--content 走字符串；--content-file 读盘。
-		var payload []byte
-		if content != "" {
-			const maxOverwriteSize = 20 * 1024 * 1024
-			if len(content) > maxOverwriteSize {
-				return fmt.Errorf("--content 大小 %d 字节超过 20MB API 上限", len(content))
-			}
-			payload = []byte(content)
+		var size int64
+		if contentChanged {
+			size = int64(len(content))
 		} else {
 			stat, err := os.Stat(contentFile)
 			if err != nil {
@@ -93,45 +83,76 @@ var markdownOverwriteCmd = &cobra.Command{
 			if stat.IsDir() {
 				return fmt.Errorf("--content-file 必须指向文件，不是目录")
 			}
-			// drive/v1/files/upload_all API 单次上传 ≤ 20MB（参 internal/client/markdown.go OverwriteFileWithToken 注释）
-			const maxOverwriteSize = 20 * 1024 * 1024
-			if stat.Size() > maxOverwriteSize {
-				return fmt.Errorf("--content-file 大小 %d 字节超过 20MB API 上限，请切分或用多次 fetch+overwrite", stat.Size())
-			}
-			data, err := os.ReadFile(contentFile)
-			if err != nil {
-				return fmt.Errorf("读取本地文件失败: %w", err)
-			}
-			payload = data
+			size = stat.Size()
 		}
-		if len(payload) == 0 {
+		if size == 0 {
 			return fmt.Errorf("Markdown 内容为空，不支持把 .md 覆盖为空文件")
 		}
 
-		token, err := requireUserToken(cmd, "markdown overwrite")
+		uploadSpec := client.MarkdownUploadSpec{FileToken: fileToken, FileName: fileName}
+		if dryRun {
+			multipart := markdownNeedsMultipart(size)
+			var steps []dryRunStep
+			if fileName == "" {
+				steps = append(steps, dryRunStep{
+					Method: "POST",
+					URL:    "/open-apis/drive/v1/metas/batch_query",
+					Desc:   "Read current file metadata to preserve the existing file name",
+					Body: map[string]any{
+						"request_docs": []map[string]any{{
+							"doc_token": fileToken,
+							"doc_type":  "file",
+						}},
+					},
+				})
+				uploadSpec.FileName = "<existing_remote_name_or_" + fileToken + ".md>"
+			}
+			steps = append(steps, markdownUploadDryRunSteps(uploadSpec, size, multipart, contentFile)...)
+			return printDryRunPlan(cmd, "overwrite markdown file", map[string]any{
+				"file_token": fileToken,
+				"size":       size,
+			}, steps)
+		}
+
+		token := resolveOptionalUserTokenWithFallback(cmd)
+		if fileName == "" {
+			remoteName, err := client.FetchMarkdownFileName(fileToken, token)
+			if err != nil {
+				return err
+			}
+			fileName = strings.TrimSpace(remoteName)
+			if fileName == "" {
+				fileName = fileToken + ".md"
+			}
+			uploadSpec.FileName = fileName
+		}
+
+		var result client.MarkdownUploadResult
+		if fileChanged {
+			result, err = client.UploadMarkdownFile(uploadSpec, contentFile, token)
+		} else {
+			result, err = client.UploadMarkdownContent(uploadSpec, []byte(content), token)
+		}
 		if err != nil {
 			return err
 		}
 
-		returnedToken, err := client.OverwriteFileWithToken(fileToken, fileName, payload, token)
-		if err != nil {
-			return err
-		}
-
-		result := map[string]any{
-			"file_token": returnedToken,
+		out := map[string]any{
+			"file_token": result.FileToken,
 			"file_name":  fileName,
-			"size_bytes": len(payload),
+			"version":    result.Version,
+			"size_bytes": size,
 		}
-
 		if output == "json" {
-			return printJSON(result)
+			return printJSON(out)
 		}
-
 		fmt.Printf("Markdown 文件覆盖成功!\n")
 		fmt.Printf("  file_name:  %s\n", fileName)
-		fmt.Printf("  file_token: %s\n", returnedToken)
-		fmt.Printf("  size:       %d bytes\n", len(payload))
+		fmt.Printf("  file_token: %s\n", result.FileToken)
+		if result.Version != "" {
+			fmt.Printf("  version:    %s\n", result.Version)
+		}
+		fmt.Printf("  size:       %d bytes\n", size)
 		return nil
 	},
 }
@@ -139,10 +160,11 @@ var markdownOverwriteCmd = &cobra.Command{
 func init() {
 	markdownCmd.AddCommand(markdownOverwriteCmd)
 	markdownOverwriteCmd.Flags().String("file-token", "", "目标 .md 文件 token（必填）")
-	markdownOverwriteCmd.Flags().String("name", "", "覆盖后文件名（必须 .md 结尾；使用 --content 时必填）")
+	markdownOverwriteCmd.Flags().String("name", "", "覆盖后文件名（必须 .md 结尾；缺省读取远端现有名）")
 	markdownOverwriteCmd.Flags().String("content", "", "新 Markdown 内容（与 --content-file 二选一）")
 	markdownOverwriteCmd.Flags().String("content-file", "", "本地 .md 文件路径（与 --content 二选一）")
 	markdownOverwriteCmd.Flags().String("file", "", "本地 .md 文件路径，兼容别名（等价于 --content-file）")
+	markdownOverwriteCmd.Flags().Bool("dry-run", false, "只打印将要发出的请求")
 	markdownOverwriteCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	markdownOverwriteCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(markdownOverwriteCmd, "file-token")
