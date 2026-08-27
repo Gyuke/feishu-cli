@@ -36,7 +36,7 @@ var driveTaskResultCmd = &cobra.Command{
 			return err
 		}
 
-		token, err := requireUserToken(cmd, "drive task-result")
+		token, err := resolveIdentityToken(cmd)
 		if err != nil {
 			return err
 		}
@@ -152,6 +152,7 @@ var driveTaskResultCmd = &cobra.Command{
 func init() {
 	driveCmd.AddCommand(driveTaskResultCmd)
 	driveTaskResultCmd.Flags().String("scenario", "", "任务场景: import/export/task_check/wiki_delete_node（必填）")
+	driveTaskResultCmd.Flags().String("as", "auto", "操作身份：bot|user|auto（默认 auto: User 优先，回退 Bot）")
 	driveTaskResultCmd.Flags().String("ticket", "", "异步任务 ticket（import/export 必填）")
 	driveTaskResultCmd.Flags().String("file-token", "", "原始文档 token（export 必填）")
 	driveTaskResultCmd.Flags().String("task-id", "", "异步任务 ID（task_check 与 wiki_delete_node 场景必填）")

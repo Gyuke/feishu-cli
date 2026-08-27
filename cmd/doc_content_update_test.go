@@ -638,3 +638,88 @@ func TestReplaceAllAbortsWhenNextRevisionMissing(t *testing.T) {
 		t.Fatalf("PUT 应当在第 1 处后中止，实际调用了 %d 次", putCount)
 	}
 }
+
+// TestRevisionIDWireCondition 验证 revision-id 在 wire 上的条件：默认 -1 发送，正整数发送，显式 0 省略
+func TestRevisionIDWireCondition(t *testing.T) {
+	// 1. 默认 -1 发送
+	bodyMinusOne := map[string]any{"command": "overwrite"}
+	injectRevisionID(bodyMinusOne, -1)
+	if bodyMinusOne["revision_id"] != -1 {
+		t.Fatalf("revisionID=-1 应当发送 -1，实际为: %v", bodyMinusOne["revision_id"])
+	}
+
+	// 2. 显式 0 省略
+	bodyZero := map[string]any{"command": "overwrite"}
+	injectRevisionID(bodyZero, 0)
+	if _, ok := bodyZero["revision_id"]; ok {
+		t.Fatalf("revisionID=0 必须在 wire 上省略，实际却存在: %v", bodyZero["revision_id"])
+	}
+
+	// 3. 正整数发送
+	bodyPositive := map[string]any{"command": "overwrite"}
+	injectRevisionID(bodyPositive, 42)
+	if bodyPositive["revision_id"] != 42 {
+		t.Fatalf("revisionID=42 应当发送 42，实际为: %v", bodyPositive["revision_id"])
+	}
+}
+
+// TestReplaceAllRevisionExtractionFallback 验证 document 对象存在但缺 revision_id 时，能独立从顶层成功回退提取
+func TestReplaceAllRevisionExtractionFallback(t *testing.T) {
+	putCount := 0
+	var receivedRevisions []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/children"):
+			_, _ = fmt.Fprint(w, `{
+				"code":0,"msg":"ok",
+				"data":{
+					"items":[
+						{"block_id":"item_1","block_type":2,"text":{"elements":[{"text_run":{"content":"测试词"}}]}},
+						{"block_id":"item_2","block_type":2,"text":{"elements":[{"text_run":{"content":"测试词"}}]}}
+					],
+					"has_more":false
+				}
+			}`)
+		case r.Method == "PUT":
+			putCount++
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			receivedRevisions = append(receivedRevisions, body["revision_id"])
+
+			if putCount == 1 {
+				// 关键 fixture：document 对象存在但没有 revision_id，而顶层包含 revision_id=12！
+				_, _ = fmt.Fprint(w, `{
+					"code": 0,
+					"msg": "ok",
+					"data": {
+						"document": {},
+						"revision_id": 12
+					}
+				}`)
+			} else {
+				// 第二次成功
+				_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"document":{"revision_id":13}}}`)
+			}
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initDocUpdateTestConfig(t, server.URL)
+
+	err := doReplaceAll("doc-rep-fallback", "新词", "", "测试词", "", "", 10)
+	if err != nil {
+		t.Fatalf("即使 document 对象缺少 revision_id，也应独立从顶层 revision_id 提取成功，但报错: %v", err)
+	}
+
+	if putCount != 2 {
+		t.Fatalf("全流程应当完成 2 处替换，实际调用了 %d 次", putCount)
+	}
+	// 验证第二步使用的 revision 正确继承了顶层返回的 12
+	if len(receivedRevisions) != 2 || receivedRevisions[1] != float64(12) {
+		t.Fatalf("第二步使用的 revision 应当为 12，实际为: %v", receivedRevisions)
+	}
+}

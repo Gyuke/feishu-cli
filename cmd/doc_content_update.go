@@ -470,6 +470,45 @@ func validateNoLocalResources(uploadImages bool, markdown string) error {
 // 7 种模式实现（对齐官方 PUT /open-apis/docs_ai/v1/documents/{id} 原子更新能力）
 // ============================================================
 
+// injectRevisionID 集中处理 revision_id 注入：
+// 官方规则：默认 -1 发送，正整数发送，显式 0 省略不发送（<-1 之前在参数阶段已校验拦截）
+func injectRevisionID(body map[string]any, revisionID int) {
+	if revisionID != 0 && revisionID >= -1 {
+		body["revision_id"] = revisionID
+	}
+}
+
+// extractRevisionID 独立检查所有支持的位置，并采纳第一个有效正整数版本号
+func extractRevisionID(data map[string]any) int {
+	if data == nil {
+		return -1
+	}
+	if docObj, ok := data["document"].(map[string]any); ok {
+		if rev := parseRevisionNumber(docObj["revision_id"]); rev > 0 {
+			return rev
+		}
+	}
+	if rev := parseRevisionNumber(data["revision_id"]); rev > 0 {
+		return rev
+	}
+	if rev := parseRevisionNumber(data["document_revision_id"]); rev > 0 {
+		return rev
+	}
+	return -1
+}
+
+func parseRevisionNumber(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	}
+	return -1
+}
+
 // doAppend 追加到文档末尾（对齐官方：docs_ai 将 append 转为 block_insert_after + block_id="-1"）
 func doAppend(documentID, markdown string, output, userAccessToken string, revisionID int) error {
 	body := map[string]any{
@@ -478,9 +517,7 @@ func doAppend(documentID, markdown string, output, userAccessToken string, revis
 		"block_id": "-1",
 		"content":  markdown,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("追加内容失败: %w", err)
@@ -499,9 +536,7 @@ func doOverwrite(documentID, markdown string, output, userAccessToken string, re
 		"command": "overwrite",
 		"content": markdown,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("覆盖内容失败: %w", err)
@@ -539,9 +574,7 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, ou
 		"start_block_id": startBlockID,
 		"end_block_id":   endBlockID,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
@@ -585,9 +618,7 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, outp
 			"start_block_id": startBlockID,
 			"end_block_id":   endBlockID,
 		}
-		if currentRevision >= -1 {
-			body["revision_id"] = currentRevision
-		}
+		injectRevisionID(body, currentRevision)
 
 		data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 		if err != nil {
@@ -596,17 +627,7 @@ func doReplaceAll(documentID, markdown, selByTitle, selWithEllipsis string, outp
 		}
 		replaced++
 
-		var nextRev int = -1
-		if docObj, ok := data["document"].(map[string]any); ok {
-			if rev, ok := docObj["revision_id"].(float64); ok && int(rev) > 0 {
-				nextRev = int(rev)
-			}
-		} else if rev, ok := data["revision_id"].(float64); ok && int(rev) > 0 {
-			nextRev = int(rev)
-		} else if docRev, ok := data["document_revision_id"].(float64); ok && int(docRev) > 0 {
-			nextRev = int(docRev)
-		}
-
+		nextRev := extractRevisionID(data)
 		if i > 0 {
 			if nextRev <= 0 {
 				return fmt.Errorf("全文替换中断：共 %d 处匹配，已成功完成 %d 处，但服务端未返回新的 revision_id；为防止并发数据破坏已停止后续未保护替换",
@@ -649,9 +670,7 @@ func doInsertBefore(documentID, markdown, selByTitle, selWithEllipsis string, ou
 		"block_id": blockID,
 		"content":  markdown,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("插入内容失败: %w", err)
@@ -683,9 +702,7 @@ func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, out
 		"block_id": targetBlockID,
 		"content":  markdown,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("插入内容失败: %w", err)
@@ -721,9 +738,7 @@ func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userA
 		"start_block_id": startBlockID,
 		"end_block_id":   endBlockID,
 	}
-	if revisionID >= -1 {
-		body["revision_id"] = revisionID
-	}
+	injectRevisionID(body, revisionID)
 
 	data, err := client.UpdateDocContentAtomic(documentID, body, userAccessToken)
 	if err != nil {

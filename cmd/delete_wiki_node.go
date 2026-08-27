@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,7 +40,29 @@ var wikiURLMarkers = []struct {
 	{"/doc/", "doc"},
 }
 
-// parseWikiDeleteInput 对齐官方输入契约：URL 自动推断 obj_type，裸 token 必须显式传 --obj-type
+// isValidFeishuLarkHost 检查是否属于飞书/Lark 文档域名或本地测试地址
+func isValidFeishuLarkHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	if host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "127.0.0.") {
+		return true
+	}
+	validSuffixes := []string{
+		".feishu.cn", "feishu.cn",
+		".larksuite.com", "larksuite.com",
+		".larkoffice.com", "larkoffice.com",
+	}
+	for _, suffix := range validSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) || (strings.HasPrefix(suffix, ".") && strings.HasSuffix(host, suffix)) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseWikiDeleteInput 对齐官方输入契约：URL 路径推断 obj_type，裸 token 必须显式传 --obj-type
 func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, err error) {
 	rawInput = strings.TrimSpace(rawInput)
 	if rawInput == "" {
@@ -48,25 +72,41 @@ func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, 
 	flagObjType = strings.ToLower(strings.TrimSpace(flagObjType))
 
 	if strings.Contains(rawInput, "://") {
+		u, err := url.Parse(rawInput)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return "", "", fmt.Errorf("URL 格式无效: %q", rawInput)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return "", "", fmt.Errorf("不支持的 URL 协议 %q，仅支持 http/https", u.Scheme)
+		}
+		if u.User != nil {
+			return "", "", fmt.Errorf("URL 包含非法的用户信息 (userinfo): %q", rawInput)
+		}
+		if !isValidFeishuLarkHost(u.Host) {
+			return "", "", fmt.Errorf("不支持的域名 %q，仅接受飞书/Lark 文档域名 (*.feishu.cn, *.larksuite.com, *.larkoffice.com)", u.Host)
+		}
+
 		inferredType := ""
 		extractedToken := ""
 		for _, m := range wikiURLMarkers {
-			if idx := strings.Index(rawInput, m.Marker); idx >= 0 {
-				rest := rawInput[idx+len(m.Marker):]
-				for _, sep := range []string{"?", "#", "/"} {
-					if i := strings.Index(rest, sep); i >= 0 {
-						rest = rest[:i]
-					}
+			if strings.HasPrefix(u.Path, m.Marker) {
+				rest := strings.TrimPrefix(u.Path, m.Marker)
+				if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+					rest = rest[:idx]
 				}
 				if rest != "" {
-					extractedToken = rest
+					unescaped, err := url.PathUnescape(rest)
+					if err != nil {
+						return "", "", fmt.Errorf("URL token 解码失败: %w", err)
+					}
+					extractedToken = unescaped
 					inferredType = m.ObjType
 					break
 				}
 			}
 		}
 		if extractedToken == "" {
-			return "", "", fmt.Errorf("无法从 URL 解析出文档 token: %q", rawInput)
+			return "", "", fmt.Errorf("无法从 URL 路径 %q 推断有效文档 token，期望以 /wiki/, /docx/, /sheets/, /base/, /mindnote/, /slides/, /file/, /doc/ 开头", u.Path)
 		}
 		if flagObjType != "" && flagObjType != inferredType {
 			return "", "", fmt.Errorf("--obj-type %q 与从 URL 推断的文档类型 %q 冲突；请二选一", flagObjType, inferredType)
@@ -137,11 +177,24 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 		}
 
 		spaceID, _ := cmd.Flags().GetString("space-id")
+		spaceID = strings.TrimSpace(spaceID)
+		if spaceID != "" {
+			if strings.ContainsAny(spaceID, "/?#\n\r") {
+				return fmt.Errorf("非法的 --space-id: %q", spaceID)
+			}
+		}
 		includeChildren, _ := cmd.Flags().GetBool("include-children")
 		force, _ := cmd.Flags().GetBool("force")
 		output, _ := cmd.Flags().GetString("output")
 
-		token := resolveOptionalUserToken(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
+		identity := "bot"
+		if token != "" {
+			identity = "user"
+		}
 
 		nodeTitle := ""
 		if spaceID == "" {
@@ -150,10 +203,10 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 			if err != nil {
 				return fmt.Errorf("获取节点信息失败: %w", err)
 			}
-			if node.SpaceID == "" {
+			spaceID = strings.TrimSpace(node.SpaceID)
+			if spaceID == "" {
 				return fmt.Errorf("未能通过 get_node 获取 space_id，请通过 --space-id 显式指定")
 			}
-			spaceID = node.SpaceID
 			nodeTitle = node.Title
 		}
 
@@ -201,7 +254,7 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		status, err := pollDeleteWikiNodeTask(ctx, taskID, token)
+		status, err := pollDeleteWikiNodeTask(ctx, taskID, token, identity)
 		if err != nil {
 			return err
 		}
@@ -212,16 +265,12 @@ URL 输入（/wiki/, /docx/, /sheets/ 等）自动推断文档类型；裸 token
 	},
 }
 
-func buildWikiDeleteNodeResumeCmd(taskID, userToken string) string {
-	resumeCmd := fmt.Sprintf("feishu-cli drive task-result --scenario wiki_delete_node --task-id %s", taskID)
-	if userToken != "" {
-		resumeCmd += fmt.Sprintf(" --user-access-token %s", userToken)
-	}
-	return resumeCmd
+func buildWikiDeleteNodeResumeCmd(taskID, identity string) string {
+	return fmt.Sprintf("feishu-cli drive task-result --scenario wiki_delete_node --task-id %s --as %s", strconv.Quote(taskID), identity)
 }
 
-func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken string) (*client.WikiDeleteNodeTaskStatus, error) {
-	resumeCmd := buildWikiDeleteNodeResumeCmd(taskID, userToken)
+func pollDeleteWikiNodeTask(ctx context.Context, taskID, userToken, identity string) (*client.WikiDeleteNodeTaskStatus, error) {
+	resumeCmd := buildWikiDeleteNodeResumeCmd(taskID, identity)
 	var last client.WikiDeleteNodeTaskStatus
 	var lastErr error
 	hadSuccessfulPoll := false
@@ -278,6 +327,7 @@ func init() {
 	wikiCmd.AddCommand(deleteWikiNodeCmd)
 	deleteWikiNodeCmd.Flags().String("space-id", "", "知识空间 ID（可选，未指定时自动解析）")
 	deleteWikiNodeCmd.Flags().String("obj-type", "", "文档类型（裸 token 必填，URL 输入自动推断；可选: wiki, doc, docx, sheet, bitable, mindnote, slides, file）")
+	deleteWikiNodeCmd.Flags().String("as", "auto", "操作身份：bot|user|auto（默认 auto: User 优先，回退 Bot）")
 	deleteWikiNodeCmd.Flags().Bool("include-children", true, "是否级联删除子节点（默认 true）")
 	deleteWikiNodeCmd.Flags().BoolP("force", "f", false, "跳过确认直接删除")
 	deleteWikiNodeCmd.Flags().StringP("output", "o", "", "输出格式 (json)")

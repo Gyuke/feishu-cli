@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -186,7 +187,7 @@ func TestDeleteWikiNodeSyncCompletion(t *testing.T) {
 	}
 }
 
-// TestDeleteWikiNodeAllFailedReturnsError 验证所有状态轮询均失败时返回非零退出，并保留 task_id 及 resume 提示
+// TestDeleteWikiNodeAllFailedReturnsError 验证所有状态轮询均失败时返回非零退出，并保留 task_id 及 resume 提示，且绝不泄露 token 字节
 func TestDeleteWikiNodeAllFailedReturnsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -213,17 +214,18 @@ func TestDeleteWikiNodeAllFailedReturnsError(t *testing.T) {
 		wikiDeleteNodePollAttempts = origAttempts
 		wikiDeleteNodePollInterval = origInterval
 		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+		_ = deleteWikiNodeCmd.Flags().Set("user-access-token", "")
+		_ = deleteWikiNodeCmd.Flags().Set("as", "auto")
 	}()
 
+	secretToken := "u-secret-token-super-private-9999"
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-fail")
 	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
-	defer func() {
-		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
-		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
-		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
-	}()
+	_ = deleteWikiNodeCmd.Flags().Set("user-access-token", secretToken)
+	_ = deleteWikiNodeCmd.Flags().Set("as", "user")
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-fail"})
 	if err == nil {
@@ -234,12 +236,19 @@ func TestDeleteWikiNodeAllFailedReturnsError(t *testing.T) {
 	if !strings.Contains(errMsg, "task-failed-999") {
 		t.Fatalf("错误信息必须保留 task_id (task-failed-999)，实际得到: %s", errMsg)
 	}
-	if !strings.Contains(errMsg, "feishu-cli") {
-		t.Fatalf("错误信息必须包含 resume 查询提示命令，实际得到: %s", errMsg)
+	if !strings.Contains(errMsg, "feishu-cli drive task-result --scenario wiki_delete_node") {
+		t.Fatalf("错误信息必须包含有效的 resume 查询提示命令，实际得到: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "--as user") {
+		t.Fatalf("resume 命令必须携带身份标志 --as user，实际得到: %s", errMsg)
+	}
+	// 严防凭证泄漏：断言 token 字节绝不在错误输出中
+	if strings.Contains(errMsg, secretToken) {
+		t.Fatalf("严重违规：错误信息中泄漏了明文 token 字节！%s", errMsg)
 	}
 }
 
-// TestDeleteWikiNodeTimeoutReturnsError 验证轮询超时（仍为 processing）时返回非零退出，并保留 task_id 与 resume 提示
+// TestDeleteWikiNodeTimeoutReturnsError 验证轮询超时（仍为 processing）时返回非零退出，保留 task_id 与 resume 提示且不泄露 token
 func TestDeleteWikiNodeTimeoutReturnsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -277,17 +286,18 @@ func TestDeleteWikiNodeTimeoutReturnsError(t *testing.T) {
 		wikiDeleteNodePollAttempts = origAttempts
 		wikiDeleteNodePollInterval = origInterval
 		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
+		_ = deleteWikiNodeCmd.Flags().Set("user-access-token", "")
+		_ = deleteWikiNodeCmd.Flags().Set("as", "auto")
 	}()
 
+	secretToken := "u-secret-token-timeout-check-8888"
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp-timeout")
 	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
-	defer func() {
-		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
-		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
-		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
-	}()
+	_ = deleteWikiNodeCmd.Flags().Set("user-access-token", secretToken)
+	_ = deleteWikiNodeCmd.Flags().Set("as", "user")
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"node-timeout"})
 	if err == nil {
@@ -298,27 +308,101 @@ func TestDeleteWikiNodeTimeoutReturnsError(t *testing.T) {
 	if !strings.Contains(errMsg, "task-timeout-888") {
 		t.Fatalf("错误信息必须保留 task_id (task-timeout-888)，实际得到: %s", errMsg)
 	}
-	if !strings.Contains(errMsg, "超时") && !strings.Contains(errMsg, "执行中") {
-		t.Fatalf("错误信息必须说明超时或执行中状态，实际得到: %s", errMsg)
+	if !strings.Contains(errMsg, "feishu-cli drive task-result --scenario wiki_delete_node") {
+		t.Fatalf("错误信息必须包含有效 resume 命令，实际得到: %s", errMsg)
+	}
+	if strings.Contains(errMsg, secretToken) {
+		t.Fatalf("严重违规：错误信息中泄漏了明文 token 字节！%s", errMsg)
 	}
 }
 
-// TestDeleteWikiNodeInvalidObjType 验证非法 obj-type 立即被拦截拒绝
-func TestDeleteWikiNodeInvalidObjType(t *testing.T) {
+// TestDeleteWikiNodeCancelReturnsError 验证上下文取消时返回非零退出，保留 task_id 与 resume 提示且不泄露 token
+func TestDeleteWikiNodeCancelReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-test","expire":7200}`)
+		case r.Method == "DELETE" && r.URL.Path == "/open-apis/wiki/v2/spaces/sp-cancel/nodes/node-cancel":
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task_id":"task-cancel-777"}}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/open-apis/wiki/v2/tasks/"):
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","data":{"task":{"task_id":"task-cancel-777","simple_task_result":{"status":"processing"}}}}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	initWikiNodeDeleteTestConfig(t, server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// 立即取消
+	cancel()
+
+	secretToken := "u-secret-token-cancel-check-7777"
+	status, err := pollDeleteWikiNodeTask(ctx, "task-cancel-777", secretToken, "user")
+	if err == nil {
+		t.Fatal("取消时必须返回非零错误")
+	}
+	if status == nil {
+		t.Fatal("status 不应为 nil")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "task-cancel-777") {
+		t.Fatalf("错误信息必须保留 task_id (task-cancel-777)，得到: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "feishu-cli drive task-result --scenario wiki_delete_node") {
+		t.Fatalf("错误信息必须保留有效 resume 命令，得到: %s", errMsg)
+	}
+	if strings.Contains(errMsg, secretToken) {
+		t.Fatalf("严重违规：错误信息中泄漏了明文 token 字节！%s", errMsg)
+	}
+}
+
+// TestDeleteWikiNodeURLValidation 验证严格的 URL 解析安全规则
+func TestDeleteWikiNodeURLValidation(t *testing.T) {
+	// 1. 拒绝非法第三方域名（防绕过）
+	_, _, err1 := parseWikiDeleteInput("https://attacker.com/evil?redirect=/wiki/wikcnTarget", "wiki")
+	if err1 == nil || !strings.Contains(err1.Error(), "不支持的域名") {
+		t.Fatalf("非飞书域名应报错拒绝，实际得到: %v", err1)
+	}
+
+	// 2. 拒绝 userinfo 凭证嵌入
+	_, _, err2 := parseWikiDeleteInput("https://user:pass@sample.feishu.cn/wiki/wikcnTarget", "wiki")
+	if err2 == nil || !strings.Contains(err2.Error(), "用户信息") {
+		t.Fatalf("包含 userinfo 的 URL 应被拒绝，实际得到: %v", err2)
+	}
+
+	// 3. 拒绝不支持的路径前缀
+	_, _, err3 := parseWikiDeleteInput("https://sample.feishu.cn/evil_path/wikcnTarget", "wiki")
+	if err3 == nil || !strings.Contains(err3.Error(), "无法从 URL 路径") {
+		t.Fatalf("不支持的路径前缀应被拒绝，实际得到: %v", err3)
+	}
+
+	// 4. 正确的 URL 路径安全提取与推断
+	tok, objType, err4 := parseWikiDeleteInput("https://sample.feishu.cn/wiki/wikcnValidNode?extra=1#frag", "")
+	if err4 != nil {
+		t.Fatalf("合法飞书 wiki URL 应解析成功，但得到: %v", err4)
+	}
+	if tok != "wikcnValidNode" || objType != "wiki" {
+		t.Fatalf("解析结果异常: tok=%q objType=%q", tok, objType)
+	}
+}
+
+// TestDeleteWikiNodeSpaceIDValidation 验证显式传入非法 space-id 被拦截
+func TestDeleteWikiNodeSpaceIDValidation(t *testing.T) {
 	initWikiNodeDeleteTestConfig(t, "http://127.0.0.1:9999")
-	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "not_exist_type")
+	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp/with/slash")
+	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
 	defer func() {
-		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
+		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
 	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnDummy"})
-	if err == nil {
-		t.Fatal("非法 obj-type 应当被拒绝，但返回了 nil")
-	}
-	if !strings.Contains(err.Error(), "不支持的 --obj-type") {
-		t.Fatalf("错误信息应指出不支持的 obj-type，得到: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "非法的 --space-id") {
+		t.Fatalf("非法 space-id 应被校验拒绝，实际得到: %v", err)
 	}
 }
 
@@ -354,17 +438,13 @@ func TestDeleteWikiNodePathEscaped(t *testing.T) {
 		wikiDeleteNodePollAttempts = origAttempts
 		wikiDeleteNodePollInterval = origInterval
 		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
+		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
 		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
 	}()
 
 	_ = deleteWikiNodeCmd.Flags().Set("space-id", "sp 123")
 	_ = deleteWikiNodeCmd.Flags().Set("obj-type", "wiki")
 	_ = deleteWikiNodeCmd.Flags().Set("force", "true")
-	defer func() {
-		_ = deleteWikiNodeCmd.Flags().Set("space-id", "")
-		_ = deleteWikiNodeCmd.Flags().Set("obj-type", "")
-		_ = deleteWikiNodeCmd.Flags().Set("force", "false")
-	}()
 
 	err := deleteWikiNodeCmd.RunE(deleteWikiNodeCmd, []string{"wikcnEscaped"})
 	if err != nil {
