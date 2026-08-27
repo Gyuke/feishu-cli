@@ -239,7 +239,7 @@ func VCBotJoinMeeting(req VCBotJoinReq, userAccessToken string) (json.RawMessage
 
 // VCBotLeaveMeeting 让机器人离开会议
 // API: POST /open-apis/vc/v1/bots/leave
-// 权限: tenant_access_token + vc:meeting.bot.leave:write
+// 权限: tenant_access_token + vc:meeting.bot.join:write（与入会同一 scope）
 func VCBotLeaveMeeting(meetingID string, userAccessToken string) (json.RawMessage, error) {
 	client, err := GetClient()
 	if err != nil {
@@ -285,8 +285,11 @@ type VCBotEventsReq struct {
 
 // VCBotMeetingEvents 查询机器人会议事件
 // API: GET /open-apis/vc/v1/bots/events
-// 权限: user_access_token（该端点不接受 tenant_access_token，传 tenant 会被网关 99991663 拒绝）
-//   - vc:meeting.meetingevent:read
+// 权限:
+//   - User：vc:meeting.meetingevent:read
+//   - Bot：vc:meeting.bot.join:write（机器人须在会中）
+//
+// 身份由 CLI --as bot|user|auto 显式选择，禁止静默回落。
 //
 // 返回 data 字段原始 JSON（含 meeting_event_list、page_token、has_more）
 func VCBotMeetingEvents(req VCBotEventsReq, userAccessToken string) (json.RawMessage, error) {

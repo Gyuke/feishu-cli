@@ -185,6 +185,40 @@ func (b *Bus) withLock(fn func(state *BusState) error) error {
 	})
 }
 
+// consumerIsAlive 判定 bus 条目是否仍算活着的 consumer。生产走 PID 探活；测试可覆盖。
+var consumerIsAlive = func(c ConsumerEntry) bool { return c.IsAlive() }
+
+func pruneDeadConsumers(state *BusState) {
+	alive := state.Consumers[:0]
+	for _, c := range state.Consumers {
+		if consumerIsAlive(c) {
+			alive = append(alive, c)
+		}
+	}
+	state.Consumers = alive
+}
+
+func countEventKey(state *BusState, eventKey string) int {
+	n := 0
+	for _, c := range state.Consumers {
+		if c.EventKey == eventKey {
+			n++
+		}
+	}
+	return n
+}
+
+func stripConsumer(state *BusState, pid int, eventKey string) {
+	updated := state.Consumers[:0]
+	for _, c := range state.Consumers {
+		if c.PID == pid && c.EventKey == eventKey {
+			continue
+		}
+		updated = append(updated, c)
+	}
+	state.Consumers = updated
+}
+
 // Register 将当前进程注册为 EventKey consumer。
 // 返回 entry 用于后续 Unregister；重复注册（同 PID + 同 EventKey）会替换旧条目。
 func (b *Bus) Register(entry ConsumerEntry) error {
@@ -201,6 +235,30 @@ func (b *Bus) Register(entry ConsumerEntry) error {
 		state.Consumers = updated
 		return b.save(state)
 	})
+}
+
+// ClaimConsumer 登记当前 consumer，并告诉调用方它是否是该 EventKey 的第一个活着的订阅者。
+// 同 PID+EventKey 重入会替换旧条目，并按「去掉自身后再计数」判断 first，避免重启误当成第二人。
+func (b *Bus) ClaimConsumer(entry ConsumerEntry) (firstForKey bool, err error) {
+	err = b.withLock(func(state *BusState) error {
+		pruneDeadConsumers(state)
+		stripConsumer(state, entry.PID, entry.EventKey)
+		firstForKey = countEventKey(state, entry.EventKey) == 0
+		state.Consumers = append(state.Consumers, entry)
+		return b.save(state)
+	})
+	return firstForKey, err
+}
+
+// ReleaseConsumer 移除 (PID, EventKey)，并告诉调用方移除后该 key 是否已无活着的 consumer。
+func (b *Bus) ReleaseConsumer(pid int, eventKey string) (lastForKey bool, err error) {
+	err = b.withLock(func(state *BusState) error {
+		pruneDeadConsumers(state)
+		stripConsumer(state, pid, eventKey)
+		lastForKey = countEventKey(state, eventKey) == 0
+		return b.save(state)
+	})
+	return lastForKey, err
 }
 
 // Unregister 从 bus.json 移除指定 (PID, EventKey)；幂等。
@@ -226,7 +284,7 @@ func (b *Bus) Snapshot() (*BusState, error) {
 		alive := state.Consumers[:0]
 		changed := false
 		for _, c := range state.Consumers {
-			if c.IsAlive() {
+			if consumerIsAlive(c) {
 				alive = append(alive, c)
 			} else {
 				changed = true

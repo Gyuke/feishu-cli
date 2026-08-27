@@ -114,7 +114,7 @@
     "legacy_skill": "feishu-cli-msg"
   },
   {
-    "query": "给 KR 7123456789012345678 上报本周 65% 的 risky 进展，并关联到周报文档链接。",
+    "query": "给 KR 7123456789012345678 上报本周 65% 的 overdue 进展，并关联到周报文档链接。",
     "expected_skill": "feishu-cli-work",
     "expected_workflow": "okr",
     "legacy_skill": "feishu-cli-okr"

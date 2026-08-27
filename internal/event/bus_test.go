@@ -147,6 +147,71 @@ func TestBus_AtomicWrite(t *testing.T) {
 	}
 }
 
+func stubConsumerAlive(t *testing.T) {
+	t.Helper()
+	orig := consumerIsAlive
+	consumerIsAlive = func(c ConsumerEntry) bool { return c.PID > 0 }
+	t.Cleanup(func() { consumerIsAlive = orig })
+}
+
+func TestBus_ClaimConsumerFirstThenSecond(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+	first, err := bus.ClaimConsumer(ConsumerEntry{PID: 101, EventKey: "vc.meeting.participant_meeting_started_v1", StartedAt: time.Now()})
+	if err != nil || !first {
+		t.Fatalf("第一个 consumer 应为 first, first=%v err=%v", first, err)
+	}
+	second, err := bus.ClaimConsumer(ConsumerEntry{PID: 102, EventKey: "vc.meeting.participant_meeting_started_v1", StartedAt: time.Now()})
+	if err != nil || second {
+		t.Fatalf("第二个同 key consumer 不应为 first, first=%v err=%v", second, err)
+	}
+	other, err := bus.ClaimConsumer(ConsumerEntry{PID: 103, EventKey: "im.message.receive_v1", StartedAt: time.Now()})
+	if err != nil || !other {
+		t.Fatalf("不同 EventKey 应独立计数为 first, first=%v err=%v", other, err)
+	}
+}
+
+func TestBus_ReleaseConsumerLastOnlyAfterAllGone(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+	key := "vc.meeting.participant_meeting_ended_v1"
+	_, _ = bus.ClaimConsumer(ConsumerEntry{PID: 201, EventKey: key, StartedAt: time.Now()})
+	_, _ = bus.ClaimConsumer(ConsumerEntry{PID: 202, EventKey: key, StartedAt: time.Now()})
+
+	last, err := bus.ReleaseConsumer(201, key)
+	if err != nil {
+		t.Fatalf("Release 201: %v", err)
+	}
+	if last {
+		t.Fatal("先退出者还有同伴，不得视为 last-consumer")
+	}
+	last, err = bus.ReleaseConsumer(202, key)
+	if err != nil {
+		t.Fatalf("Release 202: %v", err)
+	}
+	if !last {
+		t.Fatal("最后一人退出应为 last-consumer")
+	}
+}
+
+func TestBus_ClaimReplacesSamePIDAndRecounts(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+	key := "vc.note.generated_v1"
+	first, err := bus.ClaimConsumer(ConsumerEntry{PID: 301, EventKey: key, StartedAt: time.Now()})
+	if err != nil || !first {
+		t.Fatalf("首次 claim 应为 first, first=%v err=%v", first, err)
+	}
+	again, err := bus.ClaimConsumer(ConsumerEntry{PID: 301, EventKey: key, StartedAt: time.Now()})
+	if err != nil || !again {
+		t.Fatalf("同 PID 重入去掉自身后仍应是 first（单独占用），first=%v err=%v", again, err)
+	}
+	snap, _ := bus.Snapshot()
+	if len(snap.Consumers) != 1 {
+		t.Fatalf("同 PID 重入应替换不追加，实际 %d", len(snap.Consumers))
+	}
+}
+
 func TestConsumerEntry_IsAlive(t *testing.T) {
 	live := ConsumerEntry{PID: os.Getpid()}
 	if !live.IsAlive() {

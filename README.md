@@ -141,7 +141,7 @@ feishu-cli doc import large-doc.md --title "大文档" \
 | **邮箱** | 收件箱分类/搜索、邮件详情（单条/批量/线程）、发送（默认草稿，支持 CID 内联图片自动扫描）、草稿管理（创建/编辑/**发送已有草稿**）、回复/全部回复/转发、**批量改 label/移动文件夹、批量软删进废纸篓**、邮件模板 create/list、邮箱签名查看（需 User Token） |
 | **日历** | 日历列表、主日历、日程增删改查、搜索、回复邀请、参与者管理、忙闲查询、日程视图（agenda）、智能时段建议、会议室查找、RSVP |
 | **任务** | 创建、查看、完成、重新打开、**服务端搜索（按创建者/执行者/关注者/完成态/截止时间）**、子任务、成员管理、提醒、评论、附件上传、我的任务、任务清单（CRUD + 任务关联 + 成员管理） |
-| **视频会议** | 多维搜索（query/主持人/参会者/会议室）、**聚合详情（vc detail：会议信息 + note_id + minute_token 一次拿齐，支持会议号反查）**、**智能纪要（vc note：详情 / 统一逐字稿导出）**、会议纪要（三路径批量获取 + AI 产物 + 逐字稿下载）、录制查询、会议机器人入会/离会/会议事件（需 User Token） |
+| **视频会议** | 多维搜索（query/主持人/参会者/会议室）、**聚合详情（vc detail：会议信息 + note_id + minute_token 一次拿齐，支持会议号反查）**、**智能纪要（vc note：详情 / 统一逐字稿导出）**、会议纪要（三路径批量获取 + AI 产物 + 逐字稿下载）、录制查询、会议机器人入会/离会/会议事件（`--as bot\|user\|auto`） |
 | **妙记** | 详情 + AI 产物、**关键词搜索、权限申请、等待转写就绪（--wait-ready）**、媒体批量下载 |
 | **审批** | 审批定义与实例详情查询、当前登录用户审批任务查询（待办 / 已办 / 已发起 / 抄送）、发起/撤回/抄送审批实例、通过/拒绝/转交审批任务 |
 | **考勤** | 查询用户打卡记录与日/月度考勤统计（tenant token，日期范围最长 31 天） |
@@ -157,7 +157,7 @@ feishu-cli doc import large-doc.md --title "大文档" \
 | **搜索** | 消息搜索（默认返回消息 ID，`--enrich` 补全内容/发送者/群名/时间）、应用搜索、文档搜索（需 User Access Token） |
 | **用户** | 获取用户信息、用户搜索、部门用户列表 |
 | **通讯录** | 部门详情、子部门列表 |
-| **实时事件** | WebSocket 长连接订阅应用事件（EventKey 列表/schema/consume/status/stop），**卡片按钮/表单回调（card.action.trigger）**、**审批 v4 事件（自动注册服务端订阅）**、Bot 菜单事件 |
+| **实时事件** | WebSocket 长连接订阅应用事件（EventKey 列表/schema/consume/status/stop），**卡片按钮/表单回调（card.action.trigger）**、**审批 v4 事件（自动注册服务端订阅）**、**VC participant/note/recording 事件（User pre-consume，握手后 ready）**、Bot 菜单事件 |
 | **Raw API** | `api GET/POST/PUT/DELETE/PATCH <path>` 裸调任意未封装的 OpenAPI 接口，自动鉴权与错误码处理，支持 dry-run、自定义超时、jq 过滤与 json/pretty/table/ndjson/csv 多格式输出 |
 | **OpenAPI Schema** | 本地查询内置 OpenAPI service/resource/method、路径、参数和 scope，无需 token |
 | **Profile 多配置** | 多 App / 多账号配置 add/list/use/current/rename/remove/migrate；`profile list --json` 列出可操作 Bot；全局 `--profile` / `FEISHU_PROFILE` 单次切换目录与 User Token（`FEISHU_APP_ID/SECRET` 仍可覆盖 App 凭证） |
@@ -877,7 +877,8 @@ feishu-cli vc notes --minute-tokens obcnxxxx --with-artifacts --download-transcr
 feishu-cli vc recording --meeting-ids 69xxxx
 feishu-cli vc bot meeting-join --meeting-number 123456789          # 机器人入会（Bot/Tenant 身份）
 feishu-cli vc bot meeting-leave --meeting-id 6911188411932033028   # 机器人离会（Bot/Tenant 身份）
-feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --start 2026-03-01 --end 2026-03-31  # 需 User Token（端点拒收 Tenant）
+feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --as user --start 2026-03-01 --end 2026-03-31
+feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --as bot --dry-run  # 与 meeting_id 来源身份一致；禁止静默回落
 
 # 妙记（minutes，需 User Token）
 feishu-cli minutes get <minute_token> --with-artifacts
@@ -1016,6 +1017,7 @@ feishu-cli event schema im.message.receive_v1
 feishu-cli event consume im.message.receive_v1 --max-events 5 --timeout 60s
 feishu-cli event consume card.action.trigger                        # 卡片按钮/表单回调（交互式 Bot）
 feishu-cli event consume approval.instance.status_changed_v4        # 审批事件（自动注册服务端订阅）
+feishu-cli event consume vc.meeting.participant_meeting_ended_v1    # VC：User pre-consume，握手后才发 ready
 feishu-cli event status
 feishu-cli event stop --all
 
@@ -1555,8 +1557,8 @@ feishu-cli 涵盖文档、知识库、电子表格、多维表格、消息、群
       "task:tasklist:write",
       "vc:meeting",
       "vc:meeting.bot.join:write",
-      "vc:meeting.bot.leave:write",
       "vc:meeting.meetingevent:read",
+      "vc:recording:read",
       "vc:meeting.meetingid:read",
       "vc:meeting.participant:write",
       "vc:meeting.search:read",

@@ -3,11 +3,14 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -56,7 +59,7 @@ func TestVCBotFlagsRequired(t *testing.T) {
 	}{
 		{"meeting-join", []string{"meeting-number", "password", "dry-run", "output", "user-access-token"}, "meeting-number"},
 		{"meeting-leave", []string{"meeting-id", "dry-run", "output", "user-access-token"}, "meeting-id"},
-		{"meeting-events", []string{"meeting-id", "start", "end", "page-size", "page-token", "dry-run", "output", "user-access-token"}, "meeting-id"},
+		{"meeting-events", []string{"meeting-id", "start", "end", "page-size", "page-token", "dry-run", "output", "as", "user-access-token"}, "meeting-id"},
 	}
 	for _, tc := range cases {
 		c := botSub(tc.name)
@@ -87,8 +90,7 @@ func TestVCBotHelpDocumentsTenantDefault(t *testing.T) {
 	if !strings.Contains(vcBotCmd.Long, "默认使用 Bot/Tenant Access Token") {
 		t.Fatalf("bot Long 应说明默认使用 Bot/Tenant Access Token，实际:\n%s", vcBotCmd.Long)
 	}
-	// meeting-join / meeting-leave 默认 Bot/Tenant 身份；meeting-events 例外——该端点拒收
-	// Tenant Token（99991663），走 User 优先 + Tenant 兜底，故单独断言（见下）。
+	// meeting-join / meeting-leave 默认 Bot/Tenant 身份；meeting-events 用显式 --as。
 	for _, c := range []*cobra.Command{vcBotJoinCmd, vcBotLeaveCmd} {
 		if !strings.Contains(c.Long, "默认使用 Bot/Tenant 身份") {
 			t.Errorf("%s Long 应说明默认 Bot/Tenant 身份", c.Use)
@@ -102,15 +104,14 @@ func TestVCBotHelpDocumentsTenantDefault(t *testing.T) {
 			t.Errorf("%s --user-access-token help 应说明默认 Bot/Tenant 身份，实际 %q", c.Use, f.Usage)
 		}
 	}
-	// meeting-events 同时支持 User 与 Bot，help 必须把身份与 meeting_id 来源绑在一起。
-	if !strings.Contains(vcBotEventsCmd.Long, "User") || !strings.Contains(vcBotEventsCmd.Long, "Bot") {
-		t.Errorf("meeting-events Long 应说明 User/Bot 双身份，实际:\n%s", vcBotEventsCmd.Long)
+	if vcBotEventsCmd.Flags().Lookup("as") == nil || vcBotEventsCmd.Flags().Lookup("as").DefValue != "auto" {
+		t.Fatal("meeting-events 应注册 --as，默认 auto")
+	}
+	if !strings.Contains(vcBotEventsCmd.Long, "--as bot") || !strings.Contains(vcBotEventsCmd.Long, "--as user") {
+		t.Errorf("meeting-events Long 应说明显式 --as bot|user|auto，实际:\n%s", vcBotEventsCmd.Long)
 	}
 	if !strings.Contains(vcBotEventsCmd.Long, "meeting_id 来源") {
 		t.Errorf("meeting-events Long 应说明身份须与 meeting_id 来源一致，实际:\n%s", vcBotEventsCmd.Long)
-	}
-	if f := vcBotEventsCmd.Flags().Lookup("user-access-token"); f == nil || !strings.Contains(f.Usage, "Bot 身份") {
-		t.Errorf("meeting-events --user-access-token help 应说明 Bot 回落，实际 %q", f.Usage)
 	}
 	if !strings.Contains(vcBotLeaveCmd.Long, "vc:meeting.bot.join:write") {
 		t.Errorf("meeting-leave Long 应使用官方 join scope，实际:\n%s", vcBotLeaveCmd.Long)
@@ -151,6 +152,7 @@ func newVCBotEventsTestCmd() *cobra.Command {
 	cmd.Flags().String("page-token", "", "")
 	cmd.Flags().Bool("dry-run", false, "")
 	cmd.Flags().StringP("output", "o", "", "")
+	cmd.Flags().String("as", "auto", "")
 	cmd.Flags().String("user-access-token", "", "")
 	return cmd
 }
@@ -241,9 +243,94 @@ func TestVCBotCommandsDefaultToTenantToken(t *testing.T) {
 	}
 }
 
-// TestVCBotEventsDefaultsToUserToken 验证 meeting-events 走「User 优先 + Tenant 兜底」：
-// 该端点不接受 Tenant Token（飞书网关 99991663），故已登录（env/token.json 存在 User Token）时
-// 默认就用 User 身份，而非像 join/leave 那样回落 Tenant。这是 BUG #10 修复后的正确行为。
+func TestVCBotEventsAsBotIgnoresUserToken(t *testing.T) {
+	isolateMsgTokenTestEnv(t)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
+
+	var capturedAuth string
+	cleanup := stubCmdFeishuServer(t, tenantTokenHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open-apis/vc/v1/bots/events" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":0,"msg":"success","data":{"meeting_event_list":[],"has_more":false,"page_token":""}}`)
+	}))
+	defer cleanup()
+
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "bot")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("meeting-events --as bot 返回错误: %v", err)
+	}
+	if capturedAuth != testTenantAuth {
+		t.Fatalf("Authorization = %q, want %q（--as bot 即使已登录也走 Bot）", capturedAuth, testTenantAuth)
+	}
+}
+
+func TestVCBotEventsAsUserFailClosed(t *testing.T) {
+	isolateMsgTokenTestEnv(t)
+	cfgFile := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("app_id: cli_test\napp_secret: secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "user")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--as user") {
+		t.Fatalf("--as user 缺 Token 应失败，实际: %v", err)
+	}
+	mustSetFlag(t, cmd, "dry-run", "true")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--as user") {
+		t.Fatalf("dry-run 也应 fail-closed，实际: %v", err)
+	}
+}
+
+func TestVCBotEventsInvalidAsFailClosed(t *testing.T) {
+	isolateMsgTokenTestEnv(t)
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "nobody")
+	mustSetFlag(t, cmd, "dry-run", "true")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "bot|user|auto") {
+		t.Fatalf("非法 --as 在 dry-run 也应失败，实际: %v", err)
+	}
+}
+
+func TestVCBotEventsDryRunIncludesResolvedIdentity(t *testing.T) {
+	isolateMsgTokenTestEnv(t)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "meeting-id", "m1")
+	mustSetFlag(t, cmd, "as", "bot")
+	mustSetFlag(t, cmd, "dry-run", "true")
+	if err := vcBotEventsCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("dry-run --as bot 不应请求网络: %v", err)
+	}
+}
+
+func TestResolveVCBotEventsIdentity(t *testing.T) {
+	isolateMsgTokenTestEnv(t)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")
+	cmd := newVCBotEventsTestCmd()
+	mustSetFlag(t, cmd, "as", "bot")
+	token, identity, err := resolveVCBotEventsIdentity(cmd)
+	if err != nil || token != "" || identity != "bot" {
+		t.Fatalf("--as bot 即使已登录也应走 Bot, token=%q identity=%q err=%v", token, identity, err)
+	}
+	mustSetFlag(t, cmd, "as", "auto")
+	token, identity, err = resolveVCBotEventsIdentity(cmd)
+	if err != nil || token != "u-env-token" || identity != "user" {
+		t.Fatalf("--as auto 已登录应为 user, token=%q identity=%q err=%v", token, identity, err)
+	}
+}
+
+// TestVCBotEventsDefaultsToUserToken 验证 --as auto（默认）在已登录时走 User Token。
 func TestVCBotEventsDefaultsToUserToken(t *testing.T) {
 	isolateMsgTokenTestEnv(t)
 	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "u-env-token")

@@ -6,6 +6,18 @@
 >
 > **发消息？** 走 [`msg` 工作流](../msg/workflow.md)。本工作流专注于事件订阅（**接收**应用事件），不负责发送。
 
+## 目录
+
+1. [核心概念](#核心概念)
+2. [命令速查](#命令速查)
+3. [EventKey 速查（按 domain 分组）](#eventkey-速查按-domain-分组)
+4. [权限与开放平台配置](#权限与开放平台配置)
+5. [AI Agent 后台订阅推荐用法](#ai-agent-后台订阅推荐用法)
+6. [踩坑与注意事项](#踩坑与注意事项)
+7. [何时转其他 skill](#何时转其他-skill)
+8. [参考](#参考)
+9. [安全 — event_id 文件名净化](#安全--event_id-文件名净化)
+
 ## 核心概念
 
 ### 进程模型 = 1 个 EventKey 1 个 consume 进程
@@ -15,7 +27,7 @@ event consume <EventKey>
    │
    ├─ 启动 WebSocket 长连接（飞书 SDK ws.Client + AutoReconnect）
    ├─ 注册到 bus.json（PID / EventKey / 启动时间 / max-events / timeout）
-   ├─ stderr 输出 [event] ready event_key=<key>
+   ├─ stderr 输出 [event] ready event_key=<key>（pre-consume + WS 握手都完成后才发）
    ├─ 接收事件 → 写 stdout（NDJSON，每条一行 JSON）
    ├─ 可选：dump 每条事件为 <event_id>.json 文件
    ├─ 退出条件：--max-events / --timeout / SIGTERM / Ctrl-C / stdin EOF / pipe broken
@@ -38,9 +50,9 @@ event consume <EventKey>
 | 流 | 内容 |
 |---|---|
 | **stdout** | 每条事件一行 JSON（NDJSON），适合 jq / 脚本管道 |
-| **stderr** | 诊断日志；启动时一行 `[event] ready event_key=<key> (init complete; WS handshake in progress)` |
+| **stderr** | 诊断日志；pre-consume 与 WebSocket 握手都完成后一行 `[event] ready event_key=<key>` |
 
-> **AI Agent 推荐**：父进程把 consume 跑后台（`run_in_background=true`），先阻塞 stderr 等到 `[event] ready` 那一行再开始读 stdout。**注意**：ready marker 只表示进程初始化完成，WS 握手在后台异步执行；父进程见到 marker 后**还需额外等 1-3s 让 WS 握手真正完成**，生产环境建议父进程发自检事件 + 等 echo 回环来确认链路通。
+> **AI Agent 推荐**：父进程把 consume 跑后台（`run_in_background=true`），先阻塞 stderr 等到 `[event] ready` 那一行再开始读 stdout。ready 发出前握手未完成，不要靠额外 sleep 猜。VC EventKey 还需 User Token 做服务端订阅；同 key 多个 consume 时只有第一个注册订阅、最后一个人退出才注销。
 
 ### 退出码与退出 reason
 
@@ -169,7 +181,9 @@ feishu-cli event stop --all --force                        # SIGKILL（紧急情
 | drive | `drive.file.permission_member_added_v1` | 文档协作者添加 |
 | approval | `approval.instance.status_changed_v4` | 审批实例状态变更（需服务端订阅注册，见下） |
 | approval | `approval.task.status_changed_v4` | 审批任务状态变更（需服务端订阅注册，见下） |
-| vc | `vc.meeting.meeting_started_v1` / `meeting_ended_v1` | VC 会议开始/结束 |
+| vc | `vc.meeting.participant_meeting_started_v1` / `joined_v1` / `ended_v1` | 当前用户参与的会议开始/加入/结束（User pre-consume） |
+| vc | `vc.note.generated_v1` | 智能纪要已生成 |
+| vc | `vc.recording.recording_started_v1` / `recording_transcript_generated_v1` / `recording_ended_v1` | 录制开始/逐字稿/结束 |
 
 > **EventKey 与 EventType 通常一致**；接收到的 payload 里 `header.event_type` 等于 `event_type` 字段。
 
@@ -198,6 +212,10 @@ feishu-cli event consume approval.instance.status_changed_v4
 ```
 
 订阅是**持久的用户级关系**，进程退出不注销；重复注册服务端幂等处理。未登录时报错并提示 auth login。
+
+### VC 事件的服务端订阅（User pre-consume，last-consumer 注销）
+
+`vc.meeting.participant_meeting_*` / `vc.note.generated_v1` / `vc.recording.*` 必须用 User Token 在 consume 启动前 POST 对应 `.../subscription`（body `{"event_type": "<key>"}`）。同一 EventKey 多个 consume 并存时，只有第一个注册服务端订阅；最后一个人退出才 POST `.../unsubscription`（5s timeout），避免先退出者打断后者。
 
 ## 权限与开放平台配置
 
@@ -235,11 +253,9 @@ task = Bash(
 
 # 2. tail consume.log 阻塞等 "[event] ready event_key=im.message.receive_v1"
 
-# 3. 额外 sleep 1-3s 让 WS 握手完成
+# 3. 业务逻辑：tail stdout / 读 ./events/*.json 处理新事件
 
-# 4. 业务逻辑：tail stdout / 读 ./events/*.json 处理新事件
-
-# 5. 退出：feishu-cli event stop --event-key im.message.receive_v1
+# 4. 退出：feishu-cli event stop --event-key im.message.receive_v1
 #         或父进程 kill 后台 Bash task（SIGTERM 触发 graceful shutdown + unregister）
 ```
 

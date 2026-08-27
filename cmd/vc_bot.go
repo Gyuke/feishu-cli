@@ -57,9 +57,11 @@ var vcBotCmd = &cobra.Command{
 
 身份:
   meeting-join / meeting-leave 默认使用 Bot/Tenant Access Token；显式传 --user-access-token 改用 User 身份。
-  meeting-events 走「User 优先 + Bot/Tenant 兜底」：已登录自动用 User Token；未登录回落 Bot Token。
-  读取身份必须与 meeting_id 来源一致（用户发现的会议用 User，机器人入会得到的会议用 Bot），
-  随意切换会得到空列表或无权限。Bot 身份要求机器人在会中（结束后约 5 分钟内曾入会仍可读）。
+  meeting-events 必须显式用 --as bot|user|auto 选择身份，禁止静默回落：
+    --as user  强制 User Token（缺失即失败）
+    --as bot   强制 Bot/Tenant Token（即使已登录也不改用 User）
+    --as auto  已登录用 User，未登录用 Bot（默认）
+  读取身份必须与 meeting_id 来源一致。Bot 身份要求机器人在会中（结束后约 5 分钟内曾入会仍可读）。
 
 示例:
   feishu-cli vc bot meeting-join --meeting-number 123456789
@@ -237,10 +239,13 @@ var vcBotEventsCmd = &cobra.Command{
   --page-token   分页标记
   --dry-run      只打印将要发送的请求参数，不实际调用
   --output, -o   输出格式（json）
-  --user-access-token 覆盖登录态；缺省时 User 优先、未登录回落 Bot 身份（须与 meeting_id 来源一致）
+  --as           身份：bot | user | auto（默认 auto）。必须与 meeting_id 来源一致；
+                 --as user 缺 Token 失败；--as bot 即使已登录也走 Bot
+  --user-access-token 覆盖登录态（仅 --as user/auto 使用）
 
 示例:
-  feishu-cli vc bot meeting-events --meeting-id 6911188411932033028
+  feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --as user
+  feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --as bot --dry-run
   feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --start 2026-03-01 --end 2026-03-31 -o json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
@@ -282,6 +287,12 @@ var vcBotEventsCmd = &cobra.Command{
 			pageSize = 20
 		}
 
+		// dry-run 与实调共用同一条身份解析：非法 --as / --as user 缺 Token 在预览阶段就失败。
+		token, identity, err := resolveVCBotEventsIdentity(cmd)
+		if err != nil {
+			return err
+		}
+
 		req := client.VCBotEventsReq{
 			MeetingID:    meetingID,
 			StartTimeSec: startSec,
@@ -309,13 +320,9 @@ var vcBotEventsCmd = &cobra.Command{
 				"method": "GET",
 				"path":   "/open-apis/vc/v1/bots/events",
 				"query":  query,
+				"as":     identity,
 			})
 		}
-
-		// meeting-events 支持 User 与 Bot 两种身份，必须与 meeting_id 来源一致：
-		// 用户发现的会议用 User（vc:meeting.meetingevent:read），机器人入会得到的会议用 Bot
-		// （vc:meeting.bot.join:write）。已登录时 User 优先；未登录回落 Bot/Tenant。
-		token := resolveOptionalUserTokenWithFallback(cmd)
 
 		data, err := client.VCBotMeetingEvents(req, token)
 		if err != nil {
@@ -372,6 +379,31 @@ func init() {
 	vcBotEventsCmd.Flags().String("page-token", "", "分页标记")
 	vcBotEventsCmd.Flags().Bool("dry-run", false, "只打印请求参数，不实际调用")
 	vcBotEventsCmd.Flags().StringP("output", "o", "", "输出格式（json）")
-	vcBotEventsCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态；缺省 User 优先，未登录回落 Bot 身份，须与 meeting_id 来源一致）")
+	vcBotEventsCmd.Flags().String("as", "auto", "身份：bot | user | auto（默认 auto；须与 meeting_id 来源一致）")
+	vcBotEventsCmd.Flags().String("user-access-token", "", "User Access Token（仅 --as user/auto 使用；--as bot 忽略）")
 	mustMarkFlagRequired(vcBotEventsCmd, "meeting-id")
+}
+
+// resolveVCBotEventsIdentity 解析 meeting-events 身份。fail-closed：非法 --as 与
+// --as user 缺 Token 直接报错；--as bot 即使环境里有 User Token 也走 Bot。
+func resolveVCBotEventsIdentity(cmd *cobra.Command) (token string, identity string, err error) {
+	as, _ := cmd.Flags().GetString("as")
+	switch strings.ToLower(strings.TrimSpace(as)) {
+	case "", "auto":
+		token = resolveOptionalUserTokenWithFallback(cmd)
+		if token != "" {
+			return token, "user", nil
+		}
+		return "", "bot", nil
+	case "bot", "tenant", "app":
+		return "", "bot", nil
+	case "user":
+		token, err = resolveRequiredUserToken(cmd)
+		if err != nil {
+			return "", "", fmt.Errorf("--as user 需要 User Access Token（请先 `feishu-cli auth login`，或改用 --as bot）: %w", err)
+		}
+		return token, "user", nil
+	default:
+		return "", "", fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", as)
+	}
 }

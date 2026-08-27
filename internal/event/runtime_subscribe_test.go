@@ -1,11 +1,13 @@
 package event
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -112,6 +114,228 @@ func TestRegisterSubscriptionsCtxCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("应在 ctx 超时后立即返回，实际耗时 %v", elapsed)
+	}
+}
+
+func waitRuntimeReady(t *testing.T, ready *bytes.Buffer, key string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(ready.String(), "[event] ready event_key="+key) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待 ready 超时，实际: %q", ready.String())
+}
+
+func startVCConsumer(t *testing.T, srvURL string, bus *Bus, pid int, ready *bytes.Buffer) (context.CancelFunc, <-chan error) {
+	t.Helper()
+	r := NewRuntime(ConsumeOptions{
+		AppID:           "cli_test",
+		AppSecret:       "secret",
+		EventKey:        "vc.meeting.participant_meeting_started_v1",
+		BaseURL:         srvURL,
+		UserAccessToken: "u-test",
+		ErrOut:          io.Discard,
+		ReadyOut:        ready,
+		Bus:             bus,
+		ConsumerPID:     pid,
+		StartWS: func(ctx context.Context, onHandshake func()) error {
+			onHandshake()
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := r.Run(ctx)
+		errCh <- err
+	}()
+	return cancel, errCh
+}
+
+func TestSequentialConsumersSubscribeOnceUnsubscribeOnLast(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	var ready1, ready2 bytes.Buffer
+	cancel1, done1 := startVCConsumer(t, srv.URL, bus, 501, &ready1)
+	waitRuntimeReady(t, &ready1, "vc.meeting.participant_meeting_started_v1")
+
+	cancel2, done2 := startVCConsumer(t, srv.URL, bus, 502, &ready2)
+	waitRuntimeReady(t, &ready2, "vc.meeting.participant_meeting_started_v1")
+
+	mu.Lock()
+	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
+	unsubCount := countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if subCount != 1 {
+		t.Fatalf("顺序第二个 consumer 不应再 subscribe，subscribe=%d paths=%v", subCount, paths)
+	}
+	if unsubCount != 0 {
+		t.Fatalf("两人还在跑时不得 unsubscribe，unsub=%d", unsubCount)
+	}
+
+	cancel1()
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer1 未退出")
+	}
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	unsubCount = countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if unsubCount != 0 {
+		t.Fatalf("先退出者不得注销同伴仍在用的订阅，unsub=%d paths=%v", unsubCount, paths)
+	}
+
+	cancel2()
+	select {
+	case <-done2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer2 未退出")
+	}
+	mu.Lock()
+	subCount = countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
+	unsubCount = countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if subCount != 1 || unsubCount != 1 {
+		t.Fatalf("最后一人退出才 unsubscribe，subscribe=%d unsub=%d paths=%v", subCount, unsubCount, paths)
+	}
+}
+
+func TestConcurrentConsumersSubscribeOnceUnsubscribeOnce(t *testing.T) {
+	stubConsumerAlive(t)
+	bus := setupBus(t)
+
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	var ready1, ready2 bytes.Buffer
+	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	cancels := make([]context.CancelFunc, 2)
+	for i, pid := range []int{601, 602} {
+		ready := &ready1
+		if i == 1 {
+			ready = &ready2
+		}
+		r := NewRuntime(ConsumeOptions{
+			AppID:           "cli_test",
+			AppSecret:       "secret",
+			EventKey:        "vc.meeting.participant_meeting_started_v1",
+			BaseURL:         srv.URL,
+			UserAccessToken: "u-test",
+			ErrOut:          io.Discard,
+			ReadyOut:        ready,
+			Bus:             bus,
+			ConsumerPID:     pid,
+			StartWS: func(ctx context.Context, onHandshake func()) error {
+				onHandshake()
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels[i] = cancel
+		go func() {
+			<-start
+			_, err := r.Run(ctx)
+			errCh <- err
+		}()
+	}
+	close(start)
+	waitRuntimeReady(t, &ready1, "vc.meeting.participant_meeting_started_v1")
+	waitRuntimeReady(t, &ready2, "vc.meeting.participant_meeting_started_v1")
+
+	mu.Lock()
+	subCount := countPath(paths, "POST /open-apis/vc/v1/meetings/subscription")
+	mu.Unlock()
+	if subCount != 1 {
+		t.Fatalf("并发启动也只能 subscribe 一次，subscribe=%d paths=%v", subCount, paths)
+	}
+
+	cancels[0]()
+	cancels[1]()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("并发 consumer 未退出")
+		}
+	}
+	mu.Lock()
+	unsubCount := countPath(paths, "POST /open-apis/vc/v1/meetings/unsubscription")
+	mu.Unlock()
+	if unsubCount != 1 {
+		t.Fatalf("并发退出只能 unsubscribe 一次，unsub=%d paths=%v", unsubCount, paths)
+	}
+}
+
+func countPath(paths []string, want string) int {
+	n := 0
+	for _, p := range paths {
+		if p == want {
+			n++
+		}
+	}
+	return n
+}
+
+func TestUnregisterSubscriptionsUses5sTimeout(t *testing.T) {
+	if unsubscribeHTTPTimeout != 5*time.Second {
+		t.Fatalf("unsubscribeHTTPTimeout = %s, want 5s", unsubscribeHTTPTimeout)
+	}
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(20 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	r := NewRuntime(ConsumeOptions{
+		BaseURL:         srv.URL,
+		UserAccessToken: "u-test",
+		ErrOut:          io.Discard,
+	})
+	begin := time.Now()
+	r.unregisterSubscriptions(KeyDefinition{
+		Key:                "vc.meeting.participant_meeting_started_v1",
+		EventType:          "vc.meeting.participant_meeting_started_v1",
+		UnsubscribePath:    "/open-apis/vc/v1/meetings/unsubscription",
+		SubscribeEventType: true,
+	})
+	elapsed := time.Since(begin)
+	select {
+	case <-started:
+	default:
+		t.Fatal("注销请求未发出")
+	}
+	if elapsed < 4*time.Second || elapsed > 7*time.Second {
+		t.Fatalf("cleanup elapsed = %s, want ~5s", elapsed)
 	}
 }
 

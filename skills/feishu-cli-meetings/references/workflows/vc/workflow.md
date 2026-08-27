@@ -15,7 +15,7 @@
 
 ## 前置条件
 
-- **认证**：除 `vc bot meeting-join/meeting-leave`（默认 Bot/Tenant 身份，仅靠 App ID + App Secret）外，`vc search/notes/recording/detail`、`vc note`、`vc bot meeting-events` 与 minutes 全部命令均需 **User Access Token**（推荐先 `auth check --scope "..."`，再 `feishu-cli auth login --scope "..."` 或 `--domain vc --domain minutes --recommend`）；完整身份清单以「注意事项」的「Token 身份分三档」为唯一权威
+- **认证**：除 `vc bot meeting-join/meeting-leave`（默认 Bot/Tenant 身份，仅靠 App ID + App Secret）外，`vc search/notes/recording/detail`、`vc note` 与 minutes 全部命令均需 **User Access Token**。`vc bot meeting-events` 用显式 `--as bot|user|auto`（默认 auto），身份必须与 `meeting_id` 来源一致。推荐先 `auth check --scope "..."`；完整身份清单以「注意事项」的「Token 身份分三档」为唯一权威
 - **App 凭证**：应用 App ID + App Secret（环境变量 `FEISHU_APP_ID` + `FEISHU_APP_SECRET` 或 `~/.feishu-cli/config.yaml`）
 - **预检**：`feishu-cli auth status` 查看登录状态；`feishu-cli auth check --scope "vc:meeting.search:read"` 预检 scope
 
@@ -122,10 +122,10 @@ feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --start 2026-0
 |------|------|------|---------|
 | `meeting-join` | `POST /open-apis/vc/v1/bots/join` | 默认 Bot/Tenant | `--meeting-number`（必填）、`--password`（可选）、`--dry-run`、`-o json` |
 | `meeting-leave` | `POST /open-apis/vc/v1/bots/leave` | 默认 Bot/Tenant | `--meeting-id`（必填）、`--dry-run`、`-o json` |
-| `meeting-events` | `GET /open-apis/vc/v1/bots/events` | 必须 User Token | `--meeting-id`（必填）、`--start`、`--end`、`--page-size`（20-100，默认 20）、`--page-token`、`--dry-run`、`-o json` |
+| `meeting-events` | `GET /open-apis/vc/v1/bots/events` | `--as bot\|user\|auto`（默认 auto） | `--meeting-id`（必填）、`--as`、`--start`、`--end`、`--page-size`（20-100，默认 20）、`--page-token`、`--dry-run`、`-o json` |
 
 > 三个子命令均支持 `--dry-run`（只打印将要发送的请求参数/请求体，不实际调用）与 `-o json`（输出原始响应）。
-> 身份细节（`meeting-join/leave` 默认 Bot/Tenant 且仅认 `--user-access-token` flag、`meeting-events` 拒收 Tenant Token 等）见「注意事项」的「Token 身份分三档」。
+> 身份细节（`meeting-join/leave` 默认 Bot/Tenant 且仅认 `--user-access-token` flag、`meeting-events` 必须显式 `--as` 且 dry-run/实调同一套解析）见「注意事项」的「Token 身份分三档」。
 > `meeting-events` 的 `--page-size` 取值范围是 **20-100**（与 `vc search` 的 1-30 不同）；传 0 或不传走默认 20，传 1-19 会被拒。
 
 ### 7. 聚合会议详情 → note_id + minute_token（vc detail）
@@ -247,9 +247,10 @@ feishu-cli vc bot meeting-join --meeting-number 123456789 --password 1234
 # 预览离会请求体不实际调用
 feishu-cli vc bot meeting-leave --meeting-id 6911188411932033028 --dry-run
 
-# 查询机器人会议事件（必须 User Token），分页 + JSON 输出
+# 查询会议事件：身份必须与 meeting_id 来源一致（用户发现用 --as user，机器人入会用 --as bot）
 feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 \
-  --start 2026-03-01 --end 2026-03-31 --page-size 50 -o json
+  --as user --start 2026-03-01 --end 2026-03-31 --page-size 50 -o json
+feishu-cli vc bot meeting-events --meeting-id 6911188411932033028 --as bot --dry-run
 ```
 
 ## 典型工作流
@@ -296,8 +297,8 @@ feishu-cli minutes download --minute-tokens <minute_token> --output ./media
 | `vc notes`（calendar-event-ids 路径） | + `calendar:calendar:read`、`calendar:calendar.event:read` |
 | `vc recording` | `vc:record:readonly`（calendar 路径同上追加日历权限） |
 | `vc bot meeting-join` | `vc:meeting.bot.join:write` |
-| `vc bot meeting-leave` | `vc:meeting.bot.leave:write` |
-| `vc bot meeting-events` | `vc:meeting.meetingevent:read`（必须 User Token；未登录会被 `99991663` 拒绝） |
+| `vc bot meeting-leave` | `vc:meeting.bot.join:write`（与入会同一 scope） |
+| `vc bot meeting-events` | User：`vc:meeting.meetingevent:read`；Bot：`vc:meeting.bot.join:write`。必须 `--as bot\|user\|auto`，禁止静默回落 |
 | `vc detail`（meeting_id 路径） | `vc:meeting.meetingevent:read`、`vc:record:readonly` |
 | `vc detail`（会议号路径） | + `vc:meeting:readonly` 或 `vc:meeting.meetingid:read`（`list_by_no` 反查所需） |
 | `minutes get` | `minutes:minutes:readonly`（`--with-artifacts` 额外需 `minutes:minutes.artifacts:read`） |
@@ -310,9 +311,9 @@ feishu-cli minutes download --minute-tokens <minute_token> --output ./media
 ## 注意事项
 
 - **Token 身份分三档**：
-  - **必须 User Token**：`vc search/notes/recording/detail`、`vc note detail/transcript`、`vc bot meeting-events`、`minutes get/search/apply-permission/download`。未登录会中文报错并引导 `feishu-cli auth login`；`meeting-events` 端点不接受 Tenant Token，未登录直接被 `99991663` 拒绝。
+  - **必须 User Token**：`vc search/notes/recording/detail`、`vc note detail/transcript`、`minutes get/search/apply-permission/download`。未登录会中文报错并引导 `feishu-cli auth login`。
   - **默认 Bot/Tenant**：`vc bot meeting-join` / `vc bot meeting-leave`，仅需 App ID + App Secret，无需登录；只有显式传 `--user-access-token` flag 才切到 User 身份（用 `resolveFlagUserToken`，**不读** `FEISHU_USER_ACCESS_TOKEN` 环境变量）。
-  - 覆盖登录态：除 `meeting-join`/`meeting-leave`（仅认 `--user-access-token` flag）外，其余命令也可用 `FEISHU_USER_ACCESS_TOKEN` 环境变量。
+  - **显式 `--as`**：`vc bot meeting-events` 支持 `--as bot|user|auto`（默认 auto）。`--as user` 缺 Token 失败；`--as bot` 即使已登录也走 Bot；`--as auto` 已登录用 User、未登录用 Bot。dry-run 与实调走同一解析，预览 JSON 含 `"as"`。身份必须与 `meeting_id` 来源一致。
 - **时间格式**：`vc search --start/--end` 接受 `YYYY-MM-DD` / `YYYY-MM-DD HH:MM:SS` / RFC3339，均按本地时区解析；纯日期的 `--end` 自动对齐到 23:59:59。
 - **批量上限**：所有 CSV 类入参统一 50 条上限，超出直接报错。
 - **minute_token 格式**：字母数字组合，长度≥5；命令会前置校验。

@@ -20,9 +20,9 @@
     {
       "id": 3,
       "workflows": ["vc"],
-      "prompt": "查询 meeting bot 的会议事件。Tenant Token 可不可以？",
-      "expected_output": "meeting-events 端点拒收 Tenant Token，必须使用 User Token。",
-      "expectations": ["明确 meeting-events 拒收 Tenant Token", "要求 User Token"],
+      "prompt": "查询 meeting bot 的会议事件。我已经登录，但 meeting_id 来自机器人入会，该用什么身份？",
+      "expected_output": "使用 --as bot，即使已登录也不要静默切到 User；身份必须与 meeting_id 来源一致。",
+      "expectations": ["要求显式 --as bot|user|auto", "说明身份必须与 meeting_id 来源一致", "已登录时仍能强制 Bot"],
       "files": []
     }
   ]

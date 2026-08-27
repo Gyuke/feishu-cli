@@ -84,7 +84,7 @@ feishu-cli okr cycle list --output json
 - `id` — 周期 ID（后续创建 O/KR 时会用，本技能不涉及）
 - `zh_name` / `en_name` — 周期名称（如 "2026-Q1"）
 - `start_time` / `end_time` — 周期起止时间
-- `cycle_status` — 周期状态（如 normal / archived）
+- `cycle_status` — 周期状态官方 wire：`default`(0) / `normal`(1) / `invalid`(2) / `hidden`(3)
 
 **实现细节**：底层走 HTTP 直调 `/open-apis/okr/v1/periods`，自动分页。
 
@@ -140,7 +140,7 @@ feishu-cli okr progress create \
 ```
 
 - `--progress-percent` 数字（0-100）
-- `--progress-status` 取值：`normal`（正常）/ `risky`（有风险）/ `overdue`（已延期）— v1 PR 修正：飞书官方枚举不含 `done`，旧文档说的 done 实际就是 overdue
+- `--progress-status` 取值：`normal`(0) / `overdue`(1) / `done`(2)。`risky` 已删除写入语义，传入会得到兼容提示而不会映射成 overdue
 - ⚠️ `--progress-status` **必须配合** `--progress-percent` 使用，单独传 status 会报错
 
 ### 富文本（ContentBlock JSON）
@@ -176,7 +176,7 @@ feishu-cli okr progress create \
 | `--content` | 纯文本内容（与 `--content-json` 二选一） | — |
 | `--content-json` | 原始 ContentBlock JSON（与 `--content` 二选一） | — |
 | `--progress-percent` | 进度百分比（数字） | — |
-| `--progress-status` | 进度状态：`normal` / `risky` / `overdue` | — |
+| `--progress-status` | 进度状态：`normal` / `overdue` / `done` | — |
 | `--source-title` | 来源标题（flag 注册默认空字符串，运行时 client 层注入默认值 `created by feishu-cli`） | `created by feishu-cli` |
 | `--source-url` | 来源 URL（⚠️ API 必填；flag 注册默认空字符串，运行时 client 层注入默认值 `https://www.feishu.cn/okr/progress`） | `https://www.feishu.cn/okr/progress` |
 | `--user-id-type` | 用户 ID 类型 | `open_id` |

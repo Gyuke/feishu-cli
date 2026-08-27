@@ -20,8 +20,9 @@ allowed-tools: Bash(feishu-cli:*), Bash(./feishu-cli:*), Read, Write
 
 - `vc search/notes/recording/detail`、`vc note detail/transcript` 和 minutes 命令必须使用 User Token。
 - `vc bot meeting-join/meeting-leave` 默认 Bot 身份，而且只在显式 flag 时切换 User Token。
-- `vc bot meeting-events` 端点拒收 Tenant Token，应使用 User Token，并预检
-  `vc:meeting.meetingevent:read`。
+- `vc bot meeting-events` 必须显式 `--as bot|user|auto`（默认 auto），身份须与
+  `meeting_id` 来源一致：`--as user` 预检 `vc:meeting.meetingevent:read`；`--as bot`
+  预检 `vc:meeting.bot.join:write` 且机器人须在会中。禁止静默回落。
 
 下载媒体时保留服务端文件名；无法解析扩展名时再按 Content-Type 推导。
 

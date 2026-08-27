@@ -54,6 +54,9 @@ type ConsumeOptions struct {
 
 	// ReadyOut 覆盖 ready marker 输出；nil 时写 os.Stderr（--quiet 也不吞，供父进程等待）。
 	ReadyOut io.Writer
+
+	// ConsumerPID 覆盖写入 bus.json 的 PID；0 表示 os.Getpid()。仅测试用于模拟并发 consumer。
+	ConsumerPID int
 }
 
 // Runtime 表示一次 consume 会话的运行时状态。
@@ -104,22 +107,14 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		return "error", err
 	}
 
-	// 需要服务端订阅注册的 EventKey（审批 v4 / VC）：连 WS 前先以 User 身份注册订阅关系，
-	// 否则连上也收不到事件。审批订阅是持久用户级关系，进程退出不注销；
-	// VC 填了 UnsubscribePath，退出时 best-effort 注销。
-	if def.SubscribePath != "" {
-		if err := r.registerSubscriptions(ctx, def); err != nil {
-			return "error", err
-		}
-		if def.UnsubscribePath != "" {
-			defer r.unregisterSubscriptions(def)
-		}
-	}
-
-	// Register 到 bus.json
+	// 先 Claim bus，再按 first-consumer 注册服务端订阅。审批无 UnsubscribePath（持久关系）；
+	// VC 等会话级订阅由 last-consumer 在退出时注销，避免两个同 key consume 时先退出者打断后者。
+	pid := r.consumerPID()
+	firstForKey := true
+	weSubscribed := false
 	if r.opts.Bus != nil {
 		entry := ConsumerEntry{
-			PID:        os.Getpid(),
+			PID:        pid,
 			EventKey:   r.opts.EventKey,
 			StartedAt:  time.Now(),
 			OutputDir:  r.opts.OutputDir,
@@ -127,12 +122,42 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 			MaxEvents:  r.opts.MaxEvents,
 			TimeoutSec: int(r.opts.Timeout.Seconds()),
 		}
-		if err := r.opts.Bus.Register(entry); err != nil {
-			fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 注册到 bus.json 失败: %v\n", err)
+		first, claimErr := r.opts.Bus.ClaimConsumer(entry)
+		if claimErr != nil {
+			if def.SubscribePath != "" || def.UnsubscribePath != "" {
+				return "error", fmt.Errorf("注册到 bus.json 失败: %w", claimErr)
+			}
+			fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 注册到 bus.json 失败: %v\n", claimErr)
+		} else {
+			firstForKey = first
+			defer func() {
+				last, relErr := r.opts.Bus.ReleaseConsumer(pid, r.opts.EventKey)
+				if relErr != nil {
+					fmt.Fprintf(r.opts.ErrOut, "[event] 警告: 从 bus.json 移除失败: %v\n", relErr)
+					return
+				}
+				if def.UnsubscribePath != "" && last && (weSubscribed || !firstForKey) {
+					r.unregisterSubscriptions(def)
+				}
+			}()
 		}
+	} else if def.UnsubscribePath != "" {
 		defer func() {
-			_ = r.opts.Bus.Unregister(os.Getpid(), r.opts.EventKey)
+			if weSubscribed {
+				r.unregisterSubscriptions(def)
+			}
 		}()
+	}
+
+	if def.SubscribePath != "" {
+		if firstForKey {
+			if err := r.registerSubscriptions(ctx, def); err != nil {
+				return "error", err
+			}
+			weSubscribed = true
+		} else {
+			fmt.Fprintf(r.opts.ErrOut, "[event] 已有同 EventKey 的 consumer，跳过服务端订阅注册: %s\n", def.Key)
+		}
 	}
 
 	// 准备输出目录
@@ -306,6 +331,17 @@ func looksLikeWSConnected(args []interface{}) bool {
 // 不能因端点挂起阻塞整个启动流程。
 const subscribeHTTPTimeout = 15 * time.Second
 
+// unsubscribeHTTPTimeout 对齐官方 PreConsume cleanup（5s），避免 last-consumer
+// 注销被取消的 consume ctx 卡住，也不要把 15s 启动超时套到退出路径。
+const unsubscribeHTTPTimeout = 5 * time.Second
+
+func (r *Runtime) consumerPID() int {
+	if r.opts.ConsumerPID != 0 {
+		return r.opts.ConsumerPID
+	}
+	return os.Getpid()
+}
+
 // subscriptionRequestBodies 构造服务端订阅/退订请求体。
 // VC 走 {"event_type": EventType}；审批走 {"subscription_type": ...}。
 func subscriptionRequestBodies(def KeyDefinition) []map[string]string {
@@ -361,7 +397,7 @@ func (r *Runtime) unregisterSubscriptions(def KeyDefinition) {
 	if def.UnsubscribePath == "" || r.opts.UserAccessToken == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), subscribeHTTPTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), unsubscribeHTTPTimeout)
 	defer cancel()
 	for _, body := range subscriptionRequestBodies(def) {
 		if err := r.postSubscription(ctx, def.UnsubscribePath, body); err != nil {
@@ -371,7 +407,13 @@ func (r *Runtime) unregisterSubscriptions(def KeyDefinition) {
 }
 
 func (r *Runtime) postSubscription(ctx context.Context, path string, body map[string]string) error {
-	httpClient := &http.Client{Timeout: subscribeHTTPTimeout}
+	timeout := subscribeHTTPTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if rem := time.Until(dl); rem > 0 && rem < timeout {
+			timeout = rem
+		}
+	}
+	httpClient := &http.Client{Timeout: timeout}
 	payload, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.opts.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {
