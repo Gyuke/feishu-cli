@@ -148,6 +148,6 @@ feishu-cli board create-notes <whiteboard_id> \
 | `board import` CLI 命令 | 单独导入画板时 API 返回 404（API 限制） |
 | Mermaid 花括号 | `{text}` 被识别为菱形节点，需避免 |
 | Mermaid par 语法 | `par...and...end` 飞书不支持 |
-| 画板无 PATCH API；已有 DELETE | 修改节点用 create+delete，或 `board update --overwrite` 先创建新节点再删除旧节点 |
+| 画板无 PATCH API；已有 DELETE | 修改节点用 create+delete，或 `board update --overwrite`（服务端 `overwrite: true` 原子清空并写入新节点） |
 | 画板图片裁切 | API 不支持 `clip`/`mask`/`crop_rect`/`border_radius` 等属性，需预处理图片 |
 | 画板图片 token | 每个节点必须独占 token，不可多节点复用同一 token |

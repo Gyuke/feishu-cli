@@ -16,11 +16,11 @@
 | 命令 | 调用的 API | 产物 | 用途 |
 |------|------------|------|------|
 | `slides create` | `POST /open-apis/slides_ai/v1/xml_presentations` | `xml_presentation_id` | 后续所有 slides 操作的 ID（不是普通 docx token） |
-| `slides media-upload` | `POST /open-apis/drive/v1/medias/upload_all` (`parent_type=slide_file`) | `file_token` | 可直接放进 slide XML 的 `<img src="...">` |
+| `slides get` | `GET /open-apis/slides_ai/v1/xml_presentations/{xml_presentation_id}` | `content` (XML) | 读取演示文稿全文 SML 内容 |
+| `slides media-upload` | `POST /open-apis/drive/v1/medias/upload_all` (`parent_type=slide_file`/`office_slide_file`) | `file_token` | 可直接放进 slide XML 的 `<img src="...">` |
 
 **关键约束**：
-- `slide_file` 是 slides 后端唯一接受的 `parent_type`（实测：`slide_image` / `slides_image` /
-  `slides_file` 都会被拒）
+- `parent_type` 由 CLI 自动选择：原生 Slides 演示文稿使用 `slide_file`；导入型 Office deck（token 以 `fake_office_` 开头）使用 `office_slide_file`
 - `parent_node` 必须传 `xml_presentation_id`（而不是 docx token 或 file_token）
 - 上传走单分片 `upload_all`，**不支持** `upload_prepare` 多分片，所以单文件硬限 20 MB
 
@@ -29,7 +29,7 @@
 `slides create` 在 CLI 内部用 `--title/--width/--height` 拼成最小可用 XML 模板再 POST：
 
 ```xml
-<presentation xmlns="http://www.larkoffice.com/sml/2.0" width="960" height="540">
+<presentation xmlns="https://www.larkoffice.com/sml/2.0" width="960" height="540">
   <title>演示文稿标题</title>
 </presentation>
 ```
@@ -173,9 +173,9 @@ done
 
 ## 注意事项
 
-- **`parent_type` 不要乱改**：源码里硬编码 `slide_file`，实测唯一可用值。
-  自己改成 `slide_image` / `slides_image` / `slides_file` 都会被服务端拒绝
-- **20 MB 上限不可绕过**：`upload_prepare` 多分片接口**不接受** `parent_type=slide_file`，
+- **`parent_type` 自动选择**：源码根据 presentationID 前缀自动选择 `slide_file` 或 `office_slide_file`。
+  自己传 `slide_image` / `slides_image` / `slides_file` 都会被服务端拒绝
+- **20 MB 上限不可绕过**：`upload_prepare` 多分片接口**不接受** `parent_type=slide_file` / `office_slide_file`，
   CLI 在 client 侧也做了 20 MB 硬检查，超过会在本地直接报错（不会发请求）
 - **`xml_presentation_id` ≠ docx token**：这是 slides 模块独立的标识符，不要拿去当
   `docx:document_id` 或 `drive:file_token` 用

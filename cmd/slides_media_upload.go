@@ -26,8 +26,8 @@ var slidesMediaUploadCmd = &cobra.Command{
   --output, -o          输出格式，可选 json
 
 注意:
-  - slides 后端只接受 parent_type=slide_file + parent_node=xml_presentation_id
-  - 多分片上传不支持 slide_file，所以单文件上限 20 MB
+  - slides 后端根据 presentation_id 自动选择 parent_type：普通 deck 为 slide_file，导入型 Office deck（fake_office_ 前缀）为 office_slide_file
+  - 多分片上传不支持 slide_file / office_slide_file，所以单文件上限 20 MB
   - 权限: docs:document.media:upload
 
 示例:

@@ -16,14 +16,14 @@ var boardUpdateCmd = &cobra.Command{
 	Short: "更新画板内容（支持覆盖）",
 	Long: `更新画板节点内容。支持从文件或 stdin 读取节点 JSON。
 
---overwrite 模式会先创建新节点，再删除旧节点（先写后删，保证不会出现空画板）。
---dry-run 模式仅预览，输出将要删除的节点数量，不实际执行。
+--overwrite 模式会通过服务端 overwrite: true 参数原子清空并写入新节点。
+--dry-run 模式仅预览，不实际执行。
 
 示例:
-  # 从文件更新
+  # 从文件更新（追加模式）
   feishu-cli board update BOARD_ID nodes.json
 
-  # 从 stdin 管道更新（覆盖模式）
+  # 从 stdin 管道更新（原子覆盖模式）
   cat nodes.json | feishu-cli board update BOARD_ID --stdin --overwrite
 
   # 预览覆盖操作
@@ -41,18 +41,6 @@ var boardUpdateCmd = &cobra.Command{
 		snapshotPath, _ := cmd.Flags().GetString("snapshot")
 		output, _ := cmd.Flags().GetString("output")
 		userAccessToken := resolveOptionalUserToken(cmd)
-
-		// --snapshot：在执行 overwrite 之前先把旧节点导出到本地（增强原子性）
-		if overwrite && snapshotPath != "" && !dryRun {
-			raw, err := client.GetBoardNodes(whiteboardID, userAccessToken)
-			if err != nil {
-				return fmt.Errorf("快照导出失败: %w", err)
-			}
-			if err := os.WriteFile(snapshotPath, raw, 0644); err != nil {
-				return fmt.Errorf("写入快照文件失败: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "已导出旧画板快照 → %s（覆盖失败时可手动恢复）\n", snapshotPath)
-		}
 
 		// 1. 读取节点 JSON（从文件或 stdin）
 		var nodesJSON string
@@ -72,82 +60,59 @@ var boardUpdateCmd = &cobra.Command{
 			return fmt.Errorf("请提供节点 JSON 文件路径，或使用 --stdin 从标准输入读取")
 		}
 
-		// 2. dry-run 模式：只统计旧节点数
-		if dryRun && overwrite {
-			ids, err := extractBoardNodeIDs(whiteboardID, userAccessToken)
-			if err != nil {
-				return fmt.Errorf("获取画板节点失败: %w", err)
+		// 2. dry-run 模式：仅预览
+		if dryRun {
+			var nodes []json.RawMessage
+			if err := json.Unmarshal([]byte(nodesJSON), &nodes); err != nil {
+				return fmt.Errorf("解析节点 JSON 失败（需要 JSON 数组格式）: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "当前画板有 %d 个节点\n", len(ids))
-			fmt.Fprintf(os.Stderr, "覆盖模式将删除这些节点并写入新内容\n")
+			if overwrite {
+				fmt.Fprintf(os.Stderr, "[dry-run] 将以原子覆盖模式 (overwrite: true) 写入 %d 个节点到画板 %s\n", len(nodes), whiteboardID)
+			} else {
+				fmt.Fprintf(os.Stderr, "[dry-run] 将追加写入 %d 个节点到画板 %s\n", len(nodes), whiteboardID)
+			}
 			return nil
 		}
 
-		// 3. 如果 overwrite，先获取旧节点 ID 列表
-		var oldNodeIDs []string
-		if overwrite {
-			ids, err := extractBoardNodeIDs(whiteboardID, userAccessToken)
+		// 3. --snapshot：在执行 overwrite 之前先把旧节点导出到本地（只读备份）
+		if overwrite && snapshotPath != "" {
+			raw, err := client.GetBoardNodes(whiteboardID, userAccessToken)
 			if err != nil {
-				return fmt.Errorf("获取旧节点失败: %w", err)
+				return fmt.Errorf("快照导出失败: %w", err)
 			}
-			oldNodeIDs = ids
+			if err := os.WriteFile(snapshotPath, raw, 0644); err != nil {
+				return fmt.Errorf("写入快照文件失败: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "已导出旧画板快照 → %s（用于本地备份）\n", snapshotPath)
 		}
 
-		// 4. 创建新节点
+		// 4. 调用 CreateBoardNodes（服务端原子覆盖）
 		newNodeIDs, err := client.CreateBoardNodes(whiteboardID, nodesJSON, client.CreateBoardNotesOptions{
 			UserAccessToken: userAccessToken,
+			Overwrite:       overwrite,
 		})
 		if err != nil {
-			return fmt.Errorf("创建节点失败: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "已创建 %d 个新节点\n", len(newNodeIDs))
-
-		// 5. 如果 overwrite，删除旧节点（不在 newNodeIDs 中的）
-		var deletedCount int
-		if overwrite && len(oldNodeIDs) > 0 {
-			// 构建新节点 ID 集合
-			newIDSet := make(map[string]struct{}, len(newNodeIDs))
-			for _, id := range newNodeIDs {
-				newIDSet[id] = struct{}{}
-			}
-
-			// 过滤出需要删除的旧节点
-			var toDelete []string
-			for _, id := range oldNodeIDs {
-				if _, exists := newIDSet[id]; !exists {
-					toDelete = append(toDelete, id)
-				}
-			}
-
-			if len(toDelete) > 0 {
-				if err := client.DeleteBoardNodes(whiteboardID, toDelete, userAccessToken); err != nil {
-					fmt.Fprintf(os.Stderr, "警告: 删除旧节点失败: %v\n", err)
-				} else {
-					deletedCount = len(toDelete)
-					fmt.Fprintf(os.Stderr, "已删除 %d 个旧节点\n", deletedCount)
-				}
-			}
+			return fmt.Errorf("更新画板节点失败: %w", err)
 		}
 
-		// 6. 输出结果
+		// 5. 输出结果
 		if output == "json" {
 			result := map[string]any{
 				"whiteboard_id": whiteboardID,
 				"new_node_ids":  newNodeIDs,
 				"created_count": len(newNodeIDs),
-			}
-			if overwrite {
-				result["deleted_count"] = deletedCount
+				"overwrite":     overwrite,
 			}
 			return printJSON(result)
 		}
 
-		fmt.Printf("画板更新成功！\n")
+		if overwrite {
+			fmt.Printf("画板原子覆盖更新成功！\n")
+		} else {
+			fmt.Printf("画板节点创建成功！\n")
+		}
 		fmt.Printf("  画板 ID: %s\n", whiteboardID)
 		fmt.Printf("  创建节点数: %d\n", len(newNodeIDs))
-		if overwrite {
-			fmt.Printf("  删除旧节点数: %d\n", deletedCount)
-		}
 		for i, id := range newNodeIDs {
 			fmt.Printf("  [%d] 节点 ID: %s\n", i+1, id)
 		}
@@ -210,9 +175,9 @@ func extractBoardNodeIDs(whiteboardID, userAccessToken string) ([]string, error)
 func init() {
 	boardCmd.AddCommand(boardUpdateCmd)
 	boardUpdateCmd.Flags().Bool("stdin", false, "从标准输入读取节点 JSON")
-	boardUpdateCmd.Flags().Bool("overwrite", false, "覆盖模式（先写后删）")
+	boardUpdateCmd.Flags().Bool("overwrite", false, "原子覆盖模式（服务端 overwrite: true）")
 	boardUpdateCmd.Flags().Bool("dry-run", false, "仅预览，不实际执行")
-	boardUpdateCmd.Flags().String("snapshot", "", "执行 --overwrite 前把旧节点导出到此路径（用于失败回滚）")
+	boardUpdateCmd.Flags().String("snapshot", "", "执行 --overwrite 前把旧节点导出到此路径（用于本地备份）")
 	boardUpdateCmd.Flags().StringP("output", "o", "", "输出格式 (json)")
 	boardUpdateCmd.Flags().String("user-access-token", "", "User Access Token")
 }

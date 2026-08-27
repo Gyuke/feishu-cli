@@ -9,11 +9,15 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
-// slidesMediaParentType 是 slides 后端唯一接受的 medias/upload_all parent_type
-// 已实测 slide_image / slides_image / slides_file 都会被拒，
-// 只有 slide_file 才能拿到可在 slide XML <img src="..."> 引用的 file_token。
+// slidesMediaParentType 根据演示文稿 token 返回上传 media 时使用的 parent_type。
+// 原生 Slides 演示文稿使用 "slide_file"，导入型 Office deck（token 以 "fake_office_" 开头）使用 "office_slide_file"。
 // 同时只接受单分片 upload_all 接口（最大 20 MB），upload_prepare 不支持。
-const slidesMediaParentType = "slide_file"
+func slidesMediaParentType(presentationToken string) string {
+	if strings.HasPrefix(presentationToken, "fake_office_") {
+		return "office_slide_file"
+	}
+	return "slide_file"
+}
 
 const (
 	defaultPresentationWidth  = 960
@@ -106,17 +110,85 @@ func CreateSlides(opts CreateSlidesOptions) (*CreateSlidesResult, error) {
 }
 
 // UploadSlidesMedia 把本地图片上传到 slides 演示文稿，返回的 file_token 可作为 <img src="..."> 使用
-// 必须用 parent_type=slide_file（实测，其他值都会被拒），且只能走单分片 upload_all（最大 20 MB）
+// parent_type 根据 presentationID 自动选择：普通 deck 用 slide_file，imported Office deck 用 office_slide_file
+// 只能走单分片 upload_all（最大 20 MB）
 // 权限: docs:document.media:upload
 func UploadSlidesMedia(filePath, fileName, presentationID, userAccessToken string) (string, error) {
-	token, _, err := UploadMediaWithExtra(filePath, slidesMediaParentType, presentationID, fileName, "", userAccessToken)
+	parentType := slidesMediaParentType(presentationID)
+	token, _, err := UploadMediaWithExtra(filePath, parentType, presentationID, fileName, "", userAccessToken)
 	return token, err
+}
+
+// GetSlidesResult 读取演示文稿返回的数据
+type GetSlidesResult struct {
+	XmlPresentationID string `json:"xml_presentation_id"`
+	Content           string `json:"content"`
+	RevisionID        int    `json:"revision_id"`
+}
+
+// GetSlides 读取指定 XML 演示文稿的全文信息
+// API: GET /open-apis/slides_ai/v1/xml_presentations/{xml_presentation_id}
+// 权限: slides:presentation:read
+func GetSlides(presentationID string, revisionID int, userAccessToken ...string) (*GetSlidesResult, error) {
+	client, err := GetClient()
+	if err != nil {
+		return nil, err
+	}
+
+	apiPath := fmt.Sprintf("/open-apis/slides_ai/v1/xml_presentations/%s", presentationID)
+	if revisionID != 0 {
+		apiPath += fmt.Sprintf("?revision_id=%d", revisionID)
+	}
+
+	tokenType := larkcore.AccessTokenTypeTenant
+	var reqOpts []larkcore.RequestOptionFunc
+	if token := firstString(userAccessToken); token != "" {
+		tokenType = larkcore.AccessTokenTypeUser
+		reqOpts = UserTokenOption(token)
+	}
+
+	resp, err := client.Get(Context(), apiPath, nil, tokenType, reqOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("读取 slides 失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("读取 slides 失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			XmlPresentation struct {
+				Content        string `json:"content"`
+				PresentationID string `json:"presentation_id"`
+				RevisionID     int    `json:"revision_id"`
+			} `json:"xml_presentation"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析 slides 响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("读取 slides 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+	}
+
+	presID := apiResp.Data.XmlPresentation.PresentationID
+	if presID == "" {
+		presID = presentationID
+	}
+
+	return &GetSlidesResult{
+		XmlPresentationID: presID,
+		Content:           apiResp.Data.XmlPresentation.Content,
+		RevisionID:        apiResp.Data.XmlPresentation.RevisionID,
+	}, nil
 }
 
 // buildPresentationXML 构造最小可用的 presentation XML，新建空白演示文稿用
 func buildPresentationXML(title string, width, height int) string {
 	return fmt.Sprintf(
-		`<presentation xmlns="http://www.larkoffice.com/sml/2.0" width="%d" height="%d"><title>%s</title></presentation>`,
+		`<presentation xmlns="https://www.larkoffice.com/sml/2.0" width="%d" height="%d"><title>%s</title></presentation>`,
 		width, height, xmlEscape(title),
 	)
 }

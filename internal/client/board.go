@@ -53,6 +53,15 @@ func GetBoardImage(whiteboardID string, outputPath string, userAccessToken ...st
 		return "", fmt.Errorf("获取画板图片失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
+	// 检查是否是 JSON 格式的业务错误（防止 HTTP 200 返回 JSON 错误体）
+	var apiErrResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiErrResp); err == nil && apiErrResp.Code != 0 {
+		return "", fmt.Errorf("获取画板图片失败: code=%d, msg=%s", apiErrResp.Code, apiErrResp.Msg)
+	}
+
 	ext, err := boardImageExt(resp.Header.Get("Content-Type"), resp.RawBody)
 	if err != nil {
 		return "", err
@@ -191,6 +200,8 @@ type ImportDiagramOptions struct {
 	Syntax          string // plantuml or mermaid
 	DiagramType     string // auto, mindmap, sequence, activity, class, er, flowchart, state, component
 	Style           string // board or classic
+	ParseMode       int    // 解析模式，默认 1
+	Overwrite       bool   // 是否覆盖画板内容：true=覆盖，false=不覆盖
 	UserAccessToken string // optional user access token
 }
 
@@ -277,12 +288,21 @@ func ImportDiagram(whiteboardID string, source string, opts ImportDiagramOptions
 		diagramType = 0 // auto
 	}
 
+	parseMode := opts.ParseMode
+	if parseMode <= 0 {
+		parseMode = 1
+	}
+
 	// Build request body for Feishu board PlantUML/Mermaid import endpoint
 	reqBody := map[string]any{
 		"plant_uml_code": content,
 		"syntax_type":    syntaxType,
 		"style_type":     styleType,
 		"diagram_type":   diagramType,
+		"parse_mode":     parseMode,
+	}
+	if opts.Overwrite {
+		reqBody["overwrite"] = true
 	}
 
 	// 正确的 API 路径是 /nodes/plantuml
@@ -339,6 +359,7 @@ func ImportDiagram(whiteboardID string, source string, opts ImportDiagramOptions
 type CreateBoardNotesOptions struct {
 	ClientToken     string
 	UserIDType      string // open_id, union_id, user_id
+	Overwrite       bool   // 是否覆盖画板内容：true=服务端原子覆盖清空再写入，false=直接追加写入
 	UserAccessToken string // optional user access token
 }
 
@@ -348,6 +369,11 @@ func CreateBoardNodes(whiteboardID string, nodesJSON string, opts CreateBoardNot
 	client, err := GetClient()
 	if err != nil {
 		return nil, err
+	}
+
+	// 校验 client_token 最小长度（飞书开放平台要求至少 10 字符）
+	if opts.ClientToken != "" && len(opts.ClientToken) < 10 {
+		return nil, fmt.Errorf("client_token 长度至少为 10 个字符: %s", opts.ClientToken)
 	}
 
 	// Default user ID type
@@ -364,6 +390,9 @@ func CreateBoardNodes(whiteboardID string, nodesJSON string, opts CreateBoardNot
 	// Build request body with parsed nodes array
 	reqBody := map[string]any{
 		"nodes": nodes,
+	}
+	if opts.Overwrite {
+		reqBody["overwrite"] = true
 	}
 
 	apiPath := fmt.Sprintf("/open-apis/board/v1/whiteboards/%s/nodes?user_id_type=%s", whiteboardID, opts.UserIDType)
@@ -464,6 +493,18 @@ func GetBoardNodes(whiteboardID string, userAccessToken ...string) (json.RawMess
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("获取画板节点失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+	}
+
+	// 检查业务错误 code != 0（确保 fail closed）
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("解析画板节点响应失败: %w", err)
+	}
+	if apiResp.Code != 0 {
+		return nil, fmt.Errorf("获取画板节点失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
 	return resp.RawBody, nil

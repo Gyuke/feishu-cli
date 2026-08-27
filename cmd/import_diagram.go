@@ -92,6 +92,8 @@ var importDiagramCmd = &cobra.Command{
 		syntax, _ := cmd.Flags().GetString("syntax")
 		diagramType, _ := cmd.Flags().GetString("diagram-type")
 		style, _ := cmd.Flags().GetString("style")
+		parseMode, _ := cmd.Flags().GetInt("parse-mode")
+		overwrite, _ := cmd.Flags().GetBool("overwrite")
 		engine, _ := cmd.Flags().GetString("engine")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		output, _ := cmd.Flags().GetString("output")
@@ -112,12 +114,14 @@ var importDiagramCmd = &cobra.Command{
 				"engine":        engine,
 				"style":         style,
 				"diagram_type":  diagramType,
+				"parse_mode":    parseMode,
+				"overwrite":     overwrite,
 				"dry_run":       true,
 			}
 			if output == "json" {
 				return printJSON(r)
 			}
-			fmt.Printf("[dry-run] board import 将调用 %s 引擎 syntax=%s\n", engine, syntax)
+			fmt.Printf("[dry-run] board import 将调用 %s 引擎 syntax=%s parse_mode=%d overwrite=%v\n", engine, syntax, parseMode, overwrite)
 			return nil
 		}
 
@@ -134,6 +138,7 @@ var importDiagramCmd = &cobra.Command{
 			}
 			nodeIDs, err := client.CreateBoardNodes(whiteboardID, nodesJSON, client.CreateBoardNotesOptions{
 				UserAccessToken: userAccessToken,
+				Overwrite:       overwrite,
 			})
 			if err != nil {
 				return err
@@ -145,6 +150,7 @@ var importDiagramCmd = &cobra.Command{
 					"syntax":        syntax,
 					"node_count":    len(nodeIDs),
 					"node_ids":      nodeIDs,
+					"overwrite":     overwrite,
 				})
 			}
 			fmt.Printf("图表导入成功（本地引擎）！\n  画板 ID: %s\n  创建节点数: %d\n  语法: %s\n",
@@ -157,6 +163,8 @@ var importDiagramCmd = &cobra.Command{
 			Syntax:          syntax,
 			DiagramType:     diagramType,
 			Style:           style,
+			ParseMode:       parseMode,
+			Overwrite:       overwrite,
 			UserAccessToken: userAccessToken,
 		}
 
@@ -203,6 +211,8 @@ func init() {
 	importDiagramCmd.Flags().String("syntax", "plantuml", "图表语法 (plantuml/mermaid)")
 	importDiagramCmd.Flags().String("diagram-type", "auto", "图表类型 (auto/mindmap/sequence/activity/class/er/flowchart/state/component)")
 	importDiagramCmd.Flags().String("style", "board", "样式类型 (board/classic)")
+	importDiagramCmd.Flags().Int("parse-mode", 1, "解析模式 (默认 1)")
+	importDiagramCmd.Flags().Bool("overwrite", false, "是否覆盖画板已有内容（服务端 overwrite: true）")
 	importDiagramCmd.Flags().String("engine", "server", "渲染引擎 (server=飞书服务端 / local=whiteboard-cli 本地转换)")
 	importDiagramCmd.Flags().Bool("dry-run", false, "预览不调用 API")
 	importDiagramCmd.Flags().String("user-access-token", "", "User Access Token")

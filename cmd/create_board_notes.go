@@ -18,7 +18,8 @@ var createBoardNotesCmd = &cobra.Command{
   <whiteboard_id>   画板唯一标识符（必填）
   <nodes_json>      节点数据 JSON 字符串或文件路径（必填）
   --source-type     源类型：file/content，默认 file
-  --client-token    操作唯一标识，用于幂等更新
+  --client-token    操作唯一标识，用于幂等更新（长度至少 10 字符，建议使用 UUID）
+  --overwrite       是否覆盖画板已有内容（服务端 overwrite: true 原子替换）
   --user-id-type    用户 ID 类型 (open_id/union_id/user_id)，默认 open_id
   --output, -o      输出格式 (json)
 
@@ -39,8 +40,11 @@ var createBoardNotesCmd = &cobra.Command{
   # 直接传入 JSON
   feishu-cli board create-notes <whiteboard_id> '[{"type":"sticky_note","x":100,"y":100}]' --source-type content
 
-  # 使用幂等 token
-  feishu-cli board create-notes <whiteboard_id> nodes.json --client-token abc123`,
+  # 使用幂等 token（至少 10 字符）
+  feishu-cli board create-notes <whiteboard_id> nodes.json --client-token 6d99f59c-4d7d-4452-98d6-3d0556393cf6
+
+  # 覆盖创建
+  feishu-cli board create-notes <whiteboard_id> nodes.json --overwrite`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
@@ -51,9 +55,14 @@ var createBoardNotesCmd = &cobra.Command{
 		source := args[1]
 		sourceType, _ := cmd.Flags().GetString("source-type")
 		clientToken, _ := cmd.Flags().GetString("client-token")
+		overwrite, _ := cmd.Flags().GetBool("overwrite")
 		userIDType, _ := cmd.Flags().GetString("user-id-type")
 		output, _ := cmd.Flags().GetString("output")
 		userAccessToken := resolveOptionalUserToken(cmd)
+
+		if clientToken != "" && len(clientToken) < 10 {
+			return fmt.Errorf("--client-token 长度至少为 10 个字符: %s", clientToken)
+		}
 
 		// Get nodes JSON
 		var nodesJSON string
@@ -71,6 +80,7 @@ var createBoardNotesCmd = &cobra.Command{
 		opts := client.CreateBoardNotesOptions{
 			ClientToken:     clientToken,
 			UserIDType:      userIDType,
+			Overwrite:       overwrite,
 			UserAccessToken: userAccessToken,
 		}
 
@@ -85,11 +95,18 @@ var createBoardNotesCmd = &cobra.Command{
 				"node_ids":      nodeIDs,
 				"count":         len(nodeIDs),
 			}
+			if overwrite {
+				result["overwrite"] = true
+			}
 			if err := printJSON(result); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("画板节点创建成功！\n")
+			if overwrite {
+				fmt.Printf("画板节点覆盖创建成功！\n")
+			} else {
+				fmt.Printf("画板节点创建成功！\n")
+			}
 			fmt.Printf("  画板 ID: %s\n", whiteboardID)
 			fmt.Printf("  创建节点数: %d\n", len(nodeIDs))
 			for i, id := range nodeIDs {
@@ -104,7 +121,8 @@ var createBoardNotesCmd = &cobra.Command{
 func init() {
 	boardCmd.AddCommand(createBoardNotesCmd)
 	createBoardNotesCmd.Flags().String("source-type", "file", "源类型 (file/content)")
-	createBoardNotesCmd.Flags().String("client-token", "", "操作唯一标识（幂等）")
+	createBoardNotesCmd.Flags().String("client-token", "", "操作唯一标识（幂等，至少 10 字符）")
+	createBoardNotesCmd.Flags().Bool("overwrite", false, "是否覆盖画板已有内容（服务端 overwrite: true）")
 	createBoardNotesCmd.Flags().String("user-id-type", "open_id", "用户 ID 类型 (open_id/union_id/user_id)")
 	createBoardNotesCmd.Flags().String("user-access-token", "", "User Access Token")
 	createBoardNotesCmd.Flags().StringP("output", "o", "", "输出格式 (json)")

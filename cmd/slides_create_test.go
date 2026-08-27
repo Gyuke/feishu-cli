@@ -9,14 +9,14 @@ func TestSlidesCmdRegistered(t *testing.T) {
 	for _, child := range rootCmd.Commands() {
 		if child.Name() == "slides" {
 			subs := child.Commands()
-			if len(subs) < 2 {
-				t.Fatalf("slides 子命令数量不足: got %d, want ≥ 2", len(subs))
+			if len(subs) < 3 {
+				t.Fatalf("slides 子命令数量不足: got %d, want ≥ 3", len(subs))
 			}
 			have := map[string]bool{}
 			for _, c := range subs {
 				have[c.Name()] = true
 			}
-			for _, want := range []string{"create", "media-upload"} {
+			for _, want := range []string{"create", "get", "media-upload"} {
 				if !have[want] {
 					t.Errorf("slides 子命令缺少 %q", want)
 				}
@@ -39,6 +39,15 @@ func TestSlidesCreateFlags(t *testing.T) {
 	}
 	if !strings.Contains(slidesCreateCmd.Short, "Slides") {
 		t.Errorf("slides create Short 文案缺少 Slides: %q", slidesCreateCmd.Short)
+	}
+}
+
+func TestSlidesGetFlags(t *testing.T) {
+	if slidesGetCmd.Flag("revision-id") == nil {
+		t.Error("slides get 缺少 --revision-id flag")
+	}
+	if slidesGetCmd.Flag("output") == nil {
+		t.Error("slides get 缺少 --output flag")
 	}
 }
 
