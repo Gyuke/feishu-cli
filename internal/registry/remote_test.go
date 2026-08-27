@@ -15,6 +15,14 @@ import (
 	"github.com/riba2534/feishu-cli/internal/profile"
 )
 
+// TestMain 置位 inTestBinary，替代生产代码里的 testing.Testing()：
+// 让 remoteEnabled() 在测试二进制中默认不打真实网络，同时使发布二进制
+// 不必 import "testing"。
+func TestMain(m *testing.M) {
+	inTestBinary = true
+	os.Exit(m.Run())
+}
+
 func testRegistryJSON(name, version string) []byte {
 	reg := MergedRegistry{
 		Version: version,
@@ -87,6 +95,9 @@ func TestRemoteOff_SkipsRemoteLogic(t *testing.T) {
 
 func TestFirstFetch_DoesNotBlockWhenEmbeddedExists(t *testing.T) {
 	isolateRemote(t)
+	// 本测试验证「后台刷新」机制：显式禁用首屏同步拉取，
+	// 否则 Init 会先同步等这个刻意阻塞的 server（生产默认行为，见 firstFetchSyncBudget）。
+	t.Setenv("FEISHU_CLI_META_FIRST_SYNC_MS", "0")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

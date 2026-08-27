@@ -745,3 +745,45 @@ func TestDocContentUpdateInvalidOutputZeroNetwork(t *testing.T) {
 		t.Fatalf("错误信息应说明不支持的 output，得到: %v", err)
 	}
 }
+
+// TestValidateNoColumnWidthDirective 验证列宽指令的两条入口都 fail-closed。
+// 回归防护：曾只拦 --table-column-width flag，内容里的
+// `<!-- feishu-colwidth: ... -->`（CLAUDE.md 记载的等价入口）被静默丢弃，
+// 表格以默认列宽落地且无任何提示。
+func TestValidateNoColumnWidthDirective(t *testing.T) {
+	tableMD := "| A | B |\n|---|---|\n| 1 | 2 |\n"
+
+	// flag 入口
+	if err := validateNoColumnWidthDirective(true, "100,200", tableMD); err == nil {
+		t.Error("显式 --table-column-width 应报错")
+	}
+	if err := validateNoColumnWidthDirective(true, "auto", tableMD); err != nil {
+		t.Errorf("--table-column-width=auto 应放行: %v", err)
+	}
+	if err := validateNoColumnWidthDirective(false, "auto", tableMD); err != nil {
+		t.Errorf("未传 flag 且无注释应放行: %v", err)
+	}
+
+	// 内容注释入口
+	withComment := []string{
+		"<!-- feishu-colwidth: 80,200,*,30% -->\n\n" + tableMD,
+		tableMD + "\n<!-- feishu-colwidth: 100, 100 -->\n",
+		"  <!--  feishu-colwidth : 80 -->  \n" + tableMD,
+	}
+	for i, md := range withComment {
+		if err := validateNoColumnWidthDirective(false, "auto", md); err == nil {
+			t.Errorf("用例 %d: 含 feishu-colwidth 注释应报错", i)
+		}
+	}
+
+	// 不应误判：行内提及但非指令注释
+	notDirective := []string{
+		"正文提到 feishu-colwidth 这个名字但不是注释\n" + tableMD,
+		"`<!-- feishu-colwidth: 80 -->` 出现在行内代码里\n" + tableMD,
+	}
+	for i, md := range notDirective {
+		if err := validateNoColumnWidthDirective(false, "auto", md); err != nil {
+			t.Errorf("用例 %d: 非指令形态不应报错: %v", i, err)
+		}
+	}
+}

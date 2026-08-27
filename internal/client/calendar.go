@@ -45,6 +45,9 @@ type CalendarEvent struct {
 	IsException bool   `json:"is_exception,omitempty"`
 	AppLink     string `json:"app_link,omitempty"`
 	Color       int    `json:"color,omitempty"`
+	// IsAllDay 标记全天日程。为 true 时 EndTime 已归一化为**包含端**日期
+	// （服务端 end.date 是排他的次日），否则用户会看到比实际晚一天的结束日。
+	IsAllDay bool `json:"is_all_day,omitempty"`
 }
 
 // ListCalendars 列出日历
@@ -638,6 +641,16 @@ func buildSearchEventFilter(startTime, endTime string, attendeeIDs []string) *se
 	}
 }
 
+// allDayInclusiveEndDate 把全天日程的**排他** end.date（YYYY-MM-DD，实为次日）
+// 换成包含端（减一天）。解析失败时原样返回，避免把无法识别的格式改坏。
+func allDayInclusiveEndDate(date string) string {
+	t, err := time.Parse("2006-01-02", strings.TrimSpace(date))
+	if err != nil {
+		return date
+	}
+	return t.AddDate(0, 0, -1).Format("2006-01-02")
+}
+
 func searchEventTimeText(info *struct {
 	Date     string `json:"date"`
 	DateTime string `json:"date_time"`
@@ -761,6 +774,14 @@ func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (
 		}
 		if meta.Start != nil && meta.Start.Timezone != "" {
 			ev.TimeZone = meta.Start.Timezone
+		}
+		// 全天日程：服务端 end.date 是**排他**日期（次日），直接展示会比实际晚一天。
+		// 回填 IsAllDay 并把 end 换成包含端，否则用户无从分辨（此前该字段被解析后丢弃）。
+		if meta.IsAllDay {
+			ev.IsAllDay = true
+			if meta.End != nil && meta.End.DateTime == "" && meta.End.Date != "" {
+				ev.EndTime = allDayInclusiveEndDate(meta.End.Date)
+			}
 		}
 		events = append(events, ev)
 	}
@@ -1012,10 +1033,8 @@ func fetchInstanceViewRange(calendarID string, startTime, endTime int64, depth i
 	if err != nil {
 		return nil, fmt.Errorf("获取日程视图失败: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("获取日程视图失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
-	}
-
+	// 先解析 body 取业务码，再判 HTTP 状态：193103/193104 是随 HTTP 400 下发的，
+	// 若先按 StatusCode != 200 返回，下面的自动切分恢复分支永远不会执行。
 	var apiResp struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
@@ -1023,8 +1042,13 @@ func fetchInstanceViewRange(calendarID string, startTime, endTime int64, depth i
 			Items []agendaRawItem `json:"items"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	parseErr := json.Unmarshal(resp.RawBody, &apiResp)
+
+	if parseErr != nil {
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("获取日程视图失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+		}
+		return nil, fmt.Errorf("解析响应失败: %w", parseErr)
 	}
 	if apiResp.Code != 0 {
 		apiErr := fmt.Errorf("获取日程视图失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
@@ -1044,6 +1068,10 @@ func fetchInstanceViewRange(calendarID string, startTime, endTime int64, depth i
 		default:
 			return nil, apiErr
 		}
+	}
+	// 业务码为 0 但 HTTP 非 200：不可当成功，fail-closed
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取日程视图失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 	return apiResp.Data.Items, nil
 }

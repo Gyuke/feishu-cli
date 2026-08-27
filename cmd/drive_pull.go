@@ -84,7 +84,17 @@ type=folder/docx/sheet/bitable/mindnote/slides/shortcut 不会作为可下载条
 			return err
 		}
 
-		userToken := resolveOptionalUserTokenWithFallback(cmd)
+		// --delete-local 会删本地文件：身份意外降级到 Bot 时远端视图更小、差集更大，
+		// 必须 fail-closed 而不是静默按 Bot 执行
+		var userToken string
+		if deleteLocal {
+			userToken, err = resolveOptionalUserTokenForDestructive(cmd, "drive pull --delete-local")
+			if err != nil {
+				return err
+			}
+		} else {
+			userToken = resolveOptionalUserTokenWithFallback(cmd)
+		}
 
 		fmt.Fprintf(cmd.ErrOrStderr(), "列举云盘文件夹: %s\n", folderToken)
 		entries, err := client.ListFolderRecursive(folderToken, userToken)

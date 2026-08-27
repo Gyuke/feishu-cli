@@ -305,6 +305,12 @@ func decodeJSONUseNumber(raw []byte) (any, error) {
 	return parsed, nil
 }
 
+// officialOpenAPIHosts 是 `api` 命令允许出现在**用户输入 URL** 中的官方 host。
+//
+// 比 internal/config.officialOpenHosts 多一个 open.larkoffice.com：后者是租户可见域，
+// 用户常直接从浏览器地址栏粘贴。这里不冲突——normalizeAPIPath 只从 URL 里取 path 与 query，
+// host 随即被丢弃，真实请求走配置的 BaseURL，因此 transport 层的 CheckRequestURL 永远
+// 看不到 larkoffice。改动此处不影响传输层的 host 策略，两者刻意保持不同职责。
 func officialOpenAPIHosts() map[string]bool {
 	return map[string]bool{
 		"open.feishu.cn":      true,
@@ -379,6 +385,19 @@ func normalizeAPIPath(raw string) (string, larkcore.QueryParams, error) {
 	return s, embedded, nil
 }
 
+// ensureNoTrailingJSON 确认 decoder 已读完全部输入。
+// json.Decoder 只消费第一个 JSON 值，用于校验用户手写的 JSON 参数，
+// 避免 `{"a":1} {"b":2}` 这类输入静默只生效前一半。
+func ensureNoTrailingJSON(dec *json.Decoder, flagName string) error {
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err == nil {
+		return fmt.Errorf("%s 只能是单个 JSON 对象，检测到多余内容: %s", flagName, strings.TrimSpace(string(extra)))
+	} else if err != io.EOF {
+		return fmt.Errorf("%s 解析失败（尾部有非法内容）: %w", flagName, err)
+	}
+	return nil
+}
+
 // parseQueryParams 把 JSON 对象转成 QueryParams（map[string][]string）
 // 支持值类型：string / number / bool / array (会展开为多值)
 func parseQueryParams(raw string) (larkcore.QueryParams, error) {
@@ -391,6 +410,12 @@ func parseQueryParams(raw string) (larkcore.QueryParams, error) {
 	var obj map[string]any
 	if err := dec.Decode(&obj); err != nil {
 		return nil, fmt.Errorf("--params 必须是 JSON 对象: %w", err)
+	}
+	// 流式 Decoder 只读第一个 JSON 值，尾部残留会被静默丢弃：
+	// `--params '{"a":1} {"b":2}'` 会只带上 a，用户却以为两个参数都生效了。
+	// 显式拒绝，避免拼错的 JSON 变成"少传了参数"的静默错误。
+	if err := ensureNoTrailingJSON(dec, "--params"); err != nil {
+		return nil, err
 	}
 	for k, v := range obj {
 		switch tv := v.(type) {
@@ -598,7 +623,7 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 		data, _ := obj["data"].(map[string]any)
 		hasMore, hasMoreOK := false, false
 		if data != nil {
-			hasMore, hasMoreOK = data["has_more"].(bool)
+			hasMore, hasMoreOK = parseHasMoreFlag(data["has_more"])
 		}
 		if page == 1 {
 			if hasMore {
@@ -660,10 +685,17 @@ func runAPIPaginated(method, apiPath string, queryParams larkcore.QueryParams, b
 	return emitAPIBody(status, header, raw)
 }
 
+// pageCursorFromData 从 data 中取续翻游标。
+//
+// 两个 key 都要看：部分端点会同时输出 page_token:"" 与有效的 next_page_token。
+// 若在第一个「存在但为空」的 key 上就返回，翻页会被判成"游标为空"而中止，
+// 丢掉后续所有页（调用方只看到第 1 页且以为已翻完）。
+// 类型不对（非字符串）仍立即返回 nonstring，由调用方 fail-closed。
 func pageCursorFromData(data map[string]any) (token string, kind string) {
 	if data == nil {
 		return "", "missing"
 	}
+	sawKey := false
 	for _, key := range []string{"page_token", "next_page_token"} {
 		v, ok := data[key]
 		if !ok {
@@ -673,9 +705,50 @@ func pageCursorFromData(data map[string]any) (token string, kind string) {
 		if !isStr {
 			return "", "nonstring"
 		}
+		sawKey = true
+		if strings.TrimSpace(s) == "" {
+			continue // 空游标：继续看另一个 key
+		}
 		return s, key
 	}
+	if sawKey {
+		return "", "empty" // key 存在但都是空值
+	}
 	return "", "missing"
+}
+
+// parseHasMoreFlag 解析 has_more 标志，容忍飞书各端点不一致的类型表达。
+//
+// 响应经 decodeJSONUseNumber 解码，标量类型为 bool / json.Number / string。
+// 少数端点把 has_more 表达成 "true" 或 1，若只做 `.(bool)` 断言会得到
+// (false, false)：翻页在第 1 页静默停止，且 truncated 被清空，
+// 调用方无法区分「只有一页」与「被截断」——正是本文件其它错误分支
+// （"已停止以免静默重复"）要防的静默截断。
+//
+// 返回 (值, 是否可判定)。字段缺失或类型无法解释时返回 (false, false)。
+func parseHasMoreFlag(v any) (bool, bool) {
+	switch tv := v.(type) {
+	case bool:
+		return tv, true
+	case json.Number:
+		n, err := tv.Int64()
+		if err != nil {
+			return false, false
+		}
+		return n != 0, true
+	case float64: // 兼容非 UseNumber 路径
+		return tv != 0, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(tv)) {
+		case "true", "1":
+			return true, true
+		case "false", "0", "":
+			return false, true
+		}
+		return false, false
+	default:
+		return false, false
+	}
 }
 
 func resolveAPIArrayField(data map[string]any) (string, error) {

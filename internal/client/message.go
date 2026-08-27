@@ -1317,7 +1317,8 @@ func downloadMessageResourceWithUserToken(messageID, fileKey, resourceType, outp
 	reqURL := buildMessageResourceURL(messageID, fileKey, resourceType)
 	t := resolveTimeout(downloadTimeout, timeout)
 
-	httpClient := &http.Client{Timeout: t}
+	// 带 Bearer 的请求必须走 config.NewHTTPClient（重定向校验 host + 剥离 Authorization）
+	httpClient := config.NewHTTPClient(t)
 	req, err := newBearerDownloadRequest(reqURL, userAccessToken, "")
 	if err != nil {
 		return fmt.Errorf("下载消息资源失败: %w", err)

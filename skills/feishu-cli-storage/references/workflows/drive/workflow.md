@@ -406,7 +406,7 @@ feishu-cli drive export --token $DOC_TOKEN --doc-type docx --file-extension mark
 | `drive import` | `--as bot\|user\|auto`（默认 auto） | `docs:document:import`、`drive:file:upload` |
 | `drive move` | `--as bot\|user\|auto`（默认 auto） | `drive:file:write` [^1] |
 | `drive add-comment` | 必需 User Token | `docs:document.comment:create`、`docs:document.comment:write_only`；wiki URL 还需 `wiki:node:read`；docx 局部评论还需 `docx:document:readonly` |
-| `drive task-result` | 必需 User Token | `drive:drive.metadata:readonly`（具体依 scenario：`import` 还需 `docs:document:import`；`export` 还需 `docs:document:export`） |
+| `drive task-result` | `--as bot\|user\|auto`（默认 auto） | `drive:drive.metadata:readonly`（具体依 scenario：`import` 还需 `docs:document:import`；`export` 还需 `docs:document:export`） |
 | `drive pull` / `status` | User 优先 + App 兜底 | `drive:drive.metadata:readonly`、`drive:file:download` |
 | `drive push` | User 优先 + App 兜底 | `drive:drive.metadata:readonly`、`drive:file:upload`、`space:folder:create`；带 `--delete-remote` 还需 `drive:file:delete` |
 | `drive search` | 必需 User Token | `search:docs:read` |

@@ -88,7 +88,17 @@ docx/sheet/bitable/mindnote/slides/shortcut 等在线文档不会被作为孤儿
 			return err
 		}
 
-		userToken := resolveOptionalUserTokenWithFallback(cmd)
+		// --delete-remote 会删远端文件：身份降级会让"本地不存在"的判定基于错误的远端视图，
+		// 必须 fail-closed 而不是静默按 Bot 执行
+		var userToken string
+		if deleteRemote {
+			userToken, err = resolveOptionalUserTokenForDestructive(cmd, "drive push --delete-remote")
+			if err != nil {
+				return err
+			}
+		} else {
+			userToken = resolveOptionalUserTokenWithFallback(cmd)
+		}
 
 		fmt.Fprintf(cmd.ErrOrStderr(), "扫描本地: %s\n", safeRoot)
 		localFiles, err := walkLocalRegularFiles(safeRoot)

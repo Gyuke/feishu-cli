@@ -505,3 +505,67 @@ func TestNewTestAPICmdHasPageFlags(t *testing.T) {
 		t.Fatal("测试命令缺少分页 flag")
 	}
 }
+
+// TestParseHasMoreFlag_TolerantTypes 验证 has_more 的类型宽容解析。
+// 回归防护：曾用 data["has_more"].(bool) 严格断言，端点返回 "true" 或 1 时
+// 会在第 1 页静默停止翻页并清空 truncated 标记，调用方无法区分
+// 「只有一页」与「被截断」。
+func TestParseHasMoreFlag_TolerantTypes(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  any
+		want   bool
+		wantOK bool
+	}{
+		{"bool true", true, true, true},
+		{"bool false", false, false, true},
+		{"json.Number 1", json.Number("1"), true, true},
+		{"json.Number 0", json.Number("0"), false, true},
+		{"float64 1", float64(1), true, true},
+		{"float64 0", float64(0), false, true},
+		{"string true", "true", true, true},
+		{"string TRUE", "TRUE", true, true},
+		{"string 1", "1", true, true},
+		{"string false", "false", false, true},
+		{"string 0", "0", false, true},
+		{"string 空", "", false, true},
+		{"字段缺失", nil, false, false},
+		{"无法解释的字符串", "maybe", false, false},
+		{"对象", map[string]any{}, false, false},
+	}
+	for _, c := range cases {
+		got, gotOK := parseHasMoreFlag(c.input)
+		if got != c.want || gotOK != c.wantOK {
+			t.Errorf("%s: parseHasMoreFlag(%#v) = (%v, %v), want (%v, %v)",
+				c.name, c.input, got, gotOK, c.want, c.wantOK)
+		}
+	}
+}
+
+// TestPageCursorFromData_SkipsEmptyKey 验证 page_token 为空时继续查 next_page_token。
+// 回归防护：曾在第一个「存在但为空」的 key 上就返回，导致同时输出
+// page_token:"" 与有效 next_page_token 的端点在第 1 页中止翻页，后续页全丢。
+func TestPageCursorFromData_SkipsEmptyKey(t *testing.T) {
+	cases := []struct {
+		name     string
+		data     map[string]any
+		wantTok  string
+		wantKind string
+	}{
+		{"page_token 为空回落 next_page_token", map[string]any{"page_token": "", "next_page_token": "cur2"}, "cur2", "next_page_token"},
+		{"page_token 有值优先", map[string]any{"page_token": "cur1", "next_page_token": "cur2"}, "cur1", "page_token"},
+		{"仅 next_page_token", map[string]any{"next_page_token": "cur3"}, "cur3", "next_page_token"},
+		{"两者皆空", map[string]any{"page_token": "", "next_page_token": ""}, "", "empty"},
+		{"仅空白字符视为空", map[string]any{"page_token": "   "}, "", "empty"},
+		{"都不存在", map[string]any{"items": []any{}}, "", "missing"},
+		{"nil data", nil, "", "missing"},
+		{"非字符串 fail-closed", map[string]any{"page_token": 123}, "", "nonstring"},
+	}
+	for _, c := range cases {
+		gotTok, gotKind := pageCursorFromData(c.data)
+		if gotTok != c.wantTok || gotKind != c.wantKind {
+			t.Errorf("%s: pageCursorFromData = (%q, %q), want (%q, %q)",
+				c.name, gotTok, gotKind, c.wantTok, c.wantKind)
+		}
+	}
+}

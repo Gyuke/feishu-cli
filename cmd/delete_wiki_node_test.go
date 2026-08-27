@@ -744,3 +744,49 @@ func TestBuildWikiDeleteNodeResumeCmdPOSIXShellSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestParseWikiDeleteInput_LoopbackHostnameNotPrefixMatched 验证 HTTP loopback 豁免用
+// net.ParseIP 精确判定，而非字符串前缀匹配。
+// 回归防护：strings.HasPrefix(hostname, "127.0.0.") 会把攻击者可注册的
+// 127.0.0.evil.com 当成本地地址放行，绕过「非本地必须 HTTPS」的约束。
+func TestParseWikiDeleteInput_LoopbackHostnameNotPrefixMatched(t *testing.T) {
+	rejected := []string{
+		"http://127.0.0.evil.com/wiki/wikcnAbcdefg",
+		"http://127.0.0.1.evil.com/wiki/wikcnAbcdefg",
+		"http://127.0.0.1evil.com/wiki/wikcnAbcdefg",
+		"http://localhost.evil.com/wiki/wikcnAbcdefg",
+		"http://feishu.cn/wiki/wikcnAbcdefg",
+	}
+	for _, raw := range rejected {
+		if _, _, err := parseWikiDeleteInput(raw, ""); err == nil {
+			t.Errorf("%s: 非回环 HTTP 地址应被拒绝", raw)
+		}
+	}
+
+	accepted := []string{
+		"http://127.0.0.1/wiki/wikcnAbcdefg",
+		"http://127.0.0.1:8080/wiki/wikcnAbcdefg",
+		"http://127.0.0.2/wiki/wikcnAbcdefg",
+		"http://localhost/wiki/wikcnAbcdefg",
+		"http://[::1]/wiki/wikcnAbcdefg",
+	}
+	for _, raw := range accepted {
+		if _, _, err := parseWikiDeleteInput(raw, ""); err != nil {
+			t.Errorf("%s: 真实回环地址应放行，得到: %v", raw, err)
+		}
+	}
+}
+
+// TestIsLoopbackHostname 单测回环判定本身
+func TestIsLoopbackHostname(t *testing.T) {
+	for _, h := range []string{"localhost", "LOCALHOST", "127.0.0.1", "127.0.0.2", "127.1.2.3", "::1", "[::1]"} {
+		if !isLoopbackHostname(h) {
+			t.Errorf("%q 应判为回环", h)
+		}
+	}
+	for _, h := range []string{"127.0.0.evil.com", "127.0.0.1.evil.com", "localhost.evil.com", "feishu.cn", "", "8.8.8.8", "0.0.0.0"} {
+		if isLoopbackHostname(h) {
+			t.Errorf("%q 不应判为回环", h)
+		}
+	}
+}

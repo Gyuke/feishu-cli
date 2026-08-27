@@ -93,6 +93,16 @@ func IsRetryableError(err error) bool {
 	if IsRateLimitError(err) {
 		return true
 	}
+	// 已携带明确的客户端错误状态（4xx）时直接判为不可重试：
+	// 响应 body 里常出现无关的 "status code: 500" / "gateway timeout" 之类字样
+	// （如 HTTP 400, body: {"msg":"unexpected status code: 500 from backend"}），
+	// 若继续往下做短语匹配，会把永久性 4xx 误判成可重试而白跑几轮退避。
+	// 429 除外——它由上面的 IsRateLimitError 处理并确实应当重试。
+	for _, status := range []int{400, 401, 403, 404, 405, 409, 413, 422} {
+		if HasHTTPStatus(err, status) {
+			return false
+		}
+	}
 	for _, code := range []int{500, 502, 503, 504} {
 		if HasAPICode(err, code) || HasHTTPStatus(err, code) {
 			return true

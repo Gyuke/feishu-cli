@@ -11,6 +11,13 @@ func maxNativeInt64() int64 {
 	return int64(^uint(0) >> 1)
 }
 
+// maxMultipartBlockSize 单个分片的合理上限（64MB）。
+// 飞书 upload_prepare 实际返回 4MB；这里留足余量，同时防止服务端返回的畸形
+// block_size（例如 1<<62）直接进入 make([]byte, int(BlockSize)) 导致 OOM/panic。
+// 注意：不能用 maxNativeInt64() 当上限——在 64 位平台它等于 int64 上限，
+// 与 jsonNumberAsPositiveInt64 的钳制值相同，守卫会永久失效。
+const maxMultipartBlockSize int64 = 64 * 1024 * 1024
+
 type driveMultipartSession struct {
 	UploadID  string
 	BlockSize int64
@@ -22,8 +29,8 @@ func expectedMultipartBlockNum(payloadSize, blockSize int64) (int64, error) {
 	if blockSize <= 0 {
 		return 0, fmt.Errorf("upload_prepare 返回的 block_size 无效: %d", blockSize)
 	}
-	if blockSize > maxInt {
-		return 0, fmt.Errorf("upload_prepare 返回的 block_size 超出可分配上限")
+	if blockSize > maxMultipartBlockSize {
+		return 0, fmt.Errorf("upload_prepare 返回的 block_size=%d 超出合理上限 %d", blockSize, maxMultipartBlockSize)
 	}
 	if payloadSize < 0 {
 		return 0, fmt.Errorf("payload size 无效: %d", payloadSize)
@@ -76,12 +83,11 @@ func validateMultipartSession(uploadID string, blockSize, blockNum, payloadSize 
 	if uploadID == "" {
 		return driveMultipartSession{}, fmt.Errorf("upload_prepare 返回数据异常: upload_id 为空")
 	}
-	maxInt := maxNativeInt64()
 	if blockSize <= 0 {
 		return driveMultipartSession{}, fmt.Errorf("upload_prepare 返回的 block_size 无效: %d", blockSize)
 	}
-	if blockSize > maxInt {
-		return driveMultipartSession{}, fmt.Errorf("upload_prepare 返回的 block_size 超出可分配上限")
+	if blockSize > maxMultipartBlockSize {
+		return driveMultipartSession{}, fmt.Errorf("upload_prepare 返回的 block_size=%d 超出合理上限 %d", blockSize, maxMultipartBlockSize)
 	}
 	if blockNum <= 0 {
 		return driveMultipartSession{}, fmt.Errorf("upload_prepare 返回的 block_num 无效: %d", blockNum)

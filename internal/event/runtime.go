@@ -19,6 +19,8 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
+	"github.com/riba2534/feishu-cli/internal/config"
 )
 
 // ConsumeOptions 控制 consume 行为。
@@ -215,7 +217,7 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		r.emitReady()
 		select {
 		case <-subCtx.Done():
-			return r.exitReason(), nil
+			return r.drainWSExit(errCh)
 		case wsErr := <-errCh:
 			return r.wsExit(wsErr)
 		}
@@ -223,6 +225,25 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		// 握手前失败：禁止发 ready。
 		return r.wsExit(wsErr)
 	case <-subCtx.Done():
+		return r.drainWSExit(errCh)
+	}
+}
+
+// wsShutdownGrace 取消后等待 WebSocket goroutine 收尾的窗口。
+// cli.Start(ctx) 在 ctx 取消后应立即返回，这里只是防止极端情况下无限等待。
+const wsShutdownGrace = 2 * time.Second
+
+// drainWSExit 在 subCtx 取消（SIGINT / --timeout / 达到 MaxEvents）后收尾 WebSocket goroutine。
+//
+// 不能直接 return：那样 Run 会在 goroutine 仍阻塞在 cli.Start(ctx) 时返回，
+// 既泄漏 goroutine 与其持有的 WS 连接，也会丢弃关停期间到达的真实连接错误，
+// 使一次断链失败被报成干净的 "signal" 退出（event consume 以 exit 0 结束）。
+// 取消后 Start 应很快返回，故给一个短窗口等待；超时则按取消原因退出，不再无限等。
+func (r *Runtime) drainWSExit(errCh <-chan error) (string, error) {
+	select {
+	case wsErr := <-errCh:
+		return r.wsExit(wsErr)
+	case <-time.After(wsShutdownGrace):
 		return r.exitReason(), nil
 	}
 }
@@ -407,7 +428,8 @@ func (r *Runtime) postSubscription(ctx context.Context, path string, body map[st
 			timeout = rem
 		}
 	}
-	httpClient := &http.Client{Timeout: timeout}
+	// 带 Bearer 的请求必须走 config.NewHTTPClient（重定向校验 host + 剥离 Authorization）
+	httpClient := config.NewHTTPClient(timeout)
 	payload, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.opts.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {

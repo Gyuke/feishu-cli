@@ -17,7 +17,11 @@ func TestNormalizeApprovalTaskTopic(t *testing.T) {
 		{input: "todo", want: "1"},
 		{input: "1", want: "1"},
 		{input: "done", want: "2"},
-		{input: "started", want: "3"},
+		// topic=3 已被官方 tasks 接口下线（服务端回 99992402
+		// "topic is optional, options: [1,2,17,18]"），必须 fail-closed 并给出迁移提示
+		{input: "started", wantErr: true},
+		{input: "initiated", wantErr: true},
+		{input: "3", wantErr: true},
 		{input: "cc-unread", want: "17"},
 		{input: "cc-read", want: "18"},
 		{input: "unknown", wantErr: true},
@@ -30,6 +34,20 @@ func TestNormalizeApprovalTaskTopic(t *testing.T) {
 		}
 		if err == nil && got != tt.want {
 			t.Fatalf("normalizeApprovalTaskTopic(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestNormalizeApprovalTaskTopic_StartedGivesMigrationHint 验证被下线的 started
+// 报错时指向可用的替代命令，而不是让用户撞服务端 400。
+func TestNormalizeApprovalTaskTopic_StartedGivesMigrationHint(t *testing.T) {
+	for _, in := range []string{"started", "initiated", "3"} {
+		_, err := normalizeApprovalTaskTopic(in)
+		if err == nil {
+			t.Fatalf("normalizeApprovalTaskTopic(%q) 应报错", in)
+		}
+		if !strings.Contains(err.Error(), "approval instance initiated") {
+			t.Errorf("normalizeApprovalTaskTopic(%q) 错误信息应指向 approval instance initiated，得到: %v", in, err)
 		}
 	}
 }

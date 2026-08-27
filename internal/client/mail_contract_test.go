@@ -151,6 +151,64 @@ func TestMailList_DefaultInboxWithoutLabel(t *testing.T) {
 	}
 }
 
+// TestMailPageSize_AlwaysSentAndCapped 验证 page_size 始终发送并按端点上限截断。
+// 该端点强制要求 page_size（缺失时服务端返回 99992402 field validation failed），
+// 官方 shortcuts/mail 同样无条件发送：list 上限 20、search 上限 15。
+func TestMailPageSize_AlwaysSentAndCapped(t *testing.T) {
+	var gotQuery string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[],"has_more":false}}`)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	listCases := []struct {
+		name     string
+		pageSize int
+		want     string
+	}{
+		{"未指定时取默认值", 0, "page_size=20"},
+		{"负数按未指定处理", -5, "page_size=20"},
+		{"合法值原样发送", 5, "page_size=5"},
+		{"超上限截断到 20", 999, "page_size=20"},
+	}
+	for _, tc := range listCases {
+		gotQuery = ""
+		if _, err := ListMailMessages(ListMailMessagesParams{
+			MailboxID: "me",
+			PageSize:  tc.pageSize,
+		}, "u-test-token"); err != nil {
+			t.Fatalf("%s: ListMailMessages 失败: %v", tc.name, err)
+		}
+		if !strings.Contains(gotQuery, tc.want) {
+			t.Errorf("%s: list query 应包含 %s，got: %s", tc.name, tc.want, gotQuery)
+		}
+	}
+
+	searchCases := []struct {
+		name   string
+		filter map[string]any
+		want   string
+	}{
+		{"未指定时取默认值", map[string]any{}, "page_size=15"},
+		{"合法值原样发送", map[string]any{"page_size": 7}, "page_size=7"},
+		{"超上限截断到 15", map[string]any{"page_size": 999}, "page_size=15"},
+		{"字符串值可解析", map[string]any{"page_size": "9"}, "page_size=9"},
+	}
+	for _, tc := range searchCases {
+		gotQuery = ""
+		if _, err := SearchMailMessages("me", "keyword", tc.filter, "u-test-token"); err != nil {
+			t.Fatalf("%s: SearchMailMessages 失败: %v", tc.name, err)
+		}
+		if !strings.Contains(gotQuery, tc.want) {
+			t.Errorf("%s: search query 应包含 %s，got: %s", tc.name, tc.want, gotQuery)
+		}
+	}
+}
+
 // TestMailBatchGet_Chunk20AndKeepOrder 验证 batch_get 超过 20 条时自动分块且保持输入顺序
 func TestMailBatchGet_Chunk20AndKeepOrder(t *testing.T) {
 	callCount := 0

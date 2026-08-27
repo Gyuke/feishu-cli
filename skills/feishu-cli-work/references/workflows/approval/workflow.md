@@ -64,12 +64,13 @@ feishu-cli auth login --scope "approval:approval:read approval:instance:read app
 feishu-cli approval get <approval_code>
 feishu-cli approval get <approval_code> --output raw-json
 
-# 查我的审批任务
+# 查我的审批任务（topic 仅接受 todo / done / cc-unread / cc-read）
 feishu-cli approval task query --topic todo
 feishu-cli approval task query --topic done
-feishu-cli approval task query --topic started
 feishu-cli approval task query --topic cc-unread
 feishu-cli approval task query --topic cc-read
+# 注意：topic=started 已被官方 tasks 接口下线（服务端回 99992402
+# "topic is optional, options: [1,2,17,18]"），查「我发起的」用下面的专用入口
 
 # 查我发起的审批实例（专用入口）
 feishu-cli approval instance initiated

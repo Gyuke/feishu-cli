@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -39,7 +40,23 @@ var wikiURLMarkers = []struct {
 	{"/doc/", "doc"},
 }
 
-// parseWikiDeleteInput 对齐官方输入契约：严格使用 u.Hostname()，HTTPS 域名白名单，URL 路径推断 obj_type，裸 token 必须显式传 --obj-type
+// isLoopbackHostname 判断 hostname 是否为回环地址（localhost 或回环 IP）。
+//
+// 必须用 net.ParseIP 而不是字符串前缀匹配：`strings.HasPrefix(h, "127.0.0.")`
+// 会把攻击者可注册的 127.0.0.evil.com 当成本地地址放行，绕过
+// 「非本地地址必须用 HTTPS」的约束。
+// 与 internal/registry 的 isLoopbackHost 同义（该函数为包私有，无法复用）。
+func isLoopbackHostname(hostname string) bool {
+	h := strings.Trim(strings.TrimSpace(hostname), "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// parseWikiDeleteInput 对齐官方输入契约：严格使用 u.Hostname()，HTTPS 域名白名单，
+// URL 路径推断 obj_type，裸 token 必须显式传 --obj-type
 func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, err error) {
 	rawInput = strings.TrimSpace(rawInput)
 	if rawInput == "" {
@@ -62,7 +79,10 @@ func parseWikiDeleteInput(rawInput, flagObjType string) (token, objType string, 
 
 		// 协议与域名规则：HTTP 仅允许 loopback 测试，官方域名必须是 HTTPS
 		if scheme == "http" {
-			if hostname != "localhost" && hostname != "127.0.0.1" && !strings.HasPrefix(hostname, "127.0.0.") && hostname != "::1" {
+			// 用 net.ParseIP 精确判定回环地址：
+			// strings.HasPrefix(hostname, "127.0.0.") 会命中 127.0.0.evil.com 这类
+			// 攻击者可注册的域名，把外部 host 当成本地测试地址放行。
+			if !isLoopbackHostname(hostname) {
 				return "", "", fmt.Errorf("非本地测试地址必须使用 HTTPS 协议: %q", rawInput)
 			}
 		} else if scheme == "https" {

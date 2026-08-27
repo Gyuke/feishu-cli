@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -95,18 +96,13 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 
 	uploadImages, _ := cmd.Flags().GetBool("upload-images")
 	colWidthRaw, _ := cmd.Flags().GetString("table-column-width")
-	_, _, errFlag := parseTableColumnWidthFlag(colWidthRaw)
-	if errFlag != nil {
+	if _, _, errFlag := parseTableColumnWidthFlag(colWidthRaw); errFlag != nil {
 		return errFlag
 	}
 	userAccessToken := resolveOptionalUserToken(cmd)
 	revisionID, _ := cmd.Flags().GetInt("revision-id")
 	if revisionID < -1 {
 		return fmt.Errorf("--revision-id 必须 >= -1（-1 表示忽略校验或自动最新，当前输入: %d）", revisionID)
-	}
-
-	if cmd.Flags().Changed("table-column-width") && colWidthRaw != "auto" {
-		return fmt.Errorf("doc content-update 现采用官方原子安全更新协议，暂不支持 --table-column-width 自定义列宽；如需保留/自定义表格列宽，请改用 'feishu-cli doc import' 进行文档导入")
 	}
 
 	// 解析 Markdown 内容
@@ -120,11 +116,16 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 验证本地资源：若存在本地文件/图片则 fail closed 并给出迁移提示
+	// 验证本地资源与列宽指令：flag 与内容注释两条入口都须 fail closed 并给出迁移提示
 	if mode != "delete_range" {
 		if err := validateNoLocalResources(uploadImages, markdownContent); err != nil {
 			return err
 		}
+		if err := validateNoColumnWidthDirective(cmd.Flags().Changed("table-column-width"), colWidthRaw, markdownContent); err != nil {
+			return err
+		}
+	} else if err := validateNoColumnWidthDirective(cmd.Flags().Changed("table-column-width"), colWidthRaw, ""); err != nil {
+		return err
 	}
 
 	switch mode {
@@ -460,6 +461,25 @@ func containsLocalMarkdownResources(content string) bool {
 	return false
 }
 
+// validateNoColumnWidthDirective 检查列宽自定义诉求；本命令暂不支持，须 fail closed。
+//
+// 必须同时看 flag 与内容：`<!-- feishu-colwidth: ... -->` 是文档化的等价入口
+// （CLAUDE.md 有记载，internal/converter 也实现了它）。只拦 flag 会让注释形态被静默
+// 丢弃——表格以默认列宽落地，用户却毫无提示，与显式传 flag 时的明确报错自相矛盾。
+func validateNoColumnWidthDirective(flagChanged bool, flagValue, markdown string) error {
+	if flagChanged && flagValue != "auto" {
+		return fmt.Errorf("doc content-update 现采用官方原子安全更新协议，暂不支持 --table-column-width 自定义列宽；如需保留/自定义表格列宽，请改用 'feishu-cli doc import' 进行文档导入")
+	}
+	if colWidthCommentInMarkdownRe.MatchString(markdown) {
+		return fmt.Errorf("检测到 Markdown 含 <!-- feishu-colwidth: ... --> 列宽指令；doc content-update 现采用官方原子安全更新协议，暂不支持自定义列宽；请移除该注释，或改用 'feishu-cli doc import' 进行文档导入")
+	}
+	return nil
+}
+
+// colWidthCommentInMarkdownRe 匹配任意行上的 <!-- feishu-colwidth: ... --> 指令
+// （与 internal/converter 的 colWidthCommentRe 同义，此处按多行扫描整篇内容）。
+var colWidthCommentInMarkdownRe = regexp.MustCompile(`(?m)^\s*<!--\s*feishu-colwidth\s*:[^>]*-->\s*$`)
+
 // validateNoLocalResources 检查是否包含本地文件/图片资源；若有则 fail closed 并给出迁移提示
 func validateNoLocalResources(uploadImages bool, markdown string) error {
 	if uploadImages {
@@ -502,6 +522,10 @@ func extractRevisionID(data map[string]any) int {
 	return -1
 }
 
+// parseRevisionNumber 解析服务端返回的 revision_id。
+// 覆盖 json.Number：当前 UpdateDocContentAtomic 走普通 json.Unmarshal（产出 float64），
+// 但本仓多处已切到 UseNumber 解码；漏掉该类型会让 doReplaceAll 在多范围替换中途
+// 因取不到新 revision 而 fail-closed 中断，留下部分替换的文档。
 func parseRevisionNumber(v any) int {
 	switch n := v.(type) {
 	case int:
@@ -510,6 +534,10 @@ func parseRevisionNumber(v any) int {
 		return int(n)
 	case float64:
 		return int(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i)
+		}
 	}
 	return -1
 }

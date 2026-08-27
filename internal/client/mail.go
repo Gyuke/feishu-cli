@@ -289,6 +289,37 @@ func sortThreadMessages(data json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(topMap)
 }
 
+// 邮件分页大小约束（对齐官方 shortcuts/mail：list 端点上限 20、search 端点上限 15）。
+// 两个端点都强制要求 page_size，缺失会返回 99992402 field validation failed。
+const (
+	mailListPageSizeDefault   = 20
+	mailListPageSizeMax       = 20
+	mailSearchPageSizeDefault = 15
+	mailSearchPageSizeMax     = 15
+)
+
+// normalizeMailListPageSize 归一化 messages 列表端点的 page_size
+func normalizeMailListPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return mailListPageSizeDefault
+	}
+	if pageSize > mailListPageSizeMax {
+		return mailListPageSizeMax
+	}
+	return pageSize
+}
+
+// normalizeMailSearchPageSize 归一化 search 端点的 page_size
+func normalizeMailSearchPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return mailSearchPageSizeDefault
+	}
+	if pageSize > mailSearchPageSizeMax {
+		return mailSearchPageSizeMax
+	}
+	return pageSize
+}
+
 // ListMailMessagesParams 邮件列表参数
 type ListMailMessagesParams struct {
 	MailboxID  string
@@ -323,9 +354,9 @@ func ListMailMessages(params ListMailMessagesParams, userAccessToken string) (js
 	if params.UnreadOnly {
 		q.Set("only_unread", "true")
 	}
-	if params.PageSize > 0 {
-		q.Set("page_size", fmt.Sprintf("%d", params.PageSize))
-	}
+	// page_size 是该端点的必填参数（缺失时服务端返回 99992402 field validation failed）。
+	// 对齐官方：始终发送，未指定时取默认值，超过上限则截断。
+	q.Set("page_size", fmt.Sprintf("%d", normalizeMailListPageSize(params.PageSize)))
 	if params.PageToken != "" {
 		q.Set("page_token", params.PageToken)
 	}
@@ -507,6 +538,27 @@ func resolveFolderSystemAliasOrID(input string) (string, bool) {
 	return "", false
 }
 
+// parseFilterInt 从 filter 值中解析整数（兼容 int / json.Number / float64 / 字符串）
+func parseFilterInt(v any) (int, bool) {
+	switch val := v.(type) {
+	case int:
+		return val, true
+	case int64:
+		return int(val), true
+	case float64:
+		return int(val), true
+	case json.Number:
+		if n, err := val.Int64(); err == nil {
+			return int(n), true
+		}
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
 func parseFilterStrings(v any) []string {
 	var out []string
 	switch val := v.(type) {
@@ -658,11 +710,14 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 
 	var rawFolderInput []string
 	var rawLabelInput []string
+	searchPageSize := 0
 
 	for k, v := range filter {
 		switch k {
 		case "page_size":
-			q.Set("page_size", fmt.Sprintf("%v", v))
+			if n, ok := parseFilterInt(v); ok {
+				searchPageSize = n
+			}
 		case "page_token":
 			if s := fmt.Sprintf("%v", v); s != "" {
 				q.Set("page_token", s)
@@ -681,6 +736,10 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 			normalizedFilter[k] = v
 		}
 	}
+
+	// page_size 是 search 端点的必填参数（缺失时服务端返回 99992402 field validation failed）。
+	// 对齐官方：始终发送，未指定时取默认值，超过上限则截断。
+	q.Set("page_size", fmt.Sprintf("%d", normalizeMailSearchPageSize(searchPageSize)))
 
 	// Step 1: Check if folder or label contains a system label (IMPORTANT/FLAGGED/OTHER).
 	// 官方语义：系统标签（important/flagged/other）在 search API 中作为 folder 发送；

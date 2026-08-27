@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/config"
 )
 
@@ -185,7 +186,10 @@ func openMarkdownPreviewDownload(fileToken, version, userAccessToken string) (*h
 	if err != nil {
 		return nil, fmt.Errorf("下载 Markdown 源文件失败: %w", err)
 	}
-	httpClient := &http.Client{Timeout: downloadTimeout}
+	// 必须走 config.NewHTTPClient：它带 host 校验（CheckRequestURL）与
+	// 重定向剥离 Authorization 头的策略。裸 &http.Client{} 会在 3xx 时
+	// 把 Bearer token 一路重放到重定向目标 host。
+	httpClient := config.NewHTTPClient(downloadTimeout)
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("下载 Markdown 源文件失败: %w", err)
@@ -209,40 +213,21 @@ func buildMarkdownPreviewDownloadURL(fileToken, version string) string {
 	return u.String()
 }
 
+// fetchTenantAccessTokenForDownload 取 tenant token 用于 media 预览下载。
+// 必须走 auth.FetchTenantAccessTokenResult：它带超时、CheckRequestURL host 校验、
+// 重定向剥离凭证头与 expires_in 校验。禁止在此手写 http.Post/http.DefaultClient，
+// 否则 app_id+app_secret 会随重定向被重放到任意 host，且没有超时。
 func fetchTenantAccessTokenForDownload() (string, error) {
 	cfg := config.Get()
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
 	if baseURL == "" {
 		baseURL = "https://open.feishu.cn"
 	}
-	body, err := json.Marshal(map[string]string{
-		"app_id":     cfg.AppID,
-		"app_secret": cfg.AppSecret,
-	})
-	if err != nil {
-		return "", fmt.Errorf("构造 tenant token 请求失败: %w", err)
-	}
-	resp, err := http.Post(baseURL+"/open-apis/auth/v3/tenant_access_token/internal", "application/json", bytes.NewReader(body))
+	tok, err := auth.FetchTenantAccessTokenResult(Context(), cfg.AppID, cfg.AppSecret, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("获取 tenant token 失败: %w", err)
 	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取 tenant token 失败: %w", err)
-	}
-	var apiResp struct {
-		Code              int    `json:"code"`
-		Msg               string `json:"msg"`
-		TenantAccessToken string `json:"tenant_access_token"`
-	}
-	if err := json.Unmarshal(raw, &apiResp); err != nil {
-		return "", fmt.Errorf("解析 tenant token 失败: %w", err)
-	}
-	if apiResp.Code != 0 || apiResp.TenantAccessToken == "" {
-		return "", fmt.Errorf("获取 tenant token 失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
-	}
-	return apiResp.TenantAccessToken, nil
+	return tok.AccessToken, nil
 }
 
 // FetchFileContent 把一个 Drive 原生 Markdown 文件的最新内容下载到内存。

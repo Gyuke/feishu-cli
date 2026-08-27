@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/riba2534/feishu-cli/internal/client"
@@ -62,10 +61,10 @@ var markdownOverwriteCmd = &cobra.Command{
 			return fmt.Errorf("请提供 --content 或 --content-file")
 		}
 
+		// 不传 --name 时一律读远端现有名（含 --content-file 场景）。
+		// 刻意不用 filepath.Base(contentFile)：帮助承诺「缺省读取远端现有名」，
+		// 若拿本地文件名顶替，`overwrite --file ./new.md` 会把远端文件静默改名为 new.md。
 		fileName := strings.TrimSpace(name)
-		if fileName == "" && contentFile != "" {
-			fileName = filepath.Base(contentFile)
-		}
 		if fileName != "" {
 			if err := validateMarkdownFileName(fileName, "--name"); err != nil {
 				return err
@@ -108,7 +107,7 @@ var markdownOverwriteCmd = &cobra.Command{
 						}},
 					},
 				})
-				uploadSpec.FileName = "<existing_remote_name_or_" + fileToken + ".md>"
+				uploadSpec.FileName = "<existing_remote_name>"
 			}
 			steps = append(steps, markdownUploadDryRunSteps(uploadSpec, size, multipart, contentFile)...)
 			return printDryRunPlan(cmd, "overwrite markdown file", map[string]any{
@@ -128,7 +127,10 @@ var markdownOverwriteCmd = &cobra.Command{
 			}
 			fileName = strings.TrimSpace(remoteName)
 			if fileName == "" {
-				fileName = fileToken + ".md"
+				// 不能退化成 fileToken+".md"：那会把远端文件静默重命名，
+				// 与「覆盖内容、保留原名」的命令语义相悖。取不到原名就 fail-closed。
+				return fmt.Errorf("无法读取 file_token=%s 的现有文件名，拒绝以 %s.md 静默重命名远端文件；请显式指定 --name <原文件名.md>",
+					fileToken, fileToken)
 			}
 			uploadSpec.FileName = fileName
 		}

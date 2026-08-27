@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/riba2534/feishu-cli/internal/profile"
@@ -61,8 +60,11 @@ var (
 	enableRemoteMeta = true
 	remoteForcedOff  bool
 	testMetaURL      string
-	maxResponseSize  = int64(defaultMaxResponse)
-	fetchTimeout     = defaultFetchTO
+	// inTestBinary 由测试二进制的 TestMain 置为 true（见 remote_test.go），
+	// 生产二进制永远为 false。避免在生产代码 import "testing"。
+	inTestBinary    bool
+	maxResponseSize = int64(defaultMaxResponse)
+	fetchTimeout    = defaultFetchTO
 
 	atomicWriteFn = atomicWriteFile
 
@@ -78,7 +80,9 @@ func remoteEnabled() bool {
 		return false
 	}
 	// 单元测试默认不打真实网络；显式 META_URL 或 REMOTE_META=on 才开启。
-	if testing.Testing() && os.Getenv("FEISHU_CLI_REMOTE_META") != "on" && os.Getenv("FEISHU_CLI_META_URL") == "" && testMetaURL == "" {
+	// 用注入式 seam（TestMain 置位 inTestBinary）而非 testing.Testing()：
+	// 后者要求生产文件 import "testing"，会把 testing 的 flag 注册链接进发布二进制。
+	if inTestBinary && os.Getenv("FEISHU_CLI_REMOTE_META") != "on" && os.Getenv("FEISHU_CLI_META_URL") == "" && testMetaURL == "" {
 		return false
 	}
 	return true
@@ -423,7 +427,12 @@ func cachePairEligible(cm CacheMeta, cached *MergedRegistry, payload []byte) boo
 	if cm.Version != cached.Version {
 		return false
 	}
-	if !isNewer(cached.Version, embeddedVersion) {
+	// 门禁语义是「cache 不得覆盖**更新的** embedded」，即只拒绝比 embedded 旧的 cache。
+	// 不能要求严格更新：官方 meta 端点的顶层 version 长期恒为 "1.0.0"，与 embedded 相同，
+	// 用 isNewer 会让整个 remote overlay 在发布版二进制里永远不生效
+	// （实测 source 恒为 embedded、services 停在 12，而远端实际提供 15 个）。
+	// 内容可信度由 Digest 校验与 validRemoteRegistry 保证，不依赖版本号递增。
+	if isOlder(cached.Version, embeddedVersion) {
 		return false
 	}
 	return validRemoteRegistry(cached)
@@ -528,13 +537,12 @@ func applyRemoteOverlay() {
 	brandChanged := metaErr == nil && cm.Brand != "" && cm.Brand != configuredBrand
 
 	if brandChanged {
+		// 品牌切换：旧品牌 cache 绝不能被信任（feishu/lark 的 catalog 不同），
+		// 必须立即删除，否则本进程或下一个进程可能把旧品牌数据当 overlay。
+		// 随后全量重拉（传空 version，见下方说明）；拉取失败就退回 embedded，
+		// 这比冒险沿用另一品牌的数据更安全。
 		invalidateCacheFiles()
-		if len(mergedServices) == 0 {
-			doSyncFetch(embeddedVersion)
-		} else {
-			// 有 embedded baseline：品牌切换才同步拉取；失败/unchanged 不得让旧品牌数据被信任。
-			doSyncFetch(embeddedVersion)
-		}
+		doSyncFetch("")
 		return
 	}
 
@@ -556,12 +564,68 @@ func applyRemoteOverlay() {
 	}
 
 	if len(mergedServices) == 0 {
-		doSyncFetch(embeddedVersion)
+		doSyncFetch("")
 		return
 	}
 	if shouldRefresh(cm) || metaErr != nil || forceRefresh {
+		// 首次运行（完全没有 meta 文件）时用**短超时**同步试一次：
+		// CLI 是短命进程，triggerBackgroundRefresh 起的 goroutine 在进程退出时被杀，
+		// 只走后台会导致 cache 永远建不起来、overlay 永远不生效
+		// （实测 source 恒为 embedded、cache 目录为空，services 停在 12 而远端有 15）。
+		// 短超时保证有 embedded baseline 时不会明显拖慢启动；超时/失败则退回后台刷新。
+		//
+		// 刻意只覆盖"干净的首次运行"：cache 目录里两个文件都不存在。
+		// cache 已存在但残缺/过期时仍走后台，以免同步拉取的结果被误当成
+		// "信任了残缺 cache"，也避免每次调用都阻塞在网络上。
+		if budget := firstFetchSyncBudget(); budget > 0 && overlaySource == "" && metaErr != nil && !cachePayloadExists() {
+			if doSyncFetchWithin(budget) {
+				return
+			}
+		}
 		triggerBackgroundRefresh()
 	}
+}
+
+// cachePayloadExists 判断 cache payload 文件是否已存在（用于识别残缺 pair）。
+func cachePayloadExists() bool {
+	path := cachePath()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// defaultFirstFetchSyncBudget 首次同步拉取 overlay 的时间预算。
+// 只在"干净首次运行"发生一次（之后走 cache），此时用户本来就在等 catalog 就绪；
+// 官方 meta payload 约 1MB，给足时间才能真正建起 cache。
+// 可用 FEISHU_CLI_META_FIRST_SYNC_MS 覆盖（0 表示禁用同步拉取，只走后台刷新）。
+const defaultFirstFetchSyncBudget = 2 * time.Second
+
+// firstFetchSyncBudget 返回本次首屏同步拉取的预算；<=0 表示不做同步拉取。
+func firstFetchSyncBudget() time.Duration {
+	if s := os.Getenv("FEISHU_CLI_META_FIRST_SYNC_MS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return defaultFirstFetchSyncBudget
+}
+
+// doSyncFetchWithin 在预算内尝试同步全量拉取 overlay，成功返回 true。
+//
+// 必须传空 version 做**全量**拉取：服务端把 data_version 当条件请求依据，
+// 传 data_version=1.0.0 会返回 data:{} 表示 unchanged。而 embedded 与远端的顶层 version
+// 长期都是 1.0.0，沿用本地版本会让服务端永远答"没变化"，overlay 永远拿不到数据。
+func doSyncFetchWithin(budget time.Duration) bool {
+	prev := fetchTimeout
+	if budget < prev {
+		fetchTimeout = budget
+	}
+	defer func() { fetchTimeout = prev }()
+
+	doSyncFetch("")
+	return overlaySource == "runtime"
 }
 
 func doSyncFetch(dataVersion string) {

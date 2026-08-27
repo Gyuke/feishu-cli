@@ -753,3 +753,45 @@ func TestRunAPI_AutoFallbacksToBotWhenNoUserToken(t *testing.T) {
 		t.Errorf("Authorization = %q, want Bearer t-...", capturedAuth)
 	}
 }
+
+// TestParseQueryParams_RejectsTrailingJSON 验证 --params 拒绝尾部残留内容。
+// 回归防护：json.Decoder 只消费第一个 JSON 值，`{"a":1} {"b":2}` 曾被静默
+// 只取前半，用户以为两个参数都生效了。
+func TestParseQueryParams_RejectsTrailingJSON(t *testing.T) {
+	bad := []string{
+		`{"page_size":2} {"bogus":1}`,
+		`{"a":1}{"b":2}`,
+		`{"a":1} garbage`,
+		`{"a":1} 42`,
+	}
+	for _, raw := range bad {
+		if _, err := parseQueryParams(raw); err == nil {
+			t.Errorf("%q: 尾部有多余内容应报错", raw)
+		}
+	}
+
+	good := []string{
+		``,
+		`   `,
+		`{"page_size":2}`,
+		`  {"page_size":2}  `,
+		`{"a":1,"b":[2,3]}`,
+	}
+	for _, raw := range good {
+		if _, err := parseQueryParams(raw); err != nil {
+			t.Errorf("%q: 合法输入不应报错，得到 %v", raw, err)
+		}
+	}
+
+	// 确认合法输入的解析结果未被破坏
+	q, err := parseQueryParams(`{"page_size":2,"flag":true}`)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if got := q.Get("page_size"); got != "2" {
+		t.Errorf("page_size = %q, want 2", got)
+	}
+	if got := q.Get("flag"); got != "true" {
+		t.Errorf("flag = %q, want true", got)
+	}
+}

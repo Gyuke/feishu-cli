@@ -31,29 +31,41 @@ func setupMailAttendanceCmdTestConfig(t *testing.T, baseURL string) {
 	}
 }
 
-// TestSheetProtectCmd_HiddenAndUnsupported 验证 sheet protect/unprotect 处于隐藏状态且 fail-closed
-func TestSheetProtectCmd_HiddenAndUnsupported(t *testing.T) {
-	if !sheetProtectCmd.Hidden {
-		t.Error("sheetProtectCmd should be hidden")
+// TestSheetProtectCmd_AvailableAndWired 验证 sheet protect/unprotect 命令可用且参数完整。
+// 回归防护：这两个命令曾被标记 Hidden 并直接返回 "unsupported"，
+// 但实测 sheets v2 protected_dimension / protected_range_batch_del 端点在线可用
+// （分别返回 code=0 与 delProtectIds），禁用等于删掉一个正常工作的能力。
+func TestSheetProtectCmd_AvailableAndWired(t *testing.T) {
+	if sheetProtectCmd.Hidden {
+		t.Error("sheet protect 端点可用，命令不应隐藏")
 	}
-	if !sheetUnprotectCmd.Hidden {
-		t.Error("sheetUnprotectCmd should be hidden")
+	if sheetUnprotectCmd.Hidden {
+		t.Error("sheet unprotect 端点可用，命令不应隐藏")
 	}
-
-	err := sheetProtectCmd.RunE(sheetProtectCmd, []string{"sht_token", "sheet_1"})
-	if err == nil {
-		t.Fatal("sheetProtectCmd should fail with error (fail-closed)")
-	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Errorf("sheetProtectCmd error = %v, want mentioning unsupported", err)
+	if strings.Contains(sheetProtectCmd.Short, "unsupported") || strings.Contains(sheetProtectCmd.Short, "废弃") {
+		t.Errorf("sheet protect Short 不应标记废弃: %q", sheetProtectCmd.Short)
 	}
 
-	err = sheetUnprotectCmd.RunE(sheetUnprotectCmd, []string{"sht_token", "p1"})
-	if err == nil {
-		t.Fatal("sheetUnprotectCmd should fail with error (fail-closed)")
+	for _, name := range []string{"dimension", "start", "end", "lock-info"} {
+		if sheetProtectCmd.Flags().Lookup(name) == nil {
+			t.Errorf("sheet protect 缺少 --%s flag", name)
+		}
 	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Errorf("sheetUnprotectCmd error = %v, want mentioning unsupported", err)
+
+	// protect 需要 <spreadsheet_token> <sheet_id> 两个位置参数
+	if err := sheetProtectCmd.Args(sheetProtectCmd, []string{"only_one"}); err == nil {
+		t.Error("sheet protect 应要求两个位置参数")
+	}
+	if err := sheetProtectCmd.Args(sheetProtectCmd, []string{"sht_token", "sheet_1"}); err != nil {
+		t.Errorf("sheet protect 两个位置参数应合法: %v", err)
+	}
+
+	// unprotect 需要 token + 至少一个 protect_id
+	if err := sheetUnprotectCmd.Args(sheetUnprotectCmd, []string{"sht_token"}); err == nil {
+		t.Error("sheet unprotect 应要求至少一个 protect_id")
+	}
+	if err := sheetUnprotectCmd.Args(sheetUnprotectCmd, []string{"sht_token", "p1", "p2"}); err != nil {
+		t.Errorf("sheet unprotect 多个 protect_id 应合法: %v", err)
 	}
 }
 

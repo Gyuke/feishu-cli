@@ -863,7 +863,9 @@ func DownloadFileWithToken(fileToken, outputPath, userAccessToken string, timeou
 
 func downloadDriveFileWithUserTokenRaw(fileToken, outputPath, userAccessToken string, timeout time.Duration) error {
 	reqURL := buildDriveFileDownloadURL(fileToken)
-	httpClient := &http.Client{Timeout: timeout}
+	// 带 Bearer 的请求必须走 config.NewHTTPClient：它在重定向时校验 host
+	// 并剥离 Authorization，裸 client 会把 User Token 重放给重定向目标
+	httpClient := config.NewHTTPClient(timeout)
 	req, err := newBearerDownloadRequest(reqURL, userAccessToken, "")
 	if err != nil {
 		return fmt.Errorf("下载文件失败: %w", err)

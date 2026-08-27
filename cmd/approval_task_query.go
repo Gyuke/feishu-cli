@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	approvalTopicTodo     = "1"
-	approvalTopicDone     = "2"
+	approvalTopicTodo = "1"
+	approvalTopicDone = "2"
+	// approvalTopicStarted (topic=3) 已不被 GET /open-apis/approval/v4/tasks 接受：
+	// 服务端回 99992402 "topic is optional, options: [1,2,17,18]"。
+	// 保留常量仅为给出明确的迁移提示，不再作为合法输入。
 	approvalTopicStarted  = "3"
 	approvalTopicCCUnread = "17"
 	approvalTopicCCRead   = "18"
@@ -31,7 +34,8 @@ var approvalTaskQueryCmd = &cobra.Command{
 当前契约不再传 user_id query，身份取 User Token。
 
 参数:
-  --topic        任务主题，可选：todo、done、started、cc-unread、cc-read
+  --topic        任务主题，可选：todo、done、cc-unread、cc-read
+                 （started 已被官方下线，请用 approval instance initiated）
   --output, -o   输出格式，可选：json、raw-json
 
 示例:
@@ -45,10 +49,10 @@ var approvalTaskQueryCmd = &cobra.Command{
   feishu-cli approval task query --topic todo --user-access-token u-xxx
 
   # JSON 输出
-  feishu-cli approval task query --topic started --output json
+  feishu-cli approval task query --topic done --output json
 
   # 原始 API 响应
-  feishu-cli approval task query --topic started --output raw-json`,
+  feishu-cli approval task query --topic todo --output raw-json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
@@ -158,13 +162,14 @@ func normalizeApprovalTaskTopic(topic string) (string, error) {
 	case "2", "done":
 		return approvalTopicDone, nil
 	case "3", "started", "initiated":
-		return approvalTopicStarted, nil
+		return "", fmt.Errorf("topic=started 已不被官方 tasks 接口支持（服务端仅接受 todo/done/cc-unread/cc-read）；" +
+			"查询「我发起的审批」请改用 `feishu-cli approval instance initiated`")
 	case "17", "cc-unread", "unread-cc":
 		return approvalTopicCCUnread, nil
 	case "18", "cc-read", "read-cc":
 		return approvalTopicCCRead, nil
 	default:
-		return "", fmt.Errorf("不支持的 topic: %s（可选值: todo, done, started, cc-unread, cc-read）", topic)
+		return "", fmt.Errorf("不支持的 topic: %s（可选值: todo, done, cc-unread, cc-read）", topic)
 	}
 }
 
@@ -188,7 +193,7 @@ func approvalTaskTopicLabel(topic string) string {
 func init() {
 	approvalTaskCmd.AddCommand(approvalTaskQueryCmd)
 
-	approvalTaskQueryCmd.Flags().String("topic", "", "任务主题：todo、done、started、cc-unread、cc-read")
+	approvalTaskQueryCmd.Flags().String("topic", "", "任务主题：todo、done、cc-unread、cc-read（started 已下线，用 approval instance initiated）")
 	approvalTaskQueryCmd.Flags().Int("page-size", 50, "每页数量")
 	approvalTaskQueryCmd.Flags().String("page-token", "", "分页标记")
 	approvalTaskQueryCmd.Flags().String("locale", "", "语言，如 zh-CN / en-US / ja-JP")

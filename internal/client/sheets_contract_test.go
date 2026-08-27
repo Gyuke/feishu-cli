@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// TestSheetsWriteCells_KeepBooleanType 验证 WriteCells 写入布尔值保持 JSON Boolean 类型
-func TestSheetsWriteCells_KeepBooleanType(t *testing.T) {
+// TestSheetsWriteCells_ConvertBooleanToText 验证 WriteCells 写入布尔值转为 "TRUE"/"FALSE" 字符串
+func TestSheetsWriteCells_ConvertBooleanToText(t *testing.T) {
 	var gotBody map[string]any
 	var gotMethod, gotPath string
 
@@ -56,12 +56,13 @@ func TestSheetsWriteCells_KeepBooleanType(t *testing.T) {
 		t.Fatalf("row format error: %v", values[0])
 	}
 
-	// 关键断言：第一个必须是布尔 true，第二个必须是布尔 false（不能是 "TRUE" / "FALSE" 字符串）
-	if b, ok := row[0].(bool); !ok || !b {
-		t.Errorf("row[0] = %v (type %T), want true (type bool)", row[0], row[0])
+	// 关键断言：sheets v2 写入 API 不接受 JSON Boolean（实测 code=90204 invalid cell type），
+	// 必须转成 "TRUE" / "FALSE" 字符串（与官方 stringifyCellValue 一致）
+	if s, ok := row[0].(string); !ok || s != "TRUE" {
+		t.Errorf("row[0] = %v (type %T), want \"TRUE\" (type string)", row[0], row[0])
 	}
-	if b, ok := row[1].(bool); !ok || b {
-		t.Errorf("row[1] = %v (type %T), want false (type bool)", row[1], row[1])
+	if s, ok := row[1].(string); !ok || s != "FALSE" {
+		t.Errorf("row[1] = %v (type %T), want \"FALSE\" (type string)", row[1], row[1])
 	}
 	if s, ok := row[2].(string); !ok || s != "文本" {
 		t.Errorf("row[2] = %v, want '文本'", row[2])
@@ -72,8 +73,8 @@ func TestSheetsWriteCells_KeepBooleanType(t *testing.T) {
 	}
 }
 
-// TestSheetsAppendCells_KeepBooleanType 验证 AppendCells 追加布尔值保持 JSON Boolean 类型
-func TestSheetsAppendCells_KeepBooleanType(t *testing.T) {
+// TestSheetsAppendCells_ConvertBooleanToText 验证 AppendCells 追加布尔值转为 "TRUE"/"FALSE" 字符串
+func TestSheetsAppendCells_ConvertBooleanToText(t *testing.T) {
 	var gotBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -108,16 +109,16 @@ func TestSheetsAppendCells_KeepBooleanType(t *testing.T) {
 		t.Fatalf("row format error: %v", values[0])
 	}
 
-	if b, ok := row[0].(bool); !ok || b {
-		t.Errorf("row[0] = %v, want false (bool)", row[0])
+	if s, ok := row[0].(string); !ok || s != "FALSE" {
+		t.Errorf("row[0] = %v (type %T), want \"FALSE\"", row[0], row[0])
 	}
-	if b, ok := row[1].(bool); !ok || !b {
-		t.Errorf("row[1] = %v, want true (bool)", row[1])
+	if s, ok := row[1].(string); !ok || s != "TRUE" {
+		t.Errorf("row[1] = %v (type %T), want \"TRUE\"", row[1], row[1])
 	}
 }
 
-// TestSheetsWriteCellsBatch_KeepBooleanType 验证 WriteCellsBatch 批量写入布尔值保持 JSON Boolean 类型
-func TestSheetsWriteCellsBatch_KeepBooleanType(t *testing.T) {
+// TestSheetsWriteCellsBatch_ConvertBooleanToText 验证 WriteCellsBatch 批量写入布尔值转为 "TRUE"/"FALSE" 字符串
+func TestSheetsWriteCellsBatch_ConvertBooleanToText(t *testing.T) {
 	var gotBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,16 +162,16 @@ func TestSheetsWriteCellsBatch_KeepBooleanType(t *testing.T) {
 		t.Fatalf("row format error: %v", values[0])
 	}
 
-	if b, ok := row[0].(bool); !ok || !b {
-		t.Errorf("row[0] = %v (type %T), want true (bool)", row[0], row[0])
+	if s, ok := row[0].(string); !ok || s != "TRUE" {
+		t.Errorf("row[0] = %v (type %T), want \"TRUE\"", row[0], row[0])
 	}
-	if b, ok := row[1].(bool); !ok || b {
-		t.Errorf("row[1] = %v (type %T), want false (bool)", row[1], row[1])
+	if s, ok := row[1].(string); !ok || s != "FALSE" {
+		t.Errorf("row[1] = %v (type %T), want \"FALSE\"", row[1], row[1])
 	}
 }
 
-// TestSheetsPrependCells_KeepBooleanType 验证 PrependCells 前置插入布尔值保持 JSON Boolean 类型
-func TestSheetsPrependCells_KeepBooleanType(t *testing.T) {
+// TestSheetsPrependCells_ConvertBooleanToText 验证 PrependCells 前置插入布尔值转为 "TRUE"/"FALSE" 字符串
+func TestSheetsPrependCells_ConvertBooleanToText(t *testing.T) {
 	var gotBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,21 +206,41 @@ func TestSheetsPrependCells_KeepBooleanType(t *testing.T) {
 		t.Fatalf("row format error: %v", values[0])
 	}
 
-	if b, ok := row[0].(bool); !ok || !b {
-		t.Errorf("row[0] = %v, want true (bool)", row[0])
+	if s, ok := row[0].(string); !ok || s != "TRUE" {
+		t.Errorf("row[0] = %v (type %T), want \"TRUE\"", row[0], row[0])
 	}
-	if b, ok := row[1].(bool); !ok || b {
-		t.Errorf("row[1] = %v, want false (bool)", row[1])
+	if s, ok := row[1].(string); !ok || s != "FALSE" {
+		t.Errorf("row[1] = %v (type %T), want \"FALSE\"", row[1], row[1])
 	}
 }
 
-// TestSheetsProtect_FailClosedAndUnsupported 验证 protect 和 unprotect 返回明确 unsupported 并 fail-closed
-func TestSheetsProtect_FailClosedAndUnsupported(t *testing.T) {
-	setupTestConfig(t, "http://127.0.0.1:9999")
+// TestSheetsProtect_ParseProtectIDAndValidate 验证保护范围 create/delete 的请求契约与 protectId 解析层级。
+// 实测 sheets v2 protected_dimension / protected_range_batch_del 端点在线可用，
+// 且 protectId 位于 addProtectedDimension[i] 顶层（不在嵌套 dimension 内）。
+func TestSheetsProtect_ParseProtectIDAndValidate(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
 
-	_, err := CreateProtectedRange(context.Background(), "shtcn_test", []*ProtectedRange{
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "protected_range_batch_del") {
+			_, _ = io.WriteString(w, `{"code":0,"msg":"success","data":{"delProtectIds":["7678691418626969209"]}}`)
+			return
+		}
+		// protectId 与 dimension 平级，验证解析不会误取嵌套层级
+		_, _ = io.WriteString(w, `{"code":0,"msg":"success","data":{"addProtectedDimension":[{"dimension":{"sheetId":"sht1","majorDimension":"ROWS","startIndex":0,"endIndex":5},"protectId":"7678691418626969209"}]}}`)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	ids, err := CreateProtectedRange(context.Background(), "shtcn_test", []*ProtectedRange{
 		{
-			SheetID: "sht1",
+			SheetID:  "sht1",
+			LockInfo: "lock",
 			Dimension: &Dimension{
 				SheetID:        "sht1",
 				MajorDimension: "ROWS",
@@ -227,19 +248,42 @@ func TestSheetsProtect_FailClosedAndUnsupported(t *testing.T) {
 				EndIndex:       5,
 			},
 		},
-	})
-	if err == nil {
-		t.Fatal("CreateProtectedRange 应返回错误 (fail-closed)")
+	}, "u-test-token")
+	if err != nil {
+		t.Fatalf("CreateProtectedRange error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Errorf("错误信息应包含 unsupported: %v", err)
+	if len(ids) != 1 || ids[0] != "7678691418626969209" {
+		t.Errorf("protectIDs = %v, want [7678691418626969209]", ids)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("create method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/open-apis/sheets/v2/spreadsheets/shtcn_test/protected_dimension" {
+		t.Errorf("create path = %s", gotPath)
+	}
+	if _, ok := gotBody["addProtectedDimension"].([]any); !ok {
+		t.Errorf("请求体应含 addProtectedDimension 数组: %v", gotBody)
 	}
 
-	err = DeleteProtectedRange(context.Background(), "shtcn_test", []string{"p1", "p2"})
-	if err == nil {
-		t.Fatal("DeleteProtectedRange 应返回错误 (fail-closed)")
+	// dimension 缺失时前置报错，不得发出无效请求
+	if _, err := CreateProtectedRange(context.Background(), "shtcn_test", []*ProtectedRange{
+		{SheetID: "sht1"},
+	}, "u-test-token"); err == nil {
+		t.Error("dimension 为 nil 时应报错")
 	}
-	if !strings.Contains(err.Error(), "unsupported") {
-		t.Errorf("错误信息应包含 unsupported: %v", err)
+
+	if err := DeleteProtectedRange(context.Background(), "shtcn_test", []string{"7678691418626969209"}, "u-test-token"); err != nil {
+		t.Fatalf("DeleteProtectedRange error: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("delete method = %s, want DELETE", gotMethod)
+	}
+	if gotPath != "/open-apis/sheets/v2/spreadsheets/shtcn_test/protected_range_batch_del" {
+		t.Errorf("delete path = %s", gotPath)
+	}
+
+	// 空 protectIds 前置报错
+	if err := DeleteProtectedRange(context.Background(), "shtcn_test", nil, "u-test-token"); err == nil {
+		t.Error("protectIds 为空时应报错")
 	}
 }

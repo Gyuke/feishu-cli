@@ -219,7 +219,7 @@ feishu-cli sheet filter-view list --token $TOKEN --sheet-id $SHEET -o json | \
 | 按列类型保真读取（数字/日期/布尔自动推断 dtype，输出与 table-put 输入对称，支持 get→改→put round-trip） | `table-get`（`--range` 指定区域，缺省读整表自动裁空行空列；`--no-header` 首行按数据处理） |
 | 行列管理 | `add-rows` / `add-cols` / `insert-rows` / `delete-rows` / `delete-cols` |
 | 工作表管理 | `add-sheet` / `copy-sheet` / `delete-sheet` |
-| 单范围样式 / 合并 | `style` / `merge` / `unmerge`（`protect` / `unprotect` 已废弃 unsupported；多范围批量样式走本 skill `batch-set-style`） |
+| 单范围样式 / 合并 / 保护 | `style` / `merge` / `unmerge` / `protect` / `unprotect`（多范围批量样式走本 skill `batch-set-style`） |
 | 查找 / 替换 / 简单筛选 | `find` / `replace` / `filter`（注意：与 `filter-view` 不同，`filter` 是临时筛选） |
 | 导出 / Markdown 导入 | `export`（XLSX/CSV/MD）/ `import-md`（用法见 `references/basic-commands.md`） |
 | 浮动图片完整 CRUD | `image add/get/update/list/delete/media-upload/write-image`（示例见上文） |

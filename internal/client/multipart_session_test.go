@@ -113,14 +113,43 @@ func TestParseMultipartSessionFromAPI_InvalidPlanAndOverflow(t *testing.T) {
 	}
 }
 
+// TestValidateMultipartSession_RejectsOversizedBlockSize 验证畸形 block_size 在所有平台都被拒绝。
+// 回归防护：守卫曾以 maxNativeInt64() 为上限，在 64 位平台等于 jsonNumberAsPositiveInt64 的
+// 钳制值，导致永不触发，服务端返回的 1<<62 会直接进入 make([]byte, int(BlockSize)) 而 panic。
 func TestValidateMultipartSession_RejectsOversizedBlockSize(t *testing.T) {
-	maxInt := maxNativeInt64()
-	if maxInt == math.MaxInt64 {
-		t.Skip("oversized block_size guard is only reachable on platforms where int is narrower than int64")
+	oversized := []int64{
+		maxMultipartBlockSize + 1,
+		1 << 62, // 曾导致 makeslice: len out of range panic
+		math.MaxInt64,
 	}
-	_, err := validateMultipartSession("up", maxInt+1, 1, 1)
-	if err == nil || !strings.Contains(err.Error(), "block_size") {
-		t.Fatalf("error = %v", err)
+	for _, bs := range oversized {
+		// block_num 取 1 使分片计划自身自洽，确保拦截来自 block_size 守卫而非计划校验
+		_, err := validateMultipartSession("up", bs, 1, 1)
+		if err == nil {
+			t.Fatalf("block_size=%d 应被拒绝，却通过了校验", bs)
+		}
+		if !strings.Contains(err.Error(), "block_size") {
+			t.Fatalf("block_size=%d 的错误信息应提及 block_size，得到: %v", bs, err)
+		}
+	}
+
+	// 合理上限内的 block_size 必须放行
+	if _, err := validateMultipartSession("up", maxMultipartBlockSize, 1, 1); err != nil {
+		t.Fatalf("block_size=%d（等于上限）应放行，得到: %v", maxMultipartBlockSize, err)
+	}
+}
+
+// TestParseMultipartSessionFromAPI_RejectsOversizedBlockSizeFromServer 端到端验证：
+// 服务端返回畸形 block_size 时返回错误而非 panic。
+func TestParseMultipartSessionFromAPI_RejectsOversizedBlockSizeFromServer(t *testing.T) {
+	raw := []byte(`{"code":0,"data":{"upload_id":"up_1","block_size":4611686018427387904,"block_num":1}}`)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("不应 panic，却发生: %v", r)
+		}
+	}()
+	if _, err := parseMultipartSessionFromAPI(raw, 25*1024*1024); err == nil {
+		t.Fatal("畸形 block_size 应返回错误")
 	}
 }
 

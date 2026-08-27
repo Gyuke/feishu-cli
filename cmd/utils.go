@@ -75,17 +75,48 @@ func resolveAutoUserToken(cmd *cobra.Command) (string, error) {
 	return token, nil
 }
 
+// resolveOptionalUserTokenForDestructive 与 resolveOptionalUserTokenWithFallback 同源，
+// 但用于**不可逆操作**（drive pull --delete-local / drive push --delete-remote 等）：
+// 「已配置 User Token 却无法使用」时 fail-closed 报错，而不是降级成 Bot 身份继续。
+//
+// 原因：身份决定了「远端有哪些文件」。以 Bot 身份看到的远端视图往往更小，
+// 差集计算随之变大，--delete-local 会把用户本地文件当作"远端已不存在"而删掉。
+// 未配置 User Token（纯 Bot 场景）仍正常放行，属预期用法。
+func resolveOptionalUserTokenForDestructive(cmd *cobra.Command, opName string) (string, error) {
+	flagToken, _ := cmd.Flags().GetString("user-access-token")
+	cfg := config.Get()
+	token, err := auth.ResolveUserAccessToken(flagToken, cfg.UserAccessToken, cfg.AppID, cfg.AppSecret, cfg.BaseURL)
+	if err != nil {
+		if auth.IsNoUserTokenConfigured(err) {
+			return "", nil // 未配置 User 身份：按 Bot 执行，属预期
+		}
+		return "", fmt.Errorf("%s 是不可逆操作，但已配置的 User Token 无法使用，拒绝降级为 Bot 身份执行"+
+			"（Bot 看到的远端文件更少，差集会误删本地文件）：%w", opName, err)
+	}
+	return token, nil
+}
+
 // resolveOptionalUserTokenWithFallback 尝试完整优先级链解析 User Token（可选）
 // 与 resolveOptionalUserToken 不同，会额外尝试从 token.json 和 config 中读取
 // 找不到时返回空字符串（回退到 App Token），而非报错
 // 适用于 msg/chat/doc export 等希望自动使用 User Token 的场景
+//
+// 注意「未配置」与「配置了但解析失败」的区别：
+//   - 未配置（ErrNoUserTokenConfigured）：静默回退 Bot，属正常路径
+//   - 配置了但失败（token.json 未绑定 app_id、app_id 不匹配、读取或刷新失败）：
+//     仍回退 Bot 以保持读命令可用，但必须在 stderr 明确告警。
+//     否则用户会拿到 Bot 视角的空结果或「无权限」，却以为是自己的 User 身份在查
+//     （同一台机器上 --as 类命令对同样的 token 会 fail-closed，两种行为互相矛盾）。
 func resolveOptionalUserTokenWithFallback(cmd *cobra.Command) string {
 	flagToken, _ := cmd.Flags().GetString("user-access-token")
 	cfg := config.Get()
 	token, err := auth.ResolveUserAccessToken(flagToken, cfg.UserAccessToken, cfg.AppID, cfg.AppSecret, cfg.BaseURL)
 	if err != nil {
-		if cfg.Debug {
-			fmt.Fprintf(os.Stderr, "[Debug] User Token 解析失败，回退到 App Token: %v\n", err)
+		if !auth.IsNoUserTokenConfigured(err) {
+			// 检测到 User 身份配置但无法使用：告警后按 Bot 身份继续
+			fmt.Fprintf(os.Stderr, "⚠️  已配置 User Token 但无法使用，本次改用 Bot 身份执行（结果可能不含你的个人数据）：%v\n", err)
+		} else if cfg.Debug {
+			fmt.Fprintf(os.Stderr, "[Debug] 未配置 User Token，使用 App Token\n")
 		}
 		return ""
 	}
