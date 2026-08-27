@@ -32,13 +32,20 @@ func Status() CatalogInfo {
 		ServiceCount:    len(mergedServices),
 		MethodCount:     CountMethods(mergedServices),
 		RemoteEnabled:   remoteEnabled(),
-		CachePath:       cachePath(),
+		CachePath:       overlayCachePath(),
 	}
 	if cm, err := loadCacheMeta(); err == nil {
 		info.CacheVersion = cm.Version
 		info.LastCheckAt = cm.LastCheckAt
 	}
 	return info
+}
+
+func overlayCachePath() string {
+	if !cacheEnabled() {
+		return ""
+	}
+	return cachePath()
 }
 
 func overlaySourceOrEmbedded() string {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/riba2534/feishu-cli/internal/profile"
 )
 
 func testRegistryJSON(name, version string) []byte {
@@ -82,34 +84,62 @@ func TestRemoteOff_SkipsRemoteLogic(t *testing.T) {
 	}
 }
 
-func TestFirstFetch_OverlaysRemote(t *testing.T) {
+func TestFirstFetch_DoesNotBlockWhenEmbeddedExists(t *testing.T) {
+	isolateRemote(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeJSON("remote_calendar", "2.0.0"))
+	}))
+	defer ts.Close()
+	defer close(release)
+	testMetaURL = ts.URL
+
+	start := time.Now()
+	Init()
+	elapsed := time.Since(start)
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("有 embedded baseline 时 Init 不应同步等待远端，耗时 %s", elapsed)
+	}
+	if _, ok := mergedServices["remote_calendar"]; ok {
+		t.Fatal("首次 Init 不得阻塞等待 overlay")
+	}
+	if overlaySource == "runtime" {
+		t.Fatal("有 embedded 时首次应为 background，不应 runtime overlay")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background refresh 未启动")
+	}
+}
+
+func TestFirstFetch_PersistsThenNextProcessOverlays(t *testing.T) {
 	isolateRemote(t)
 	var sawAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = r.Header.Get("Authorization")
-		if r.URL.Query().Get("protocol") != "" && r.URL.Query().Get("protocol") != "meta" {
-			t.Errorf("protocol=%q", r.URL.Query().Get("protocol"))
-		}
 		w.WriteHeader(200)
 		_, _ = w.Write(testEnvelopeJSON("remote_calendar", "2.0.0"))
 	}))
 	defer ts.Close()
 	testMetaURL = ts.URL
-	t.Setenv("FEISHU_CLI_META_TTL", "0")
 
 	Init()
+	waitBackgroundRefresh()
 	if sawAuth != "" {
 		t.Errorf("overlay 请求不得携带 Authorization，得到 %q", sawAuth)
 	}
+	reinitKeepingHooks()
+	Init()
 	if _, ok := mergedServices["remote_calendar"]; !ok {
-		t.Fatal("首次拉取应 overlay remote_calendar")
+		t.Fatal("下一进程应从完整 cache pair overlay remote_calendar")
 	}
-	if overlaySource != "runtime" {
-		t.Errorf("source = %q, want runtime", overlaySource)
-	}
-	st := Status()
-	if st.Source != "runtime" || st.ServiceCount == 0 || st.MethodCount < 0 {
-		t.Errorf("Status = %+v", st)
+	if overlaySource != "cache" {
+		t.Errorf("source = %q, want cache", overlaySource)
 	}
 }
 
@@ -316,6 +346,7 @@ func TestAtomicWriteFailure_FallsBackEmbedded(t *testing.T) {
 	defer ts.Close()
 	testMetaURL = ts.URL
 	Init()
+	waitBackgroundRefresh()
 	if _, ok := mergedServices["unsaved_svc"]; ok {
 		t.Error("原子写失败不得应用 overlay")
 	}
@@ -378,7 +409,10 @@ func TestIsNewer(t *testing.T) {
 func TestRemoteMetaURL_BrandAndOverride(t *testing.T) {
 	ResetForTest()
 	configuredBrand = brandFeishu
-	u := remoteMetaURL("")
+	u, err := remoteMetaURL("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(u, "open.feishu.cn") || !strings.Contains(u, "protocol=meta") {
 		t.Errorf("feishu url = %s", u)
 	}
@@ -386,13 +420,24 @@ func TestRemoteMetaURL_BrandAndOverride(t *testing.T) {
 		t.Errorf("empty version 不应带 data_version: %s", u)
 	}
 	configuredBrand = brandLark
-	u = remoteMetaURL("1.2.3")
+	u, err = remoteMetaURL("1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(u, "open.larksuite.com") || !strings.Contains(u, "data_version=1.2.3") {
 		t.Errorf("lark url = %s", u)
 	}
 	testMetaURL = "http://127.0.0.1:9/meta"
-	if remoteMetaURL("x") != "http://127.0.0.1:9/meta" {
+	u, err = remoteMetaURL("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != "http://127.0.0.1:9/meta" {
 		t.Error("testMetaURL 应覆盖")
+	}
+	testMetaURL = "https://evil.example/meta"
+	if _, err := remoteMetaURL("x"); err == nil {
+		t.Fatal("非 loopback META_URL 应被拒绝")
 	}
 }
 
@@ -411,6 +456,176 @@ func TestFetchPreservesUnmodeledKeys(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"enumName":"StatusEnum"`) {
 		t.Errorf("cache bytes 丢掉未建模字段: %s", data)
+	}
+}
+
+func TestCacheJSONWithoutMetaNotOverlayed(t *testing.T) {
+	tmp := isolateRemote(t)
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	cDir := filepath.Join(tmp, "cache")
+	_ = os.MkdirAll(cDir, 0700)
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.json"), testRegistryJSON("orphan_svc", "9.0.0"), 0644)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	if _, ok := mergedServices["orphan_svc"]; ok {
+		t.Fatal("缺少 cache metadata 时不得 overlay JSON")
+	}
+}
+
+func TestCacheVersionMismatchNotOverlayed(t *testing.T) {
+	tmp := isolateRemote(t)
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	cDir := filepath.Join(tmp, "cache")
+	_ = os.MkdirAll(cDir, 0700)
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.json"), testRegistryJSON("mismatch_svc", "9.0.0"), 0644)
+	meta, _ := json.Marshal(CacheMeta{LastCheckAt: time.Now().Unix(), Version: "8.0.0", Brand: brandFeishu})
+	_ = os.WriteFile(filepath.Join(cDir, "remote_meta.meta.json"), meta, 0644)
+	Init()
+	if _, ok := mergedServices["mismatch_svc"]; ok {
+		t.Fatal("meta.Version 与 JSON version 不一致时不得 overlay")
+	}
+}
+
+func TestPartialAtomicPairNextProcessNotOverlay(t *testing.T) {
+	isolateRemote(t)
+	atomicWriteFn = func(path string, data []byte, perm os.FileMode) error {
+		if strings.HasSuffix(path, "remote_meta.meta.json") {
+			return errors.New("meta write fail")
+		}
+		return atomicWriteFile(path, data, perm)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeJSON("partial_svc", "9.0.0"))
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	waitBackgroundRefresh()
+	if _, err := os.Stat(cachePath()); err != nil {
+		t.Fatalf("data 写入应成功: %v", err)
+	}
+	if _, err := os.Stat(cacheMetaPath()); err == nil {
+		t.Fatal("meta 写入失败后不应留下 meta 文件")
+	}
+	atomicWriteFn = atomicWriteFile
+	reinitKeepingHooks()
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	Init()
+	if _, ok := mergedServices["partial_svc"]; ok {
+		t.Fatal("残缺 cache pair 下一进程不得 overlay")
+	}
+}
+
+func TestBrandChange_UnchangedDoesNotTrustOldCache(t *testing.T) {
+	tmp := isolateRemote(t)
+	t.Setenv("FEISHU_CLI_BRAND", brandLark)
+	seedCache(t, tmp, "feishu_only_svc", "9.0.0", brandFeishu)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(testEnvelopeUnchanged())
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	if _, ok := mergedServices["feishu_only_svc"]; ok {
+		t.Fatal("品牌切换 unchanged 不得 overlay 旧品牌 cache")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "cache", "remote_meta.json")); !os.IsNotExist(err) {
+		t.Fatal("品牌切换应删除旧 cache JSON")
+	}
+	reinitKeepingHooks()
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	Init()
+	if _, ok := mergedServices["feishu_only_svc"]; ok {
+		t.Fatal("下一进程仍不得信任旧品牌数据")
+	}
+}
+
+func TestBrandChange_FailureDoesNotTrustOldCache(t *testing.T) {
+	tmp := isolateRemote(t)
+	t.Setenv("FEISHU_CLI_BRAND", brandLark)
+	seedCache(t, tmp, "feishu_only_svc", "9.0.0", brandFeishu)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	Init()
+	if _, ok := mergedServices["feishu_only_svc"]; ok {
+		t.Fatal("品牌切换失败不得 overlay 旧品牌 cache")
+	}
+	reinitKeepingHooks()
+	t.Setenv("FEISHU_CLI_META_TTL", "3600")
+	Init()
+	if _, ok := mergedServices["feishu_only_svc"]; ok {
+		t.Fatal("失败后下一进程不得信任旧品牌数据")
+	}
+}
+
+func TestMetaURLNonLoopbackRejected(t *testing.T) {
+	isolateRemote(t)
+	testMetaURL = "https://attacker.example/api_definition"
+	_, _, err := fetchRemoteMerged("")
+	if err == nil {
+		t.Fatal("非 loopback 覆盖 URL 应失败")
+	}
+}
+
+func TestRejectCrossOriginRedirect(t *testing.T) {
+	isolateRemote(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.example/meta", http.StatusFound)
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	_, _, err := fetchRemoteMerged("")
+	if err == nil {
+		t.Fatal("跨 origin 重定向应失败")
+	}
+}
+
+func TestRejectHTTPSToHTTPRedirect(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1/meta", nil)
+	prev, _ := http.NewRequest(http.MethodGet, "https://open.feishu.cn/api/tools/open/api_definition", nil)
+	if err := checkMetaRedirect(req, []*http.Request{prev}); err == nil {
+		t.Fatal("HTTPS→HTTP 重定向应失败")
+	}
+}
+
+func TestInvalidRemoteRegistryRejected(t *testing.T) {
+	isolateRemote(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"msg":"succeeded","data":{"version":"","services":[{"name":"svc"}]}}`))
+	}))
+	defer ts.Close()
+	testMetaURL = ts.URL
+	_, _, err := fetchRemoteMerged("")
+	if err == nil {
+		t.Fatal("空 version 应拒绝")
+	}
+}
+
+func TestCacheRootFailureDisablesCache(t *testing.T) {
+	ResetForTest()
+	t.Setenv("FEISHU_CLI_CONFIG_DIR", "")
+	t.Setenv("FEISHU_CLI_REMOTE_META", "on")
+	restore := profile.SetHomeFunc(func() (string, error) {
+		return "", errors.New("no home")
+	})
+	t.Cleanup(restore)
+	t.Cleanup(func() { ResetForTest() })
+	if cacheWritable() {
+		t.Fatal("profile root 失败时应禁用 cache，不得回退 /tmp")
+	}
+	Init()
+	if strings.Contains(cacheDir(), os.TempDir()) && cacheDir() != "" {
+		t.Fatalf("不得使用共享 /tmp cache，got %q", cacheDir())
 	}
 }
 
