@@ -132,7 +132,7 @@ func GetMailMessage(mailboxID, messageID, format, userAccessToken string) (json.
 	return callMailAPI(http.MethodGet, apiPath, nil, userAccessToken)
 }
 
-// BatchGetMailMessages 批量获取邮件（单批最多 20 条，自动分块并保序）
+// BatchGetMailMessages 批量获取邮件（单批最多 20 条，自动分块，严格按请求顺序保序，并在缺漏时返回 unavailable_message_ids）
 // API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/messages/batch_get
 func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -170,7 +170,7 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 		allCollected = append(allCollected, resp.Messages...)
 	}
 
-	// 保证按照请求的 messageIDs 顺序保序
+	// 收集所有已获取的 message，以 message_id 为 key 建立映射
 	type idHolder struct {
 		MessageID string `json:"message_id"`
 	}
@@ -182,22 +182,29 @@ func BatchGetMailMessages(mailboxID string, messageIDs []string, format, userAcc
 		}
 	}
 
+	// 严格按照请求 messageIDs 的顺序构建结果，重复 ID 确定性保留，缺失 ID 收集到 unavailable_message_ids
 	ordered := make([]json.RawMessage, 0, len(messageIDs))
+	var unavailableIDs []string
+
 	for _, id := range messageIDs {
 		if raw, ok := msgMap[id]; ok {
 			ordered = append(ordered, raw)
+		} else {
+			unavailableIDs = append(unavailableIDs, id)
 		}
 	}
-	if len(ordered) == 0 && len(allCollected) > 0 {
-		ordered = allCollected
+
+	out := map[string]any{
+		"messages": ordered,
+	}
+	if len(unavailableIDs) > 0 {
+		out["unavailable_message_ids"] = unavailableIDs
 	}
 
-	return json.Marshal(map[string]any{
-		"messages": ordered,
-	})
+	return json.Marshal(out)
 }
 
-// GetMailThread 获取线程并按时间升序实际排序
+// GetMailThread 获取线程并按时间升序实际排序（保留 thread 及其内部全部未知字段）
 // API: GET /open-apis/mail/v1/user_mailboxes/{mailbox_id}/threads/{thread_id}
 func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
@@ -215,49 +222,64 @@ func GetMailThread(mailboxID, threadID, format, userAccessToken string) (json.Ra
 }
 
 func sortThreadMessages(data json.RawMessage) (json.RawMessage, error) {
-	var parsed struct {
-		Thread struct {
-			ID          string            `json:"id,omitempty"`
-			BodyPreview string            `json:"body_preview,omitempty"`
-			Messages    []json.RawMessage `json:"messages,omitempty"`
-		} `json:"thread"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	// 使用 map[string]any 解析，以完整保留顶层和 thread 内部的所有未知字段（如 subject、participants、metadata 等）
+	var topMap map[string]any
+	if err := json.Unmarshal(data, &topMap); err != nil {
 		return data, nil
 	}
-	if len(parsed.Thread.Messages) <= 1 {
+	threadRaw, ok := topMap["thread"]
+	if !ok {
 		return data, nil
 	}
-	type msgItem struct {
-		raw  json.RawMessage
+	threadMap, ok := threadRaw.(map[string]any)
+	if !ok {
+		return data, nil
+	}
+	messagesRaw, ok := threadMap["messages"]
+	if !ok {
+		return data, nil
+	}
+	messagesList, ok := messagesRaw.([]any)
+	if !ok || len(messagesList) <= 1 {
+		return data, nil
+	}
+
+	type msgEntry struct {
+		item any
 		date int64
 	}
-	items := make([]msgItem, len(parsed.Thread.Messages))
-	for i, raw := range parsed.Thread.Messages {
-		var d struct {
-			InternalDate any `json:"internal_date"`
-		}
-		_ = json.Unmarshal(raw, &d)
+	entries := make([]msgEntry, len(messagesList))
+	for i, it := range messagesList {
 		var dateVal int64
-		switch v := d.InternalDate.(type) {
-		case string:
-			dateVal, _ = strconv.ParseInt(v, 10, 64)
-		case float64:
-			dateVal = int64(v)
-		case json.Number:
-			dateVal, _ = v.Int64()
+		if m, ok := it.(map[string]any); ok {
+			if d, exists := m["internal_date"]; exists {
+				switch v := d.(type) {
+				case string:
+					dateVal, _ = strconv.ParseInt(v, 10, 64)
+				case float64:
+					dateVal = int64(v)
+				case json.Number:
+					dateVal, _ = v.Int64()
+				}
+			}
 		}
-		items[i] = msgItem{raw: raw, date: dateVal}
+		entries[i] = msgEntry{item: it, date: dateVal}
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].date < items[j].date
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].date < entries[j].date
 	})
-	sortedMsgs := make([]json.RawMessage, len(items))
-	for i, it := range items {
-		sortedMsgs[i] = it.raw
+
+	sortedList := make([]any, len(entries))
+	for i, e := range entries {
+		sortedList[i] = e.item
 	}
-	parsed.Thread.Messages = sortedMsgs
-	return json.Marshal(parsed)
+
+	// 仅替换 thread 内的 messages，其它所有字段及顶层结构保持原样
+	threadMap["messages"] = sortedList
+	topMap["thread"] = threadMap
+
+	return json.Marshal(topMap)
 }
 
 // ListMailMessagesParams 邮件列表参数

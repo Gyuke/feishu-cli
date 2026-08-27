@@ -9,7 +9,9 @@
 
 ## 前置条件
 
-- **认证**：所有 mail 命令都需要 **User Access Token**（执行 `feishu-cli auth login` 登录）
+- **认证与身份**：
+  - **读类命令**（`triage` / `message` / `messages` / `thread`）：支持 `--as bot|user|auto`。User 身份支持 `mailbox="me"`；Bot 身份（`--as bot`）使用 Tenant Token 访问共享邮箱，不支持 `mailbox="me"`，必须显式提供 `--mailbox <邮箱地址>`。
+  - **写类与管理命令**（`send` / `draft-*` / `reply` / `forward` / `message-modify` / `message-trash` 等）：需要 **User Access Token**（执行 `feishu-cli auth login` 登录）。
 - **预检**：按「[权限要求](#权限要求)」节的三档分级预检（仅签名 / 消息只读 / 写类）执行对应 `auth check`，不要只检最弱 scope
 
 ## 命令速查
@@ -25,24 +27,27 @@
 | `mail signature` | 列出/查看邮箱签名（`--mailbox` 定位邮箱，旧名 `--from` 仍兼容；`--detail <签名ID>` 取单个详情；`-o json` 返回完整 `{signatures, usages}`；支持 `--dry-run`） |
 
 ```bash
-# 查未读收件箱
-feishu-cli mail triage --folder INBOX --unread-only --page-size 20
+# 查未读收件箱（无 label 默认 INBOX）
+feishu-cli mail triage --unread-only --page-size 20
+
+# Bot 身份读取公共/共享邮箱（必须显式指定 --mailbox，不支持 me）
+feishu-cli mail triage --as bot --mailbox shared@example.com --unread-only
 
 # 列出可用文件夹和标签
 feishu-cli mail triage --list-folders
 feishu-cli mail triage --list-labels
 
-# 搜索邮件
+# 搜索邮件（支持 query / folder / label / unread-only）
 feishu-cli mail triage --query "周会"
 
 # 获取单封
 feishu-cli mail message --message-id msg_xxx
 feishu-cli mail message --message-id msg_xxx --format plain_text_full
 
-# 批量获取
+# 批量获取（支持 >20 条自动分块并保序，缺漏 ID 暴露在 unavailable_message_ids）
 feishu-cli mail messages --message-ids m1,m2,m3
 
-# 获取线程
+# 获取线程（按时间升序排序）
 feishu-cli mail thread --thread-id thread_xxx
 
 # 列出邮箱签名（默认 mailbox=me）

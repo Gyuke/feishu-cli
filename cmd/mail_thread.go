@@ -28,12 +28,11 @@ var mailThreadCmd = &cobra.Command{
 		if err := config.Validate(); err != nil {
 			return err
 		}
-		token, err := requireUserToken(cmd, "mail thread")
+		token, mailbox, err := resolveMailReadIdentity(cmd)
 		if err != nil {
 			return err
 		}
 
-		mailbox, _ := cmd.Flags().GetString("mailbox")
 		threadID, _ := cmd.Flags().GetString("thread-id")
 		format, _ := cmd.Flags().GetString("format")
 		output, _ := cmd.Flags().GetString("output")
@@ -60,6 +59,7 @@ func init() {
 	mailThreadCmd.Flags().String("mailbox", "me", "邮箱地址（默认 me）")
 	mailThreadCmd.Flags().String("thread-id", "", "线程 ID（必填）")
 	mailThreadCmd.Flags().String("format", "full", "格式: full/plain_text_full")
+	mailThreadCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto）")
 	mailThreadCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	mailThreadCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	mustMarkFlagRequired(mailThreadCmd, "thread-id")

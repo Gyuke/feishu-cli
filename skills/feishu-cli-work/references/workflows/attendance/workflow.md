@@ -48,7 +48,7 @@ feishu-cli attendance user-task query \
 | `--user-access-token` | string | - | User Access Token（覆盖登录态）|
 | `-o, --output` | string | - | `text`（默认）/ `json` |
 
-### 2. 查询考勤统计 `user-stats query`
+### 2. 查询考勤统计 `user-stats query`（legacy 路径）
 
 ```bash
 feishu-cli attendance user-stats query \
@@ -56,20 +56,19 @@ feishu-cli attendance user-stats query \
     --stats-type <daily|month> --start <date> --end <date> [选项]
 ```
 
-底层走 `POST /open-apis/attendance/v1/user_stats_datas/query`。返回出勤/迟到/早退/请假等聚合统计字段（出勤天数、迟到次数、加班时长……）。
+底层走 `POST /open-apis/attendance/v1/user_stats_datas/query`（Tenant Token）。返回出勤/迟到/早退/请假等聚合统计字段（出勤天数、迟到次数、加班时长……）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `--employee-type` | string | - | 用户 ID 类型：`employee_id` (默认) / `employee_no` |
 | `--stats-type` | string | - | `daily`（日度，默认）/ `month`（月度）|
-| `--user-ids` | CSV | - | 查询的用户 ID 列表，**最多 200 个**（留空则走 employee_no 自查本人）|
+| `--user-ids` | CSV | ✓ | 查询的用户 ID 列表，**最多 200 个** |
 | `--current-user-id` | string | - | 发起请求的用户 ID（新系统用户必填，对应「查询统计设置」`user_id`）|
 | `--start` | string | ✓ | 起始日期 |
 | `--end` | string | ✓ | 结束日期（跨度 ≤ 31 天）|
 | `--locale` | string | - | 语言：`zh` / `en` / `ja` |
 | `--need-history` | bool | - | 是否返回历史数据（默认 false）|
 | `--current-group-only` | bool | - | 仅展示当前考勤组（默认 false）|
-| `--user-access-token` | string | - | User Access Token（覆盖登录态）|
 | `-o, --output` | string | - | `text`（默认）/ `json` |
 
 ## 使用示例

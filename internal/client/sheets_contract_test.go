@@ -116,6 +116,103 @@ func TestSheetsAppendCells_KeepBooleanType(t *testing.T) {
 	}
 }
 
+// TestSheetsWriteCellsBatch_KeepBooleanType 验证 WriteCellsBatch 批量写入布尔值保持 JSON Boolean 类型
+func TestSheetsWriteCellsBatch_KeepBooleanType(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"responses":[]}}`)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	inputBatch := []*CellRange{
+		{
+			Range: "Sheet1!A1:B1",
+			Values: [][]any{
+				{true, false},
+			},
+		},
+	}
+
+	err := WriteCellsBatch(context.Background(), "shtcn_test", inputBatch)
+	if err != nil {
+		t.Fatalf("WriteCellsBatch error: %v", err)
+	}
+
+	valueRanges, ok := gotBody["valueRanges"].([]any)
+	if !ok || len(valueRanges) != 1 {
+		t.Fatalf("valueRanges missing or wrong format: %v", gotBody)
+	}
+	vr, ok := valueRanges[0].(map[string]any)
+	if !ok {
+		t.Fatalf("valueRanges[0] format error: %v", valueRanges[0])
+	}
+	values, ok := vr["values"].([]any)
+	if !ok || len(values) != 1 {
+		t.Fatalf("values format error: %v", vr)
+	}
+	row, ok := values[0].([]any)
+	if !ok || len(row) != 2 {
+		t.Fatalf("row format error: %v", values[0])
+	}
+
+	if b, ok := row[0].(bool); !ok || !b {
+		t.Errorf("row[0] = %v (type %T), want true (bool)", row[0], row[0])
+	}
+	if b, ok := row[1].(bool); !ok || b {
+		t.Errorf("row[1] = %v (type %T), want false (bool)", row[1], row[1])
+	}
+}
+
+// TestSheetsPrependCells_KeepBooleanType 验证 PrependCells 前置插入布尔值保持 JSON Boolean 类型
+func TestSheetsPrependCells_KeepBooleanType(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"tableRange":"Sheet1!A1:B2","updates":{"updatedRange":"Sheet1!A1:B1"}}}`)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	inputValues := [][]any{
+		{true, false},
+	}
+
+	_, err := PrependCells(context.Background(), "shtcn_test", "Sheet1!A1:B1", inputValues)
+	if err != nil {
+		t.Fatalf("PrependCells error: %v", err)
+	}
+
+	valueRange, ok := gotBody["valueRange"].(map[string]any)
+	if !ok {
+		t.Fatalf("valueRange missing: %v", gotBody)
+	}
+	values, ok := valueRange["values"].([]any)
+	if !ok || len(values) != 1 {
+		t.Fatalf("values format error: %v", valueRange)
+	}
+	row, ok := values[0].([]any)
+	if !ok || len(row) != 2 {
+		t.Fatalf("row format error: %v", values[0])
+	}
+
+	if b, ok := row[0].(bool); !ok || !b {
+		t.Errorf("row[0] = %v, want true (bool)", row[0])
+	}
+	if b, ok := row[1].(bool); !ok || b {
+		t.Errorf("row[1] = %v, want false (bool)", row[1])
+	}
+}
+
 // TestSheetsProtect_FailClosedAndUnsupported 验证 protect 和 unprotect 返回明确 unsupported 并 fail-closed
 func TestSheetsProtect_FailClosedAndUnsupported(t *testing.T) {
 	setupTestConfig(t, "http://127.0.0.1:9999")

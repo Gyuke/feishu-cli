@@ -33,12 +33,11 @@ Folders / labels 查询:
 		if err := config.Validate(); err != nil {
 			return err
 		}
-		token, err := requireUserToken(cmd, "mail triage")
+		token, mailbox, err := resolveMailReadIdentity(cmd)
 		if err != nil {
 			return err
 		}
 
-		mailbox, _ := cmd.Flags().GetString("mailbox")
 		folder, _ := cmd.Flags().GetString("folder")
 		label, _ := cmd.Flags().GetString("label")
 		query, _ := cmd.Flags().GetString("query")
@@ -130,6 +129,7 @@ func init() {
 	mailTriageCmd.Flags().String("page-token", "", "分页标记")
 	mailTriageCmd.Flags().Bool("list-folders", false, "列出可用文件夹")
 	mailTriageCmd.Flags().Bool("list-labels", false, "列出可用标签")
+	mailTriageCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto）")
 	mailTriageCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	mailTriageCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 }

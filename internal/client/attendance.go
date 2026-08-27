@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
 // AttendanceUserTask 单个用户某天的打卡任务（聚合上下班两次打卡）
@@ -221,11 +223,10 @@ func QueryAttendanceUserTasks(
 	return out, nil
 }
 
-// QueryAttendanceUserStats 查询用户考勤统计数据
+// QueryAttendanceUserStats 查询用户考勤统计数据（legacy 路径）
 //
 // 对应 OpenAPI: POST /open-apis/attendance/v1/user_stats_datas/query
-// 权限要求: attendance:task:readonly
-// 支持 User Access Token 和 Tenant Access Token
+// 权限要求: attendance:task:readonly（Tenant Token）
 //
 // employeeType 取值：employee_id（默认）/ employee_no
 // statsType: daily（日度）/ month（月度）
@@ -241,7 +242,6 @@ func QueryAttendanceUserStats(
 	locale string,
 	needHistory bool,
 	currentGroupOnly bool,
-	userAccessToken ...string,
 ) (*AttendanceQueryUserStatsResult, error) {
 	cli, err := GetClient()
 	if err != nil {
@@ -258,9 +258,7 @@ func QueryAttendanceUserStats(
 		return nil, fmt.Errorf("start_date / end_date 必填")
 	}
 	if len(userIDs) == 0 {
-		if employeeType != "employee_no" {
-			return nil, fmt.Errorf("employee_type 为 %s 时 user_ids 不能为空（查询本人请使用 employee_no 且留空 user_ids）", employeeType)
-		}
+		return nil, fmt.Errorf("user_ids 不能为空")
 	}
 
 	q := url.Values{}
@@ -268,16 +266,11 @@ func QueryAttendanceUserStats(
 
 	apiPath := "/open-apis/attendance/v1/user_stats_datas/query?" + q.Encode()
 
-	sendUserIDs := userIDs
-	if sendUserIDs == nil {
-		sendUserIDs = []string{}
-	}
-
 	body := map[string]any{
 		"stats_type":         statsType,
 		"start_date":         startDate,
 		"end_date":           endDate,
-		"user_ids":           sendUserIDs,
+		"user_ids":           userIDs,
 		"need_history":       needHistory,
 		"current_group_only": currentGroupOnly,
 	}
@@ -288,10 +281,7 @@ func QueryAttendanceUserStats(
 		body["user_id"] = currentUserID
 	}
 
-	uat := firstString(userAccessToken)
-	tokenType, opts := resolveTokenOpts(uat)
-
-	resp, err := cli.Post(Context(), apiPath, body, tokenType, opts...)
+	resp, err := cli.Post(Context(), apiPath, body, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		return nil, fmt.Errorf("查询考勤统计失败: %w", err)
 	}

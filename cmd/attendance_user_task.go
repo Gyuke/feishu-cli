@@ -116,7 +116,10 @@ var attendanceUserTaskQueryCmd = &cobra.Command{
 			return fmt.Errorf("--start (%d) 不能晚于 --end (%d)", dateFrom, dateTo)
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 
 		result, err := client.QueryAttendanceUserTasks(
 			employeeType,
@@ -220,6 +223,7 @@ func init() {
 	attendanceUserTaskQueryCmd.Flags().Bool("need-overtime", false, "是否包含加班班段打卡结果")
 	attendanceUserTaskQueryCmd.Flags().Bool("ignore-invalid-users", true, "忽略无效或无权限用户，仅返回有效数据")
 	attendanceUserTaskQueryCmd.Flags().Bool("include-terminated", false, "包含离职员工数据")
+	attendanceUserTaskQueryCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto）")
 	attendanceUserTaskQueryCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态）")
 	attendanceUserTaskQueryCmd.Flags().StringP("output", "o", "text", "输出格式：text | json")
 

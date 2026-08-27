@@ -212,20 +212,33 @@ func TestMailBatchGet_Chunk20AndKeepOrder(t *testing.T) {
 	}
 }
 
-// TestMailThread_SortMessagesByDate 验证 thread 获取后按 internal_date 实际升序排序
-func TestMailThread_SortMessagesByDate(t *testing.T) {
+// TestMailThread_PreserveFullJSONFields 验证 thread 排序时完整保留顶层和 thread 内部的所有未知/额外字段
+func TestMailThread_PreserveFullJSONFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 返回乱序的 thread messages
 		respData := map[string]any{
 			"code": 0,
 			"msg":  "ok",
 			"data": map[string]any{
+				"top_level_sentinel": "sentinel_value_top",
 				"thread": map[string]any{
-					"id": "th_123",
+					"id":                "th_123",
+					"subject":           "sentinel_subject_123",
+					"participants":      []string{"p1@example.com", "p2@example.com"},
+					"body_preview":      "preview text",
+					"custom_meta_field": map[string]any{"key": "val"},
 					"messages": []map[string]any{
-						{"message_id": "m3", "internal_date": "1682379000000", "subject": "Third"},
-						{"message_id": "m1", "internal_date": "1682377000000", "subject": "First"},
-						{"message_id": "m2", "internal_date": "1682378000000", "subject": "Second"},
+						{
+							"message_id":         "m2",
+							"internal_date":      "1682378000000",
+							"subject":            "Second",
+							"custom_msg_payload": "payload_2",
+						},
+						{
+							"message_id":         "m1",
+							"internal_date":      "1682377000000",
+							"subject":            "First",
+							"custom_msg_payload": "payload_1",
+						},
 					},
 				},
 			},
@@ -241,27 +254,130 @@ func TestMailThread_SortMessagesByDate(t *testing.T) {
 		t.Fatalf("GetMailThread 失败: %v", err)
 	}
 
-	var parsed struct {
-		Thread struct {
-			ID       string `json:"id"`
-			Messages []struct {
-				MessageID    string `json:"message_id"`
-				InternalDate string `json:"internal_date"`
-			} `json:"messages"`
-		} `json:"thread"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("解析 thread 响应失败: %v", err)
+	var rawMap map[string]any
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		t.Fatalf("反序列化失败: %v", err)
 	}
 
-	if len(parsed.Thread.Messages) != 3 {
-		t.Fatalf("thread messages 数量 = %d, want 3", len(parsed.Thread.Messages))
+	// 验证顶层字段未丢失
+	if rawMap["top_level_sentinel"] != "sentinel_value_top" {
+		t.Errorf("top_level_sentinel 被丢弃: %v", rawMap["top_level_sentinel"])
 	}
-	// 期望排序为 m1 (1682377000000) -> m2 (1682378000000) -> m3 (1682379000000)
-	wantOrder := []string{"m1", "m2", "m3"}
-	for i, msg := range parsed.Thread.Messages {
-		if msg.MessageID != wantOrder[i] {
-			t.Errorf("第 %d 个 message = %s, want %s (未按时间正确排序)", i, msg.MessageID, wantOrder[i])
+
+	threadMap, ok := rawMap["thread"].(map[string]any)
+	if !ok {
+		t.Fatalf("thread 字段缺失或类型不对: %v", rawMap)
+	}
+
+	// 验证 thread 内部的非标准/未知字段未丢失
+	if threadMap["subject"] != "sentinel_subject_123" {
+		t.Errorf("thread.subject 被丢弃: %v", threadMap["subject"])
+	}
+	participants, ok := threadMap["participants"].([]any)
+	if !ok || len(participants) != 2 {
+		t.Errorf("thread.participants 被丢弃: %v", threadMap["participants"])
+	}
+	if threadMap["body_preview"] != "preview text" {
+		t.Errorf("thread.body_preview 被丢弃: %v", threadMap["body_preview"])
+	}
+	if threadMap["custom_meta_field"] == nil {
+		t.Errorf("thread.custom_meta_field 被丢弃")
+	}
+
+	// 验证 messages 已按时间升序排好，且每条 message 内部的未知字段也保留
+	msgs, ok := threadMap["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("messages 列表异常: %v", threadMap["messages"])
+	}
+	m1 := msgs[0].(map[string]any)
+	m2 := msgs[1].(map[string]any)
+	if m1["message_id"] != "m1" || m1["custom_msg_payload"] != "payload_1" {
+		t.Errorf("m1 顺序或内部字段异常: %v", m1)
+	}
+	if m2["message_id"] != "m2" || m2["custom_msg_payload"] != "payload_2" {
+		t.Errorf("m2 顺序或内部字段异常: %v", m2)
+	}
+}
+
+// TestMailBatchGet_21PlusPartialAndDuplicates 验证 21+ 数量、部分缺失 ID（返回 unavailable_message_ids）和重复 ID 确定性处理
+func TestMailBatchGet_21PlusPartialAndDuplicates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			MessageIDs []string `json:"message_ids"`
+		}
+		_ = json.Unmarshal(raw, &body)
+
+		var msgs []map[string]any
+		for _, id := range body.MessageIDs {
+			// 模拟服务端只识别已知 ID，不返回以 "missing_" 开头的 ID
+			if !strings.HasPrefix(id, "missing_") {
+				msgs = append(msgs, map[string]any{
+					"message_id": id,
+					"subject":    "Subject of " + id,
+				})
+			}
+		}
+		respData := map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]any{
+				"messages": msgs,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(respData)
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	// 输入 25 个 ID，包含存在的 ID、重复的 ID 和缺失的 ID
+	inputIDs := []string{
+		"m01", "m02", "missing_01", "m03", "m01", // 重复 m01
+		"m04", "m05", "m06", "m07", "m08",
+		"m09", "m10", "m11", "missing_02", "m12",
+		"m13", "m14", "m15", "m16", "m17",
+		"m18", "m19", "m20", "m21", "m02", // 重复 m02，总数 25 > 20
+	}
+
+	data, err := BatchGetMailMessages("me", inputIDs, "full", "u-test-token")
+	if err != nil {
+		t.Fatalf("BatchGetMailMessages 失败: %v", err)
+	}
+
+	var result struct {
+		Messages []struct {
+			MessageID string `json:"message_id"`
+			Subject   string `json:"subject"`
+		} `json:"messages"`
+		UnavailableMessageIDs []string `json:"unavailable_message_ids"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("反序列化失败: %v", err)
+	}
+
+	// 验证 unavailable_message_ids 正确收集了 missing_01 和 missing_02
+	if len(result.UnavailableMessageIDs) != 2 {
+		t.Fatalf("unavailable_message_ids = %v, want 2 items", result.UnavailableMessageIDs)
+	}
+	if result.UnavailableMessageIDs[0] != "missing_01" || result.UnavailableMessageIDs[1] != "missing_02" {
+		t.Errorf("unavailable_message_ids = %v, want ['missing_01', 'missing_02']", result.UnavailableMessageIDs)
+	}
+
+	// 验证命中的 23 个 message 严格按照 inputIDs 中的相对顺序排列，且重复项确定性出现
+	wantFoundIDs := []string{
+		"m01", "m02", "m03", "m01",
+		"m04", "m05", "m06", "m07", "m08",
+		"m09", "m10", "m11", "m12",
+		"m13", "m14", "m15", "m16", "m17",
+		"m18", "m19", "m20", "m21", "m02",
+	}
+	if len(result.Messages) != len(wantFoundIDs) {
+		t.Fatalf("messages count = %d, want %d", len(result.Messages), len(wantFoundIDs))
+	}
+	for i, m := range result.Messages {
+		if m.MessageID != wantFoundIDs[i] {
+			t.Errorf("第 %d 个 message = %s, want %s (保序/重复处理失败)", i, m.MessageID, wantFoundIDs[i])
 		}
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 // mailBoundary 生成一个 multipart 边界字符串（16-hex 随机）
@@ -274,4 +276,31 @@ func buildQuotedBody(body, quotePrefix string) string {
 		out = append(out, quotePrefix+line)
 	}
 	return strings.Join(out, "\n")
+}
+
+// resolveMailReadIdentity 解析 Mail 读命令的身份与 mailbox。
+// 返回: token（空字符串表示 Bot，非空表示 User Token）, 规范化的 mailbox, error。
+// 规则：
+// 1. --as 仅支持 bot|user|auto；
+// 2. Bot 身份（token == ""）下不支持 mailbox="me" 或留空，必须在网络请求前拒绝并要求指定具体邮箱地址；
+// 3. User 身份（token != ""）下 mailbox 为空时默认 "me"。
+func resolveMailReadIdentity(cmd *cobra.Command) (string, string, error) {
+	token, err := resolveIdentityToken(cmd)
+	if err != nil {
+		return "", "", err
+	}
+	mailbox, _ := cmd.Flags().GetString("mailbox")
+	mailbox = strings.TrimSpace(mailbox)
+	if token == "" {
+		// Bot 身份
+		if mailbox == "" || mailbox == "me" {
+			return "", "", fmt.Errorf("Bot 身份（--as bot）不支持 mailbox=\"me\"，请通过 --mailbox 指定具体邮箱地址（如 user@example.com）")
+		}
+	} else {
+		// User 身份
+		if mailbox == "" {
+			mailbox = "me"
+		}
+	}
+	return token, mailbox, nil
 }

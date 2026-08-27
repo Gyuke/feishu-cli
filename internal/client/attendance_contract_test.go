@@ -108,37 +108,36 @@ func TestAttendanceUserTask_Validation(t *testing.T) {
 	}
 }
 
-// TestAttendanceUserStats_Contract 验证考勤统计数据查询支持 User/Tenant Token 和 employee_no 自查
+// TestAttendanceUserStats_Contract 验证考勤统计数据查询（legacy 路径，Tenant Token，必填 user_ids）
 func TestAttendanceUserStats_Contract(t *testing.T) {
 	var gotQuery string
-	var gotAuthHeader string
 	var gotBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		gotAuthHeader = r.Header.Get("Authorization")
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &gotBody)
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"user_datas":[{"user_id":"u_self","name":"张三","datas":[{"code":"501","title":"出勤天数","value":"10"}]}]}}`)
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"user_datas":[{"user_id":"28470001","name":"张三","datas":[{"code":"501","title":"出勤天数","value":"10"}]}]}}`)
 	}))
 	defer srv.Close()
 	setupTestConfig(t, srv.URL)
 
-	res, err := QueryAttendanceUserStats("employee_no", "daily", 20260501, 20260518, []string{}, "", "zh", false, false, "u-user-token-456")
+	res, err := QueryAttendanceUserStats("employee_id", "daily", 20260501, 20260518, []string{"28470001"}, "", "zh", false, false)
 	if err != nil {
 		t.Fatalf("QueryAttendanceUserStats error: %v", err)
 	}
 
-	if !strings.Contains(gotQuery, "employee_type=employee_no") {
-		t.Errorf("query %s 应包含 employee_type=employee_no", gotQuery)
-	}
-	if gotAuthHeader != "Bearer u-user-token-456" {
-		t.Errorf("auth header = %s, want 'Bearer u-user-token-456'", gotAuthHeader)
+	if !strings.Contains(gotQuery, "employee_type=employee_id") {
+		t.Errorf("query %s 应包含 employee_type=employee_id", gotQuery)
 	}
 	if gotBody["stats_type"] != "daily" {
 		t.Errorf("body.stats_type = %v, want daily", gotBody["stats_type"])
+	}
+	userIDs, ok := gotBody["user_ids"].([]any)
+	if !ok || len(userIDs) != 1 || userIDs[0] != "28470001" {
+		t.Errorf("body.user_ids = %v, want ['28470001']", gotBody["user_ids"])
 	}
 	if len(res.UserDatas) != 1 {
 		t.Fatalf("user_datas count = %d, want 1", len(res.UserDatas))
