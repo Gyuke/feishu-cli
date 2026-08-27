@@ -367,6 +367,7 @@ func TestMailMessagesCmd_EmptySegmentsRejected(t *testing.T) {
 		_ = mailMessagesCmd.Flags().Set("as", "user")
 		_ = mailMessagesCmd.Flags().Set("mailbox", "me")
 		_ = mailMessagesCmd.Flags().Set("message-ids", csv)
+		_ = mailMessagesCmd.Flags().Set("format", "full")
 		_ = mailMessagesCmd.Flags().Set("user-access-token", "u-test-token")
 
 		err := mailMessagesCmd.RunE(mailMessagesCmd, []string{})
@@ -376,5 +377,59 @@ func TestMailMessagesCmd_EmptySegmentsRejected(t *testing.T) {
 		if networkCalled {
 			t.Errorf("输入 %q 时不应触发网络调用", csv)
 		}
+	}
+}
+
+// TestMailMessagesCmd_PreflightValidationZeroNetworkAndTokenRefresh 验证在配置了损坏/过期 token 的 auto 模式下，本地参数校验前置，非法输入零网络、零 token 写
+func TestMailMessagesCmd_PreflightValidationZeroNetworkAndTokenRefresh(t *testing.T) {
+	networkCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		networkCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
+	}))
+	defer srv.Close()
+	setupCmdTestConfig(t, srv.URL)
+
+	// 配置 corrupt profile 模拟损坏或过期 token
+	os.Setenv("FEISHU_PROFILE", "corrupt_profile_stale")
+	defer os.Unsetenv("FEISHU_PROFILE")
+
+	// 1. 空 segment 校验：应在本地报错，零网络
+	networkCalled = false
+	_ = mailMessagesCmd.Flags().Set("as", "auto")
+	_ = mailMessagesCmd.Flags().Set("mailbox", "me")
+	_ = mailMessagesCmd.Flags().Set("message-ids", "msg_1,,msg_2")
+	_ = mailMessagesCmd.Flags().Set("format", "full")
+	_ = mailMessagesCmd.Flags().Set("user-access-token", "")
+
+	err := mailMessagesCmd.RunE(mailMessagesCmd, []string{})
+	if err == nil {
+		t.Fatal("空 segment 必须报错")
+	}
+	if !strings.Contains(err.Error(), "包含空的邮件 ID") {
+		t.Errorf("error = %v, want 本地参数校验错误", err)
+	}
+	if networkCalled {
+		t.Error("非法 CSV 时不应发起任何网络调用或触发 token 刷新")
+	}
+
+	// 2. 非法 format 校验（如 format=raw 仅单封支持，批量不支持）：应在本地报错，零网络
+	networkCalled = false
+	_ = mailMessagesCmd.Flags().Set("as", "auto")
+	_ = mailMessagesCmd.Flags().Set("mailbox", "me")
+	_ = mailMessagesCmd.Flags().Set("message-ids", "msg_1,msg_2")
+	_ = mailMessagesCmd.Flags().Set("format", "raw")
+	_ = mailMessagesCmd.Flags().Set("user-access-token", "")
+
+	err = mailMessagesCmd.RunE(mailMessagesCmd, []string{})
+	if err == nil {
+		t.Fatal("非法 format 必须报错")
+	}
+	if !strings.Contains(err.Error(), "--format 仅支持 full|plain_text_full") {
+		t.Errorf("error = %v, want format 校验错误", err)
+	}
+	if networkCalled {
+		t.Error("非法 format 时不应发起任何网络调用或触发 token 刷新")
 	}
 }

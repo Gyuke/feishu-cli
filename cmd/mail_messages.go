@@ -52,16 +52,26 @@ var mailMessagesCmd = &cobra.Command{
 		if err := config.Validate(); err != nil {
 			return err
 		}
-		token, mailbox, err := resolveMailReadIdentity(cmd)
-		if err != nil {
-			return err
-		}
 
 		raw, _ := cmd.Flags().GetString("message-ids")
 		format, _ := cmd.Flags().GetString("format")
 		output, _ := cmd.Flags().GetString("output")
 
+		// 1. 本地参数校验前置（在身份解析与任何网络请求前执行）
 		ids, err := parseMailMessageIDs(raw)
+		if err != nil {
+			return err
+		}
+
+		if format == "" {
+			format = "full"
+		}
+		if format != "full" && format != "plain_text_full" {
+			return fmt.Errorf("--format 仅支持 full|plain_text_full，得到 %q", format)
+		}
+
+		// 2. 身份解析（仅在本地参数校验全绿后才执行，避免非法输入触发 token 刷新）
+		token, mailbox, err := resolveMailReadIdentity(cmd)
 		if err != nil {
 			return err
 		}

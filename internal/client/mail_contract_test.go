@@ -10,27 +10,40 @@ import (
 	"testing"
 )
 
-// TestMailSearch_QueryAndFilterContract 验证 search 的 page 参数放 query，filter 规范化
+// TestMailSearch_QueryAndFilterContract 验证 search 的 page 参数放 query，系统标签迁移到 folder，无额外列表请求
 func TestMailSearch_QueryAndFilterContract(t *testing.T) {
 	var gotMethod, gotPath, gotQuery string
 	var gotBody map[string]any
+	listFolderCalled := false
+	listLabelCalled := false
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		gotQuery = r.URL.RawQuery
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &gotBody)
-
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"msg_1"}],"has_more":false}}`)
+		switch r.URL.Path {
+		case "/open-apis/mail/v1/user_mailboxes/me/folders":
+			listFolderCalled = true
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[]}}`)
+		case "/open-apis/mail/v1/user_mailboxes/me/labels":
+			listLabelCalled = true
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[]}}`)
+		case "/open-apis/mail/v1/user_mailboxes/me/search":
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			gotQuery = r.URL.RawQuery
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &gotBody)
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"msg_1"}],"has_more":false}}`)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 	setupTestConfig(t, srv.URL)
 
+	// INBOX 属于系统 folder；IMPORTANT 属于系统 label（必须迁移到 filter.folder 值为 priority）
 	filter := map[string]any{
 		"folder_id":   "INBOX",
-		"label_id":    "LBL_WORK",
+		"label_id":    "IMPORTANT",
 		"only_unread": true,
 		"page_size":   15,
 		"page_token":  "pt_123",
@@ -42,6 +55,14 @@ func TestMailSearch_QueryAndFilterContract(t *testing.T) {
 	}
 	if len(res) == 0 {
 		t.Fatal("返回数据为空")
+	}
+
+	// 纯系统值应由本地解析，无需拉取 folders/labels 列表
+	if listFolderCalled {
+		t.Error("系统文件夹不应触发 ListMailFolders 请求")
+	}
+	if listLabelCalled {
+		t.Error("系统标签迁移不应触发 ListMailLabels 请求")
 	}
 
 	if gotMethod != http.MethodPost {
@@ -68,15 +89,21 @@ func TestMailSearch_QueryAndFilterContract(t *testing.T) {
 		t.Fatalf("body.filter 缺失或格式不正确: %v", gotBody)
 	}
 
-	// folder 应映射为官方系统名 []any{"inbox"}
+	// INBOX 和 IMPORTANT 都应在 folder 中（inbox 和 priority）
 	folders, ok := bodyFilter["folder"].([]any)
-	if !ok || len(folders) != 1 || folders[0] != "inbox" {
-		t.Errorf("filter.folder = %v, want ['inbox']", bodyFilter["folder"])
+	if !ok || len(folders) != 2 {
+		t.Fatalf("filter.folder = %v, want 2 items", bodyFilter["folder"])
 	}
-	// label 应为 []any{"LBL_WORK"}
-	labels, ok := bodyFilter["label"].([]any)
-	if !ok || len(labels) != 1 || labels[0] != "LBL_WORK" {
-		t.Errorf("filter.label = %v, want ['LBL_WORK']", bodyFilter["label"])
+	fSet := map[string]bool{}
+	for _, f := range folders {
+		fSet[fmt.Sprintf("%v", f)] = true
+	}
+	if !fSet["inbox"] || !fSet["priority"] {
+		t.Errorf("filter.folder = %v, want containing inbox and priority", bodyFilter["folder"])
+	}
+	// IMPORTANT 迁移到 folder 后，label 应被清除或不包含 priority
+	if _, exists := bodyFilter["label"]; exists {
+		t.Errorf("filter.label 应为空/被清除，got: %v", bodyFilter["label"])
 	}
 	// is_unread 应为 true
 	if isUnread, ok := bodyFilter["is_unread"].(bool); !ok || !isUnread {
@@ -342,18 +369,22 @@ func TestMailThread_PreserveBigIntGreaterThan2Pow53(t *testing.T) {
 	}
 }
 
-// TestMailSearch_FolderNameAndLabelNameMapping 验证 SearchMailMessages 对系统别名和自定义 ID 的映射
+// TestMailSearch_FolderNameAndLabelNameMapping 验证 SearchMailMessages 对系统别名和自定义 ID 的映射及单次拉取复用
 func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
 	var gotSearchBody map[string]any
 	var gotSearchQuery string
+	folderCallCount := 0
+	labelCallCount := 0
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/open-apis/mail/v1/user_mailboxes/me/folders":
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_custom_001","name":"自定义工作文件夹"}]}}`)
+			folderCallCount++
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_custom_001","name":"自定义工作文件夹"},{"id":"fld_custom_002","name":"归档旧项目"}]}}`)
 		case "/open-apis/mail/v1/user_mailboxes/me/labels":
-			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"lbl_custom_001","name":"紧急项目"}]}}`)
+			labelCallCount++
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"lbl_custom_001","name":"紧急项目"},{"id":"lbl_custom_002","name":"待跟进"}]}}`)
 		case "/open-apis/mail/v1/user_mailboxes/me/search":
 			gotSearchQuery = r.URL.RawQuery
 			raw, _ := io.ReadAll(r.Body)
@@ -366,7 +397,7 @@ func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
 	defer srv.Close()
 	setupTestConfig(t, srv.URL)
 
-	// 1. 系统别名映射测试：INBOX → inbox, IMPORTANT → priority
+	// 1. 系统别名映射测试：INBOX → inbox, IMPORTANT → priority（迁移至 folder）
 	filter1 := map[string]any{
 		"folder":    "INBOX",
 		"label":     "IMPORTANT",
@@ -380,29 +411,118 @@ func TestMailSearch_FolderNameAndLabelNameMapping(t *testing.T) {
 		t.Errorf("query 应包含 page_size=10, got: %s", gotSearchQuery)
 	}
 	f1, _ := gotSearchBody["filter"].(map[string]any)
-	if folders, ok := f1["folder"].([]any); !ok || len(folders) != 1 || folders[0] != "inbox" {
-		t.Errorf("INBOX 映射 = %v, want ['inbox']", f1["folder"])
+	if folders, ok := f1["folder"].([]any); !ok || len(folders) != 2 || folders[0] != "inbox" || folders[1] != "priority" {
+		t.Errorf("INBOX/IMPORTANT 映射 = %v, want ['inbox', 'priority']", f1["folder"])
 	}
-	if labels, ok := f1["label"].([]any); !ok || len(labels) != 1 || labels[0] != "priority" {
-		t.Errorf("IMPORTANT 映射 = %v, want ['priority']", f1["label"])
+	if _, exists := f1["label"]; exists {
+		t.Errorf("IMPORTANT 迁移后 label 应为空，got: %v", f1["label"])
 	}
 
-	// 2. 自定义 ID 解析测试：fld_custom_001 → 自定义工作文件夹, lbl_custom_001 → 紧急项目
+	// 2. 自定义 ID 解析与单次拉取复用测试：
+	// 数组包含 2 个自定义 folder ID 和 2 个自定义 label ID，验证 folders 和 labels 各只拉取 1 次
 	gotSearchBody = nil
+	folderCallCount = 0
+	labelCallCount = 0
 	filter2 := map[string]any{
-		"folder_id": "fld_custom_001",
-		"label_id":  "lbl_custom_001",
+		"folder": []string{"fld_custom_001", "fld_custom_002"},
+		"label":  []string{"lbl_custom_001", "lbl_custom_002"},
 	}
 	_, err = SearchMailMessages("me", "test2", filter2, "u-test-token")
 	if err != nil {
 		t.Fatalf("SearchMailMessages error: %v", err)
 	}
-	f2, _ := gotSearchBody["filter"].(map[string]any)
-	if folders, ok := f2["folder"].([]any); !ok || len(folders) != 1 || folders[0] != "自定义工作文件夹" {
-		t.Errorf("fld_custom_001 映射 = %v, want ['自定义工作文件夹']", f2["folder"])
+	if folderCallCount != 1 {
+		t.Errorf("一次 search 中多 folder ID 解析只应调用 1 次 ListMailFolders，实际调用了 %d 次", folderCallCount)
 	}
-	if labels, ok := f2["label"].([]any); !ok || len(labels) != 1 || labels[0] != "紧急项目" {
-		t.Errorf("lbl_custom_001 映射 = %v, want ['紧急项目']", f2["label"])
+	if labelCallCount != 1 {
+		t.Errorf("一次 search 中多 label ID 解析只应调用 1 次 ListMailLabels，实际调用了 %d 次", labelCallCount)
+	}
+	f2, _ := gotSearchBody["filter"].(map[string]any)
+	if folders, ok := f2["folder"].([]any); !ok || len(folders) != 2 || folders[0] != "自定义工作文件夹" || folders[1] != "归档旧项目" {
+		t.Errorf("custom folders 映射 = %v, want ['自定义工作文件夹', '归档旧项目']", f2["folder"])
+	}
+	if labels, ok := f2["label"].([]any); !ok || len(labels) != 2 || labels[0] != "紧急项目" || labels[1] != "待跟进" {
+		t.Errorf("custom labels 映射 = %v, want ['紧急项目', '待跟进']", f2["label"])
+	}
+}
+
+// TestMailSearch_FailClosedOnErrors 验证未找到 ID、损坏响应、同名歧义和接口错误均 fail-closed 且不发起 POST /search
+func TestMailSearch_FailClosedOnErrors(t *testing.T) {
+	searchCalled := false
+	handlerMode := "not_found"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/open-apis/mail/v1/user_mailboxes/me/folders":
+			switch handlerMode {
+			case "not_found":
+				_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_1","name":"Folder1"}]}}`)
+			case "corrupt":
+				_, _ = io.WriteString(w, `invalid_json_corrupt{`)
+			case "ambiguous":
+				_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[{"id":"fld_1","name":"DupName"},{"id":"fld_2","name":"DupName"}]}}`)
+			case "api_error":
+				_, _ = io.WriteString(w, `{"code":99991663,"msg":"permission denied","data":{}}`)
+			}
+		case "/open-apis/mail/v1/user_mailboxes/me/search":
+			searchCalled = true
+			_, _ = io.WriteString(w, `{"code":0,"msg":"ok","data":{"items":[]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	setupTestConfig(t, srv.URL)
+
+	// 1. 未找到自定义 ID：fail-closed
+	searchCalled = false
+	handlerMode = "not_found"
+	_, err := SearchMailMessages("me", "q", map[string]any{"folder": "not_exist_fld_id"}, "u-test-token")
+	if err == nil {
+		t.Fatal("未找到自定义 ID 应返回错误")
+	}
+	if !strings.Contains(err.Error(), "未找到文件夹") {
+		t.Errorf("error = %v, want mentioning 未找到文件夹", err)
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
+	}
+
+	// 2. 损坏响应：fail-closed
+	searchCalled = false
+	handlerMode = "corrupt"
+	_, err = SearchMailMessages("me", "q", map[string]any{"folder": "fld_xyz"}, "u-test-token")
+	if err == nil {
+		t.Fatal("损坏响应应返回错误")
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
+	}
+
+	// 3. 名称歧义（传了重复的自定义名称）：fail-closed
+	searchCalled = false
+	handlerMode = "ambiguous"
+	_, err = SearchMailMessages("me", "q", map[string]any{"folder": "DupName"}, "u-test-token")
+	if err == nil {
+		t.Fatal("名称歧义应返回错误")
+	}
+	if !strings.Contains(err.Error(), "歧义") {
+		t.Errorf("error = %v, want mentioning 歧义", err)
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
+	}
+
+	// 4. List API 业务错误：fail-closed
+	searchCalled = false
+	handlerMode = "api_error"
+	_, err = SearchMailMessages("me", "q", map[string]any{"folder": "fld_xyz"}, "u-test-token")
+	if err == nil {
+		t.Fatal("List API 业务错误应返回错误")
+	}
+	if searchCalled {
+		t.Error("解析失败时不得继续发起 POST /search 请求")
 	}
 }
 

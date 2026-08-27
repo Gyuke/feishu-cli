@@ -429,108 +429,209 @@ func extractMailDraftID(data json.RawMessage) string {
 
 // ==================== 文件夹和标签 ====================
 
-var systemMailFolderNames = map[string]string{
-	"inbox":     "inbox",
-	"sent":      "sent",
-	"draft":     "draft",
-	"drafts":    "draft",
-	"trash":     "trash",
-	"spam":      "spam",
-	"archive":   "archive",
-	"archived":  "archive",
-	"priority":  "priority",
-	"important": "priority",
-	"flagged":   "flagged",
-	"other":     "other",
-	"scheduled": "scheduled",
+type mailNamedItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-var systemMailLabelNames = map[string]string{
-	"important": "priority",
-	"priority":  "priority",
-	"flagged":   "flagged",
-	"other":     "other",
-	"scheduled": "scheduled",
+// checkSystemFolder 检查是否为系统文件夹别名（全部在 search 中作为 filter.folder）
+func checkSystemFolder(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "inbox":
+		return "inbox", true
+	case "sent":
+		return "sent", true
+	case "draft", "drafts":
+		return "draft", true
+	case "trash":
+		return "trash", true
+	case "spam":
+		return "spam", true
+	case "archive", "archived":
+		return "archive", true
+	case "scheduled":
+		return "scheduled", true
+	default:
+		return "", false
+	}
 }
 
-func mapSearchFolderName(mailboxID, folder string, userAccessToken string) string {
-	folder = strings.TrimSpace(folder)
-	if folder == "" {
-		return ""
+// checkSystemLabelMigrateToFolder 检查是否为必须迁移到 filter.folder 的系统标签（priority/flagged/other）
+func checkSystemLabelMigrateToFolder(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "important", "priority":
+		return "priority", true
+	case "flagged":
+		return "flagged", true
+	case "other":
+		return "other", true
+	default:
+		return "", false
 	}
-	lower := strings.ToLower(folder)
-	if mapped, ok := systemMailFolderNames[lower]; ok {
-		return mapped
-	}
-	// 尝试作为自定义 folder_id 查询解析
-	raw, err := ListMailFolders(mailboxID, userAccessToken)
-	if err == nil {
-		var resp struct {
-			Items []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"items"`
-			Folders []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"folders"`
+}
+
+func parseFilterStrings(v any) []string {
+	var out []string
+	switch val := v.(type) {
+	case string:
+		if s := strings.TrimSpace(val); s != "" {
+			out = append(out, s)
 		}
-		if err := json.Unmarshal(raw, &resp); err == nil {
-			all := append(resp.Items, resp.Folders...)
-			for _, item := range all {
-				if item.ID == folder && item.Name != "" {
-					return item.Name
-				}
+	case []string:
+		for _, s := range val {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	case []any:
+		for _, item := range val {
+			if s := strings.TrimSpace(fmt.Sprintf("%v", item)); s != "" {
+				out = append(out, s)
 			}
 		}
 	}
-	return folder
+	return out
 }
 
-func mapSearchLabelName(mailboxID, label string, userAccessToken string) string {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		return ""
+func resolveCustomFolderName(mailboxID, input string, userAccessToken string, cachedFolders *[]mailNamedItem) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", nil
 	}
-	lower := strings.ToLower(label)
-	if mapped, ok := systemMailLabelNames[lower]; ok {
-		return mapped
+	// 1. 系统值本地直查
+	if mapped, ok := checkSystemFolder(input); ok {
+		return mapped, nil
 	}
-	// 尝试作为自定义 label_id 查询解析
-	raw, err := ListMailLabels(mailboxID, userAccessToken)
-	if err == nil {
+	if mapped, ok := checkSystemLabelMigrateToFolder(input); ok {
+		return mapped, nil
+	}
+
+	// 2. 自定义值：延迟拉取一次 folders 列表
+	if cachedFolders == nil || *cachedFolders == nil {
+		raw, err := ListMailFolders(mailboxID, userAccessToken)
+		if err != nil {
+			return "", fmt.Errorf("查询文件夹列表失败: %w", err)
+		}
 		var resp struct {
-			Items []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"items"`
-			Labels []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"labels"`
+			Items   []mailNamedItem `json:"items"`
+			Folders []mailNamedItem `json:"folders"`
 		}
-		if err := json.Unmarshal(raw, &resp); err == nil {
-			all := append(resp.Items, resp.Labels...)
-			for _, item := range all {
-				if item.ID == label && item.Name != "" {
-					return item.Name
-				}
-			}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return "", fmt.Errorf("解析文件夹列表失败: %w", err)
+		}
+		all := append(resp.Items, resp.Folders...)
+		if cachedFolders != nil {
+			*cachedFolders = all
 		}
 	}
-	return label
+
+	items := []mailNamedItem{}
+	if cachedFolders != nil && *cachedFolders != nil {
+		items = *cachedFolders
+	}
+
+	// exact ID 优先
+	for _, item := range items {
+		if item.ID == input && item.Name != "" {
+			return item.Name, nil
+		}
+	}
+
+	// exact Name 次之（防同名歧义）
+	var matchedNames []string
+	for _, item := range items {
+		if item.Name == input {
+			matchedNames = append(matchedNames, item.Name)
+		}
+	}
+	if len(matchedNames) == 1 {
+		return matchedNames[0], nil
+	}
+	if len(matchedNames) > 1 {
+		return "", fmt.Errorf("文件夹名称 %q 存在多个匹配项（名称歧义），请使用明确的文件夹 ID", input)
+	}
+
+	return "", fmt.Errorf("未找到文件夹 %q（既非系统文件夹，也非有效自定义文件夹 ID 或名称）", input)
+}
+
+func resolveCustomLabelName(mailboxID, input string, userAccessToken string, cachedLabels *[]mailNamedItem) (string, bool, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", false, nil
+	}
+	// 1. 系统 label 本地直查（需迁移到 folder）
+	if mapped, ok := checkSystemLabelMigrateToFolder(input); ok {
+		return mapped, true, nil // isFolderMigrated = true
+	}
+	if mapped, ok := checkSystemFolder(input); ok {
+		return mapped, true, nil
+	}
+
+	// 2. 自定义 label：延迟拉取一次 labels 列表
+	if cachedLabels == nil || *cachedLabels == nil {
+		raw, err := ListMailLabels(mailboxID, userAccessToken)
+		if err != nil {
+			return "", false, fmt.Errorf("查询标签列表失败: %w", err)
+		}
+		var resp struct {
+			Items  []mailNamedItem `json:"items"`
+			Labels []mailNamedItem `json:"labels"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return "", false, fmt.Errorf("解析标签列表失败: %w", err)
+		}
+		all := append(resp.Items, resp.Labels...)
+		if cachedLabels != nil {
+			*cachedLabels = all
+		}
+	}
+
+	items := []mailNamedItem{}
+	if cachedLabels != nil && *cachedLabels != nil {
+		items = *cachedLabels
+	}
+
+	// exact ID 优先
+	for _, item := range items {
+		if item.ID == input && item.Name != "" {
+			return item.Name, false, nil
+		}
+	}
+
+	// exact Name 次之
+	var matchedNames []string
+	for _, item := range items {
+		if item.Name == input {
+			matchedNames = append(matchedNames, item.Name)
+		}
+	}
+	if len(matchedNames) == 1 {
+		return matchedNames[0], false, nil
+	}
+	if len(matchedNames) > 1 {
+		return "", false, fmt.Errorf("标签名称 %q 存在多个匹配项（名称歧义），请使用明确的标签 ID", input)
+	}
+
+	return "", false, fmt.Errorf("未找到标签 %q（既非系统标签，也非有效自定义标签 ID 或名称）", input)
 }
 
 // SearchMailMessages 通过专用 search 端点搜索邮件
 // API: POST /open-apis/mail/v1/user_mailboxes/{mailbox_id}/search?page_size=xx&page_token=yy
 // body: {"query": "关键词", "filter": {"folder": ["inbox"], "label": ["xxx"], "is_unread": true}}
-// 用于 mail triage --query 的真实搜索（支持系统别名及自定义 ID→名称 解析）
+// 用于 mail triage --query 的真实搜索（支持系统别名、系统 label 迁移到 folder 以及自定义 ID→名称 解析，且 fail-closed）
 func SearchMailMessages(mailboxID, query string, filter map[string]any, userAccessToken string) (json.RawMessage, error) {
 	if mailboxID == "" {
 		mailboxID = "me"
 	}
 	q := url.Values{}
 	normalizedFilter := make(map[string]any)
+
+	var cachedFolders []mailNamedItem
+	var cachedLabels []mailNamedItem
+
+	var finalFolders []string
+	var finalLabels []string
+
 	for k, v := range filter {
 		switch k {
 		case "page_size":
@@ -540,46 +641,30 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 				q.Set("page_token", s)
 			}
 		case "folder", "folder_id":
-			switch val := v.(type) {
-			case string:
-				if val != "" {
-					normalizedFilter["folder"] = []string{mapSearchFolderName(mailboxID, val, userAccessToken)}
+			rawList := parseFilterStrings(v)
+			for _, item := range rawList {
+				resolved, err := resolveCustomFolderName(mailboxID, item, userAccessToken, &cachedFolders)
+				if err != nil {
+					return nil, err
 				}
-			case []string:
-				mapped := make([]string, 0, len(val))
-				for _, item := range val {
-					mapped = append(mapped, mapSearchFolderName(mailboxID, item, userAccessToken))
+				if resolved != "" {
+					finalFolders = append(finalFolders, resolved)
 				}
-				normalizedFilter["folder"] = mapped
-			case []any:
-				var arr []string
-				for _, item := range val {
-					arr = append(arr, mapSearchFolderName(mailboxID, fmt.Sprintf("%v", item), userAccessToken))
-				}
-				normalizedFilter["folder"] = arr
-			default:
-				normalizedFilter["folder"] = v
 			}
 		case "label", "label_id":
-			switch val := v.(type) {
-			case string:
-				if val != "" {
-					normalizedFilter["label"] = []string{mapSearchLabelName(mailboxID, val, userAccessToken)}
+			rawList := parseFilterStrings(v)
+			for _, item := range rawList {
+				resolved, isMigratedToFolder, err := resolveCustomLabelName(mailboxID, item, userAccessToken, &cachedLabels)
+				if err != nil {
+					return nil, err
 				}
-			case []string:
-				mapped := make([]string, 0, len(val))
-				for _, item := range val {
-					mapped = append(mapped, mapSearchLabelName(mailboxID, item, userAccessToken))
+				if resolved != "" {
+					if isMigratedToFolder {
+						finalFolders = append(finalFolders, resolved)
+					} else {
+						finalLabels = append(finalLabels, resolved)
+					}
 				}
-				normalizedFilter["label"] = mapped
-			case []any:
-				var arr []string
-				for _, item := range val {
-					arr = append(arr, mapSearchLabelName(mailboxID, fmt.Sprintf("%v", item), userAccessToken))
-				}
-				normalizedFilter["label"] = arr
-			default:
-				normalizedFilter["label"] = v
 			}
 		case "only_unread", "is_unread":
 			if b, ok := v.(bool); ok {
@@ -591,6 +676,14 @@ func SearchMailMessages(mailboxID, query string, filter map[string]any, userAcce
 			normalizedFilter[k] = v
 		}
 	}
+
+	if len(finalFolders) > 0 {
+		normalizedFilter["folder"] = finalFolders
+	}
+	if len(finalLabels) > 0 {
+		normalizedFilter["label"] = finalLabels
+	}
+
 	body := map[string]any{"query": query}
 	if len(normalizedFilter) > 0 {
 		body["filter"] = normalizedFilter
