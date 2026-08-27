@@ -1,11 +1,11 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"os"
 	"strings"
 
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -31,13 +31,28 @@ var authTokenCmd = &cobra.Command{
   feishu-cli auth token --as bot
 
   # 默认 auto（user 优先回退 bot）
-  feishu-cli auth token`,
+  feishu-cli auth token
+
+  # 把旧版未绑定 app_id 的 token.json 显式绑定到当前应用（不更换 token）
+  feishu-cli auth token --bind-legacy-app --as user`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := config.Validate(); err != nil {
 			return err
 		}
 		as, _ := cmd.Flags().GetString("as")
 		as = strings.ToLower(strings.TrimSpace(as))
+		flagUserToken, _ := cmd.Flags().GetString("user-access-token")
+		if flagUserToken != "" && (as == "bot" || as == "tenant" || as == "app") {
+			return fmt.Errorf("不能同时使用 --as bot 与 --user-access-token：前者要求 App/Tenant 身份，后者是显式 User Token。请去掉其中一个")
+		}
+
+		if bindLegacy, _ := cmd.Flags().GetBool("bind-legacy-app"); bindLegacy {
+			cfg := config.Get()
+			if err := auth.BindLegacyToken(cfg.AppID); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "已将 token.json 绑定到当前应用 %s（未更换 token）\n", cfg.AppID)
+		}
 
 		switch as {
 		case "user":
@@ -74,55 +89,19 @@ var authTokenCmd = &cobra.Command{
 	},
 }
 
-// fetchTenantAccessToken 用 App ID + App Secret 换 tenant_access_token
-// 端点: POST /open-apis/auth/v3/tenant_access_token/internal
+// fetchTenantAccessToken 用 App ID + App Secret 换 tenant access token。
+// 端点: POST {accounts}/oauth/v3/token ，grant_type=client_credentials。
 func fetchTenantAccessToken() (string, error) {
 	cfg := config.Get()
 	if cfg.AppID == "" || cfg.AppSecret == "" {
 		return "", fmt.Errorf("缺少 app_id 或 app_secret 配置")
 	}
-	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
-	}
-
-	reqBody, _ := json.Marshal(map[string]string{
-		"app_id":     cfg.AppID,
-		"app_secret": cfg.AppSecret,
-	})
-	url := baseURL + "/open-apis/auth/v3/tenant_access_token/internal"
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(reqBody)))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("请求 tenant_access_token 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var body struct {
-		Code              int    `json:"code"`
-		Msg               string `json:"msg"`
-		TenantAccessToken string `json:"tenant_access_token"`
-		Expire            int    `json:"expire"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", fmt.Errorf("解析 tenant_access_token 响应失败: %w", err)
-	}
-	if body.Code != 0 {
-		return "", fmt.Errorf("获取 tenant_access_token 失败: code=%d msg=%s", body.Code, body.Msg)
-	}
-	if body.TenantAccessToken == "" {
-		return "", fmt.Errorf("飞书未返回 tenant_access_token")
-	}
-	return body.TenantAccessToken, nil
+	return auth.FetchTenantAccessToken(cfg.AppID, cfg.AppSecret, cfg.BaseURL)
 }
 
 func init() {
 	authCmd.AddCommand(authTokenCmd)
 	authTokenCmd.Flags().String("as", "auto", "身份: user | bot | auto")
-	authTokenCmd.Flags().String("user-access-token", "", "显式传入 User Token（覆盖 --as）")
+	authTokenCmd.Flags().String("user-access-token", "", "显式传入 User Token（不可与 --as bot 同时使用）")
+	authTokenCmd.Flags().Bool("bind-legacy-app", false, "将未绑定 app_id 的 token.json 绑定到当前应用（不更换 token）")
 }

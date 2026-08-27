@@ -210,6 +210,7 @@ func TestRefreshIfStaleLocalToken_Success(t *testing.T) {
 		ExpiresAt:        time.Now().Add(-1 * time.Hour),
 		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
 		Scope:            "old:scope",
+		AppID:            "aid",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)
@@ -252,6 +253,7 @@ func TestRefreshIfStaleLocalToken_RefreshEndpointFails(t *testing.T) {
 		RefreshToken:     "valid-refresh",
 		ExpiresAt:        time.Now().Add(-1 * time.Hour),
 		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		AppID:            "aid",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)
@@ -343,6 +345,7 @@ func TestForceRefreshLocalToken_Success(t *testing.T) {
 		ExpiresAt:        time.Now().Add(1 * time.Hour),
 		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
 		Scope:            "scope",
+		AppID:            "aid",
 	}
 	if err := SaveToken(store); err != nil {
 		t.Fatalf("SaveToken error: %v", err)

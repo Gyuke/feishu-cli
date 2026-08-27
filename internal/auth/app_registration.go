@@ -9,11 +9,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/riba2534/feishu-cli/internal/config"
 )
 
 const (
-	feishuAccountsBase = "https://accounts.feishu.cn"
-	feishuOpenBase     = "https://open.feishu.cn"
+	feishuAccountsBase = config.OfficialFeishuAccounts
+	feishuOpenBase     = config.OfficialFeishuOpen
 	appRegPath         = "/oauth/v1/app/registration"
 
 	maxRegPollInterval = 60
@@ -61,7 +63,7 @@ func RequestAppRegistration(baseURL string) (*AppRegistrationResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := config.NewHTTPClient(15 * time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
@@ -118,7 +120,7 @@ func PollAppRegistration(ctx context.Context, baseURL, deviceCode string, interv
 	}
 	startTime := time.Now()
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := config.NewHTTPClient(15 * time.Second)
 	attempts := 0
 
 	for time.Now().Before(deadline) && attempts < maxRegPollAttempts {

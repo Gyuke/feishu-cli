@@ -8,14 +8,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/riba2534/feishu-cli/internal/config"
 )
 
 // accountsBaseFor 按 baseURL 选择 OAuth accounts 域（吊销 / 设备流端点所在域）。
 func accountsBaseFor(baseURL string) string {
-	if strings.Contains(baseURL, "larksuite.com") {
-		return "https://accounts.larksuite.com"
-	}
-	return feishuAccountsBase
+	return config.ResolveAccountsBase(baseURL)
 }
 
 // revokeEndpointFunc 解析吊销端点 URL，可在测试中替换指向 httptest server。
@@ -50,7 +49,7 @@ func RevokeToken(appID, appSecret, baseURL, token, tokenTypeHint string) error {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient := config.NewHTTPClient(10 * time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("请求吊销端点失败: %w", err)

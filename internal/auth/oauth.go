@@ -8,7 +8,12 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/riba2534/feishu-cli/internal/config"
 )
+
+const maxAuthResponseBytes = 1 << 20
+const authHTTPTimeout = 10 * time.Second
 
 // tokenResponse 飞书 token 端点响应
 type tokenResponse struct {
@@ -35,8 +40,9 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 	if oldStore == nil || oldStore.RefreshToken == "" {
 		return nil, fmt.Errorf("缺少 refresh_token，无法刷新")
 	}
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
+	baseURL = config.ResolveOpenBase(baseURL)
+	if err := config.CheckBaseURL(baseURL); err != nil {
+		return nil, err
 	}
 	tokenURL := baseURL + "/open-apis/authen/v2/oauth/token"
 
@@ -52,20 +58,20 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient := config.NewHTTPClient(authHTTPTimeout)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求 token 端点失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAuthResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token 端点返回 HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("token 端点返回 HTTP %d: %s", resp.StatusCode, truncateAuthBody(respBody))
 	}
 
 	var tokenResp tokenResponse
@@ -99,6 +105,10 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 		ExpiresAt:        now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 		RefreshExpiresAt: oldStore.RefreshExpiresAt,
 		Scope:            scope,
+		AppID:            oldStore.AppID,
+	}
+	if newStore.AppID == "" {
+		newStore.AppID = appID
 	}
 	// refresh_token_expires_in > 0 才更新过期时间，否则保留原值
 	if tokenResp.RefreshExpiresIn > 0 {
@@ -106,4 +116,13 @@ func RefreshAccessToken(oldStore *TokenStore, appID, appSecret, baseURL string) 
 	}
 
 	return newStore, nil
+}
+
+func truncateAuthBody(body []byte) string {
+	const max = 200
+	s := strings.TrimSpace(string(body))
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }

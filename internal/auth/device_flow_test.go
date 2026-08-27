@@ -32,9 +32,9 @@ func TestResolveDeviceAuthURL(t *testing.T) {
 			want:    larkDeviceAuthURL,
 		},
 		{
-			name:    "自定义域名：open.X → accounts.X",
+			name:    "未 opt-in 的自定义 open.X 不得把凭证送到 accounts.X",
 			baseURL: "https://open.example.com",
-			want:    "https://accounts.example.com/oauth/v1/device_authorization",
+			want:    feishuDeviceAuthURL,
 		},
 		{
 			name:    "非 open. 前缀回退到飞书默认",
@@ -51,6 +51,15 @@ func TestResolveDeviceAuthURL(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("opt-in 后 open.X 映射 accounts.X", func(t *testing.T) {
+		t.Setenv("FEISHU_ALLOW_CUSTOM_BASE_URL", "1")
+		got := resolveDeviceAuthURL("https://open.example.com")
+		want := "https://accounts.example.com/oauth/v1/device_authorization"
+		if got != want {
+			t.Errorf("got %q want %q", got, want)
+		}
+	})
 }
 
 // TestRequestDeviceAuthorization_Success 测试设备授权请求成功路径
@@ -183,6 +192,9 @@ func TestPollDeviceToken_Success(t *testing.T) {
 		}
 		if token.Scope != "offline_access" {
 			t.Errorf("Scope = %q, want %q", token.Scope, "offline_access")
+		}
+		if token.AppID != "test_app_id" {
+			t.Errorf("AppID = %q, want test_app_id", token.AppID)
 		}
 		expectedExpiry := time.Now().Add(7200 * time.Second)
 		if token.ExpiresAt.Before(expectedExpiry.Add(-5*time.Second)) ||

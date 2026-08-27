@@ -9,11 +9,14 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/riba2534/feishu-cli/internal/config"
 )
 
 const (
-	feishuDeviceAuthURL = "https://accounts.feishu.cn/oauth/v1/device_authorization"
-	larkDeviceAuthURL   = "https://accounts.larksuite.com/oauth/v1/device_authorization"
+	deviceAuthPath      = "/oauth/v1/device_authorization"
+	feishuDeviceAuthURL = config.OfficialFeishuAccounts + deviceAuthPath
+	larkDeviceAuthURL   = config.OfficialLarkAccounts + deviceAuthPath
 
 	maxPollInterval = 60  // slow_down 最大间隔（秒）
 	maxPollAttempts = 200 // 安全上限，远超设备码有效期
@@ -34,23 +37,7 @@ type DeviceAuthResponse struct {
 // baseURL 为 open API 基础地址（如 https://open.feishu.cn），
 // 设备授权端点在 accounts.feishu.cn，按 open.X → accounts.X 规则推导。
 func resolveDeviceAuthURL(baseURL string) string {
-	if baseURL == "" || baseURL == "https://open.feishu.cn" {
-		return feishuDeviceAuthURL
-	}
-	if strings.Contains(baseURL, "larksuite.com") {
-		return larkDeviceAuthURL
-	}
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return feishuDeviceAuthURL
-	}
-	host := u.Hostname()
-	if strings.HasPrefix(host, "open.") {
-		u.Host = "accounts." + strings.TrimPrefix(host, "open.")
-		u.Path = "/oauth/v1/device_authorization"
-		return u.String()
-	}
-	return feishuDeviceAuthURL
+	return strings.TrimRight(config.ResolveAccountsBase(baseURL), "/") + deviceAuthPath
 }
 
 // RequestDeviceAuthorization 向飞书设备授权端点发起请求（RFC 8628 步骤一）
@@ -86,7 +73,7 @@ func RequestDeviceAuthorization(appID, appSecret, baseURL, scope string) (*Devic
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := config.NewHTTPClient(15 * time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("设备授权请求失败: %w", err)
@@ -144,8 +131,9 @@ func RequestDeviceAuthorization(appID, appSecret, baseURL, scope string) (*Devic
 // onTick 在每轮等待前被调用（已等待秒数、总有效期秒数），可为 nil。
 // 正确处理 authorization_pending / slow_down / access_denied / expired_token。
 func PollDeviceToken(appID, appSecret, baseURL, deviceCode string, interval, expiresIn int, onTick func(elapsed, total int)) (*TokenStore, error) {
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
+	baseURL = config.ResolveOpenBase(baseURL)
+	if err := config.CheckBaseURL(baseURL); err != nil {
+		return nil, err
 	}
 	tokenURL := baseURL + "/open-apis/authen/v2/oauth/token"
 
@@ -156,7 +144,7 @@ func PollDeviceToken(appID, appSecret, baseURL, deviceCode string, interval, exp
 		currentInterval = 5
 	}
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := config.NewHTTPClient(15 * time.Second)
 	attempts := 0
 
 	for time.Now().Before(deadline) && attempts < maxPollAttempts {
@@ -228,6 +216,7 @@ func PollDeviceToken(appID, appSecret, baseURL, deviceCode string, interval, exp
 					TokenType:    tokenType,
 					ExpiresAt:    now.Add(time.Duration(tokenExpiresIn) * time.Second),
 					Scope:        scope,
+					AppID:        appID,
 				}
 				if refreshExpiresIn > 0 {
 					store.RefreshExpiresAt = now.Add(time.Duration(refreshExpiresIn) * time.Second)

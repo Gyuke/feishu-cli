@@ -76,27 +76,25 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 		return "", fmt.Errorf("读取本地 token 文件失败: %w", err)
 	}
 	if token != nil {
+		if err := token.CheckAppMismatch(appID); err != nil {
+			return "", err
+		}
 		if token.IsAccessTokenValid() {
 			return token.AccessToken, nil
 		}
 
-		// access_token 过期，尝试刷新
+		// access_token 过期，尝试刷新（跨进程锁：reload → check → refresh → commit）
 		if token.IsRefreshTokenValid() {
-			if baseURL == "" {
-				baseURL = "https://open.feishu.cn"
+			if err := token.RequireBoundApp(appID); err != nil {
+				return "", err
 			}
 			logf("[自动刷新] Access Token 已过期，正在刷新...")
-			newToken, refreshErr := RefreshAccessToken(token, appID, appSecret, baseURL)
+			newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
 			if refreshErr != nil {
 				logf("[自动刷新] 刷新失败: %v", refreshErr)
 				return "", fmt.Errorf("自动刷新 Access Token 失败: %w", refreshErr)
 			}
-			if saveErr := SaveToken(newToken); saveErr != nil {
-				logf("[自动刷新] Token 已刷新但保存失败: %v", saveErr)
-			} else {
-				logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
-			}
-			// 无论保存是否成功，刷新后的 token 都可以使用
+			logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
 			return newToken.AccessToken, nil
 		}
 		tokenFileExpired = true // token.json 存在但所有 token 都过期了
@@ -131,6 +129,9 @@ func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (
 	if local.AccessToken != explicitToken {
 		return "", false
 	}
+	if err := local.CheckAppMismatch(appID); err != nil {
+		return "", false
+	}
 	// 已经有效，不需要刷新
 	if local.IsAccessTokenValid() {
 		return "", false
@@ -139,20 +140,17 @@ func refreshIfStaleLocalToken(explicitToken, appID, appSecret, baseURL string) (
 	if !local.IsRefreshTokenValid() {
 		return "", false
 	}
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
+	if err := local.RequireBoundApp(appID); err != nil {
+		logf("[自动刷新] %v", err)
+		return "", false
 	}
 	logf("[自动刷新] 显式传入的 access_token 已过期且匹配本地 token.json，正在刷新...")
-	newToken, refreshErr := RefreshAccessToken(local, appID, appSecret, baseURL)
+	newToken, refreshErr := refreshLocalTokenLocked(appID, appSecret, baseURL, false)
 	if refreshErr != nil {
 		logf("[自动刷新] 刷新失败: %v", refreshErr)
 		return "", false
 	}
-	if saveErr := SaveToken(newToken); saveErr != nil {
-		logf("[自动刷新] Token 已刷新但保存失败: %v", saveErr)
-	} else {
-		logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
-	}
+	logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
 	return newToken.AccessToken, true
 }
 
@@ -175,15 +173,59 @@ func ForceRefreshLocalToken(appID, appSecret, baseURL string) (*TokenStore, erro
 		return nil, fmt.Errorf("refresh_token 已过期（%s），请重新 `feishu-cli auth login`",
 			local.RefreshExpiresAt.Format("2006-01-02 15:04:05"))
 	}
-	if baseURL == "" {
-		baseURL = "https://open.feishu.cn"
+	if err := local.RequireBoundApp(appID); err != nil {
+		return nil, err
 	}
-	newToken, err := RefreshAccessToken(local, appID, appSecret, baseURL)
+	return refreshLocalTokenLocked(appID, appSecret, baseURL, true)
+}
+
+// refreshLocalTokenLocked 在跨进程锁下 reload→check→refresh→commit。
+// 写失败时保留旧 token 文件。force 为 true 时即使 access 仍有效也刷新。
+func refreshLocalTokenLocked(appID, appSecret, baseURL string, force bool) (*TokenStore, error) {
+	path, err := TokenPath()
 	if err != nil {
 		return nil, err
 	}
-	if err := SaveToken(newToken); err != nil {
-		return nil, fmt.Errorf("刷新成功但写入 token.json 失败: %w", err)
+	var result *TokenStore
+	err = withTokenFileLock(path, func() error {
+		current, err := LoadTokenFrom(path)
+		if err != nil {
+			return err
+		}
+		if current == nil {
+			return fmt.Errorf("未登录（token.json 不存在），请先 `feishu-cli auth login`")
+		}
+		if err := current.RequireBoundApp(appID); err != nil {
+			return err
+		}
+		if !force && current.IsAccessTokenValid() {
+			result = current
+			return nil
+		}
+		if !current.IsRefreshTokenValid() {
+			return fmt.Errorf("refresh_token 已过期，请重新 `feishu-cli auth login`")
+		}
+		snapshotRefresh := current.RefreshToken
+		fresh, refreshErr := RefreshAccessToken(current, appID, appSecret, baseURL)
+		if refreshErr != nil {
+			// 可能已被另一进程消耗同一 refresh_token；reload 后若已是新一代则直接采用。
+			reloaded, loadErr := LoadTokenFrom(path)
+			if loadErr == nil && reloaded != nil && reloaded.RefreshToken != snapshotRefresh && reloaded.IsAccessTokenValid() {
+				if bindErr := reloaded.CheckAppMismatch(appID); bindErr == nil {
+					result = reloaded
+					return nil
+				}
+			}
+			return refreshErr
+		}
+		if err := writeTokenUnlocked(path, fresh); err != nil {
+			return fmt.Errorf("刷新成功但写入 token.json 失败（原文件未改动）: %w", err)
+		}
+		result = fresh
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return newToken, nil
+	return result, nil
 }
