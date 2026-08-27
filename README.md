@@ -1354,7 +1354,6 @@ feishu-cli 涵盖文档、知识库、电子表格、多维表格、消息、群
       "aily:table:read",
       "app_engine:application.event_subscriber:read",
       "approval:approval:read",
-      "approval:approval:readonly",
       "approval:instance:read",
       "approval:instance:write",
       "approval:task:read",
