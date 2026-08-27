@@ -169,7 +169,7 @@ feishu-cli search messages "关键词" [选项]
 | `--user-id-type` | string | 用户 ID 类型：`open_id`（默认）/`union_id`/`user_id` |
 | `-o json` | string | JSON 格式输出（等价 `--format json`） |
 
-> **`--page-all` 截断无提示**：仅非翻页模式（`!--page-all` 且 `HasMore=true`）会打印"还有更多结果"。当 `--page-all` 因达到 `--page-limit` 提前停止（而非真正耗尽）时，CLI **不会**提示结果被截断——需要拉全量时把 `--page-limit` 设为 `0`，或结合 JSON 输出的 `HasMore` 自行判断。
+> **`--page-all` 上限 40 页**：`--page-limit` 范围 1–40；`0` 在 `--page-all` 时等于 40（不是无限）。负数会在发网前失败。空/重复游标也会停止以免死循环。
 
 > **默认 vs `--enrich`**：默认仅返回消息 ID（`-o json` 输出 `{MessageIDs,HasMore,PageToken}`），与历史行为一致、向后兼容。加 `--enrich` 才会多发 `GET /im/v1/messages/mget`（每批最多 50）等 API 补全内容/发送者/群名/时间，`-o json` 此时返回富化后的数组。
 

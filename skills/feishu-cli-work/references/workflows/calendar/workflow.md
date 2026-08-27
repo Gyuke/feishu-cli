@@ -47,6 +47,7 @@
 | 命令 | Token 行为 |
 |------|-----------|
 | `suggestion` / `room-find` | User Token 优先 + App Token 兜底：已 `auth login` 时用 User Token（查私人忙闲），未登录回落 App Token（查公开忙闲、公司可订会议室）。`--user-access-token` 可显式指定。 |
+| `agenda` / `event-search` | `--as bot\|user\|auto`（默认 auto）。`primary` 跟当前身份；已配置 User 但刷新失败 fail-closed，禁止静默切 Bot。 |
 | `rsvp` | **必需 User Token**（以本人身份答复邀请），未登录直接报错。 |
 
 权限：`calendar:calendar.free_busy:read`（suggestion / room-find）、`calendar:calendar.event:reply`（rsvp）。

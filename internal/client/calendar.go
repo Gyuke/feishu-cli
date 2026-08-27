@@ -652,9 +652,17 @@ func searchEventTimeText(info *struct {
 	return info.Date
 }
 
+// SearchEventsResult 是 current search_event 的完整结果（含 has_more）。
+type SearchEventsResult struct {
+	Events    []*CalendarEvent
+	PageToken string
+	HasMore   bool
+}
+
 // SearchEvents 搜索日程（POST /calendars/{id}/events/search_event）。
+// 保留旧签名：只返回 events 与 page_token；完整结果用 SearchEventsWithParams。
 func SearchEvents(calendarID, query string, startTime, endTime string, pageToken string, pageSize int, userAccessToken string) ([]*CalendarEvent, string, error) {
-	return SearchEventsWithParams(SearchEventsParams{
+	res, err := SearchEventsWithParams(SearchEventsParams{
 		CalendarID: calendarID,
 		Query:      query,
 		StartTime:  startTime,
@@ -662,21 +670,25 @@ func SearchEvents(calendarID, query string, startTime, endTime string, pageToken
 		PageToken:  pageToken,
 		PageSize:   pageSize,
 	}, userAccessToken)
+	if err != nil {
+		return nil, "", err
+	}
+	return res.Events, res.PageToken, nil
 }
 
 // SearchEventsWithParams 按 current search_event 契约搜索日程。
-func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) ([]*CalendarEvent, string, error) {
+func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (*SearchEventsResult, error) {
 	if strings.TrimSpace(params.CalendarID) == "" {
 		params.CalendarID = "primary"
 	}
 	pageSize, err := ResolvePageSize(params.PageSize, searchEventDefaultPageSize, 1, searchEventMaxPageSize)
 	if err != nil {
-		return nil, "", fmt.Errorf("搜索日程失败: %w", err)
+		return nil, fmt.Errorf("搜索日程失败: %w", err)
 	}
 
 	cli, err := GetClient()
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	body := searchEventRequestBody{
@@ -695,10 +707,10 @@ func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (
 	tokenType, opts := resolveTokenOpts(userAccessToken)
 	resp, err := cli.Post(Context(), apiPath, body, tokenType, opts...)
 	if err != nil {
-		return nil, "", fmt.Errorf("搜索日程失败: %w", err)
+		return nil, fmt.Errorf("搜索日程失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("搜索日程失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
+		return nil, fmt.Errorf("搜索日程失败: HTTP %d, body: %s", resp.StatusCode, string(resp.RawBody))
 	}
 
 	var apiResp struct {
@@ -724,13 +736,14 @@ func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (
 				} `json:"meta_data"`
 			} `json:"items"`
 			PageToken string `json:"page_token"`
+			HasMore   bool   `json:"has_more"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp.RawBody, &apiResp); err != nil {
-		return nil, "", fmt.Errorf("解析搜索日程响应失败: %w", err)
+		return nil, fmt.Errorf("解析搜索日程响应失败: %w", err)
 	}
 	if apiResp.Code != 0 {
-		return nil, "", fmt.Errorf("搜索日程失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
+		return nil, fmt.Errorf("搜索日程失败: code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 
 	var events []*CalendarEvent
@@ -751,7 +764,11 @@ func SearchEventsWithParams(params SearchEventsParams, userAccessToken string) (
 		}
 		events = append(events, ev)
 	}
-	return events, apiResp.Data.PageToken, nil
+	return &SearchEventsResult{
+		Events:    events,
+		PageToken: apiResp.Data.PageToken,
+		HasMore:   apiResp.Data.HasMore,
+	}, nil
 }
 
 // AddEventAttendees 添加日程参与人

@@ -84,7 +84,21 @@ func NewOptions(format, jq string) (*Options, error) {
 	if !isValidFormat(format) {
 		return nil, fmt.Errorf("不支持的 --format %q，可选值: %s", format, strings.Join(validFormats, ", "))
 	}
+	if err := ValidateJQ(jq); err != nil {
+		return nil, err
+	}
 	return &Options{Format: format, JQ: jq}, nil
+}
+
+// ValidateJQ 在发网前校验 jq 表达式语法；空表达式视为未启用。
+func ValidateJQ(expr string) error {
+	if strings.TrimSpace(expr) == "" {
+		return nil
+	}
+	if _, err := gojq.Parse(expr); err != nil {
+		return fmt.Errorf("jq 表达式解析失败: %w", err)
+	}
+	return nil
 }
 
 // AddPaginationFlags 给命令注册 --page-all/--page-size/--page-limit。

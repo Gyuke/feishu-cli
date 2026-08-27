@@ -32,7 +32,8 @@ query 可省略，仅用 filter 搜索。加 --enrich 才补全内容/发送者/
   --end-time              结束时间（RFC3339 / YYYY-MM-DD / Unix 秒）
   --page-size             每页数量（1-50，默认 20；越界报错）
   --page-token            分页 token
-  --page-all              自动翻页拉取全部结果（配合 --page-limit 限制页数）
+  --page-all              自动翻页（最多 40 页）
+  --page-limit            自动翻页页数（1-40；0 在 --page-all 时等于 40，不是无限）
   --enrich                补全内容/发送者/群名/时间（额外 API 调用，opt-in）
   --as                    身份：bot | user | auto
   --format                结构化输出: json | pretty | table | ndjson | csv
@@ -101,17 +102,29 @@ query 可省略，仅用 filter 搜索。加 --enrich 才补全内容/发送者/
 		if err := client.ValidateSearchMessagesOptions(opts); err != nil {
 			return err
 		}
-
-		userAccessToken, err := resolveIdentityToken(cmd)
+		pageLimit, err := client.ResolvePageLimit(pageLimit, client.SearchPageLimitMax, pageAll)
 		if err != nil {
 			return err
 		}
 
-		// 是否走结构化输出：显式 --format / --jq，或旧的 -o json
+		// 结构化输出校验必须在身份解析/刷新和发网之前。
 		useStructured := cmd.Flags().Changed("format") || jq != "" || legacyOutput == "json"
 		formatVal := output.FormatJSON
 		if cmd.Flags().Changed("format") {
 			formatVal, _ = cmd.Flags().GetString("format")
+		}
+		var structuredOpts *output.Options
+		if useStructured {
+			o, oerr := output.NewOptions(formatVal, jq)
+			if oerr != nil {
+				return oerr
+			}
+			structuredOpts = o
+		}
+
+		userAccessToken, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
 		}
 
 		// 默认（向后兼容）：仅翻页收集消息 ID，不做 enrich。
@@ -122,13 +135,9 @@ query 可省略，仅用 filter 搜索。加 --enrich 才补全内容/发送者/
 				return err
 			}
 			if useStructured {
-				o, oerr := output.NewOptions(formatVal, jq)
-				if oerr != nil {
-					return oerr
-				}
 				// 渲染 SearchMessagesResult（无 JSON tag）→ 旧 schema {MessageIDs,PageToken,HasMore}。
 				// MessageIDs 用翻页累计的全量 ids；HasMore/PageToken 取最后一页。
-				return output.Render(o, &client.SearchMessagesResult{
+				return output.Render(structuredOpts, &client.SearchMessagesResult{
 					MessageIDs: ids,
 					PageToken:  lastRes.PageToken,
 					HasMore:    lastRes.HasMore,
@@ -158,11 +167,7 @@ query 可省略，仅用 filter 搜索。加 --enrich 才补全内容/发送者/
 		}
 
 		if useStructured {
-			o, oerr := output.NewOptions(formatVal, jq)
-			if oerr != nil {
-				return oerr
-			}
-			return output.Render(o, enriched)
+			return output.Render(structuredOpts, enriched)
 		}
 
 		// 人类可读视图
@@ -276,6 +281,7 @@ func init() {
 	searchMessagesCmd.Flags().String("end-time", "", "消息发送结束时间（RFC3339 / YYYY-MM-DD / Unix 秒）")
 	searchMessagesCmd.Flags().Int("page-size", 20, "每页数量（1-50）")
 	searchMessagesCmd.Flags().String("page-token", "", "分页 token")
+	// page-all / page-limit 由 AddPaginationFlags 注册；--page-all 最多 40 页。
 	searchMessagesCmd.Flags().String("user-id-type", "open_id", "已废弃：current /im/v1/messages/search 忽略此参数")
 	_ = searchMessagesCmd.Flags().MarkHidden("user-id-type")
 	searchMessagesCmd.Flags().Bool("enrich", false, "补全内容/发送者/群名/时间（额外 API 调用，opt-in）")

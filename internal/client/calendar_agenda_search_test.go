@@ -78,7 +78,7 @@ func TestSearchEventsCurrentContract(t *testing.T) {
 		}`)
 	})
 
-	events, pageToken, err := SearchEventsWithParams(SearchEventsParams{
+	res, err := SearchEventsWithParams(SearchEventsParams{
 		CalendarID:  "cal_primary",
 		Query:       "周会",
 		StartTime:   "2026-04-01T00:00:00+08:00",
@@ -90,6 +90,8 @@ func TestSearchEventsCurrentContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchEventsWithParams: %v", err)
 	}
+	events := res.Events
+	pageToken := res.PageToken
 	reqs := got()
 	if len(reqs) != 1 {
 		t.Fatalf("request count = %d, want 1", len(reqs))
@@ -143,7 +145,7 @@ func TestSearchEventsBusinessCode(t *testing.T) {
 	_ = captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
 		writeJSON(w, http.StatusOK, `{"code":190003,"msg":"invalid calendar"}`)
 	})
-	_, _, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "cal_x", Query: "x"}, testUserToken)
+	_, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "cal_x", Query: "x"}, testUserToken)
 	if err == nil {
 		t.Fatal("want business code error")
 	}
@@ -156,7 +158,7 @@ func TestSearchEventsPageSizeRejected(t *testing.T) {
 	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
 		writeJSON(w, http.StatusOK, `{"code":0,"msg":"ok","data":{"items":[]}}`)
 	})
-	_, _, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "cal_x", Query: "x", PageSize: 99}, testUserToken)
+	_, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "cal_x", Query: "x", PageSize: 99}, testUserToken)
 	if err == nil {
 		t.Fatal("page-size 99 must fail, not clamp")
 	}
@@ -169,7 +171,7 @@ func TestSearchEventsDefaultPrimaryAndEmptyQuery(t *testing.T) {
 	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
 		writeJSON(w, http.StatusOK, `{"code":0,"msg":"ok","data":{"items":[]}}`)
 	})
-	_, _, err := SearchEventsWithParams(SearchEventsParams{}, testUserToken)
+	_, err := SearchEventsWithParams(SearchEventsParams{}, testUserToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +188,36 @@ func TestSearchEventsDefaultPrimaryAndEmptyQuery(t *testing.T) {
 	}
 	if body["query"] != "" {
 		t.Errorf("empty query = %#v", body["query"])
+	}
+}
+
+func TestSearchEventsHasMoreIndependentOfToken(t *testing.T) {
+	got := captureAPI(t, func(w http.ResponseWriter, r *http.Request, cap *capturedHTTPRequest) {
+		writeJSON(w, http.StatusOK, `{
+			"code":0,"msg":"ok",
+			"data":{"items":[{"meta_data":{"event_id":"evt_h","summary":"x",
+				"start":{"date_time":"2026-04-23T15:00:00+08:00"},
+				"end":{"date_time":"2026-04-23T16:00:00+08:00"}}}],
+			"has_more":true,"page_token":""}
+		}`)
+	})
+	res, err := SearchEventsWithParams(SearchEventsParams{CalendarID: "primary", Query: "x"}, testUserToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = got
+	if res == nil || !res.HasMore {
+		t.Fatalf("has_more must be true even when page_token is empty, got %#v", res)
+	}
+	if res.PageToken != "" {
+		t.Errorf("page_token = %q, want empty", res.PageToken)
+	}
+	events, tok, err := SearchEvents("primary", "x", "", "", "", 0, testUserToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || tok != "" {
+		t.Errorf("wrapper signature: events=%d tok=%q", len(events), tok)
 	}
 }
 

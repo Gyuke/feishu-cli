@@ -72,10 +72,10 @@
 
 ### 修复 — Calendar / IM 对齐官方当前契约
 
-- `calendar event-search` 迁移到 `POST /calendars/{id}/events/search_event`，时间过滤写入 `filter.time_range`；`--calendar-id` 默认 primary、`--query` 可空；RFC3339/YYYY-MM-DD 单边补同一天边界；`page-size` 1–30 越界报错。
-- `calendar agenda` 正确处理小于 40 天窗口、超 40 天预切分、193104 再切分去重；去掉 instance_view 伪分页；全天结束日按排他日期转为含当日；结束时刻用次日当地午夜减 1 秒（DST 安全）。
-- `search messages` 迁移到 `POST /im/v1/messages/search`；`--as bot|user|auto`（auto fail-closed）；query 可省略；补 `exclude_from_types` / `is_at_me` / `link`；`page-size` 1–50 越界报错；`--page-all` 遇空/重复游标失败。
-- `msg search-chats` 迁移到 `POST /im/v2/chats/search`，解析 `next_page_token`；`--as bot|user|auto`；`page-size` 1–100 越界报错。
+- `calendar event-search` 迁移到 `POST /calendars/{id}/events/search_event`，时间过滤写入 `filter.time_range`；`--calendar-id` 默认 primary、`--query` 可空；RFC3339/YYYY-MM-DD 单边补同一天边界；`page-size` 1–30 越界报错；`--as bot|user|auto` fail-closed；JSON 保留 `events`/`next_page_token` 并输出精确 `has_more`。
+- `calendar agenda` 正确处理小于 40 天窗口、超 40 天预切分、193104 再切分去重；去掉 instance_view 伪分页；全天结束日按排他日期转为含当日；结束时刻用次日当地午夜减 1 秒（DST 安全）；`--as bot|user|auto` fail-closed。
+- `search messages` 迁移到 `POST /im/v1/messages/search`；`--as bot|user|auto`（auto fail-closed）；query 可省略；补 `exclude_from_types` / `is_at_me` / `link`；`page-size` 1–50 越界报错；`--page-all` 最多 40 页、负数 `--page-limit` 拒绝；非法 `--format`/`--jq` 在身份解析前失败。
+- `msg search-chats` 迁移到 `POST /im/v2/chats/search`，解析 `next_page_token`；`--as bot|user|auto`；`page-size` 1–100 越界报错；`--page-all` 最多 40 页。
 - `msg mget` / `--enrich` 改用 `GET /im/v1/messages/mget`，每批最多 50，禁止 N+1。`msg history` 线程展开与 `with_sender_name` 保持不变。
 
 

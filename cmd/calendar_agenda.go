@@ -23,6 +23,7 @@ var calendarAgendaCmd = &cobra.Command{
   --page-size     已忽略（instance_view 无服务端分页）
   --page-token    已忽略（instance_view 无服务端分页）
   --output, -o    输出格式（json）
+  --as            身份：bot | user | auto（默认 auto；已配置 User 刷新失败 fail-closed）
 
 示例:
   # 查看今日日程（使用主日历）
@@ -59,7 +60,10 @@ var calendarAgendaCmd = &cobra.Command{
 			return err
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 
 		events, nextToken, hasMore, err := client.ListCalendarAgenda(
 			calendarID,
@@ -140,4 +144,5 @@ func init() {
 	calendarAgendaCmd.Flags().String("page-token", "", "已忽略：instance_view 无服务端分页")
 	calendarAgendaCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	calendarAgendaCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")
+	calendarAgendaCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto；已配置 User 刷新失败 fail-closed）")
 }

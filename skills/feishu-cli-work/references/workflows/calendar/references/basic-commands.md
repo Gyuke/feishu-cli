@@ -158,6 +158,7 @@ feishu-cli cal primary
 
 ## Token 策略
 
-- **读类**（`calendar list/primary/get/agenda/freebusy/suggestion/room-find/event-search`、`calendar event get/list`、`calendar attendee list`）：登录后默认 User Token（自动从 `~/.feishu-cli/token.json` 加载），未登录回落 App Token。
+- **读类**（`calendar list/primary/get/freebusy/suggestion/room-find`、`calendar event get/list`、`calendar attendee list`）：登录后默认 User Token（自动从 `~/.feishu-cli/token.json` 加载），未登录回落 App Token。
+- **身份可选 `--as bot|user|auto`**（`calendar agenda` / `calendar event-search`）：默认 auto（User 优先，未配置回落 Bot；已配置 User 但刷新失败 fail-closed，避免 `primary` 查到错误主体日历）。`--as bot` 走 App Token。
 - **写类**（`calendar create-event/update-event/delete-event/event-reply`、`calendar attendee add`）：默认 App Token；显式 `--user-access-token` 时切到 User。
 - **必需 User Token**：`calendar rsvp`（以本人身份答复邀请）。

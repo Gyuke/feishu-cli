@@ -18,7 +18,8 @@ var searchChatsCmd = &cobra.Command{
   --query          关键词搜索（含连字符的词会自动加引号）
   --page-token     分页标记（兼容服务端 next_page_token）
   --page-size      分页大小 (1-100)，默认 50；越界报错
-  --page-all       自动翻页；has_more 但游标为空/重复时失败以免死循环
+  --page-all       自动翻页（最多 40 页）；has_more 但游标为空/重复时失败以免死循环
+  --page-limit     自动翻页页数（1-40；0 在 --page-all 时等于 40，不是无限）
   --as             身份：bot | user | auto（默认 auto）
   --user-id-type   仅空 query 的 list 回退使用
   --output, -o     输出格式 (json)
@@ -49,6 +50,10 @@ var searchChatsCmd = &cobra.Command{
 		output, _ := cmd.Flags().GetString("output")
 
 		if _, err := client.ResolvePageSize(pageSize, 50, 1, 100); err != nil {
+			return err
+		}
+		pageLimit, err := client.ResolvePageLimit(pageLimit, client.SearchPageLimitMax, pageAll)
+		if err != nil {
 			return err
 		}
 
@@ -129,8 +134,8 @@ func init() {
 	searchChatsCmd.Flags().String("query", "", "关键词搜索")
 	searchChatsCmd.Flags().String("page-token", "", "分页标记")
 	searchChatsCmd.Flags().Int("page-size", 50, "分页大小 (1-100)")
-	searchChatsCmd.Flags().Bool("page-all", false, "自动翻页拉取全部结果")
-	searchChatsCmd.Flags().Int("page-limit", 0, "自动翻页最大页数（0=不限）")
+	searchChatsCmd.Flags().Bool("page-all", false, "自动翻页拉取结果（最多 40 页）")
+	searchChatsCmd.Flags().Int("page-limit", 0, "自动翻页页数（1-40；0 在 --page-all 时等于 40）")
 	searchChatsCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto）")
 	searchChatsCmd.Flags().StringP("output", "o", "", "输出格式 (json)")
 	searchChatsCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")

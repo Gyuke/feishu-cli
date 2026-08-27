@@ -321,6 +321,27 @@ func TestSearchMessagesInvalidTimeBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestResolvePageLimit(t *testing.T) {
+	if _, err := ResolvePageLimit(-1, SearchPageLimitMax, true); err == nil {
+		t.Fatal("negative page-limit must fail")
+	}
+	if _, err := ResolvePageLimit(41, SearchPageLimitMax, true); err == nil {
+		t.Fatal("page-limit > 40 must fail")
+	}
+	got, err := ResolvePageLimit(0, SearchPageLimitMax, true)
+	if err != nil || got != SearchPageLimitMax {
+		t.Errorf("page-all + 0 = %d %v, want %d", got, err, SearchPageLimitMax)
+	}
+	got, err = ResolvePageLimit(5, SearchPageLimitMax, true)
+	if err != nil || got != 5 {
+		t.Errorf("explicit 5 = %d %v", got, err)
+	}
+	got, err = ResolvePageLimit(0, SearchPageLimitMax, false)
+	if err != nil || got != 0 {
+		t.Errorf("not page-all + 0 stays 0: %d %v", got, err)
+	}
+}
+
 func TestPaginationCursorNoProgress(t *testing.T) {
 	more, token, err := PaginationCursor(true, "", "n2", "")
 	if err != nil || !more || token != "n2" {

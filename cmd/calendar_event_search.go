@@ -21,6 +21,7 @@ var calendarEventSearchCmd = &cobra.Command{
   --attendee-ids      参与人 ID，逗号分隔（ou_/oc_/omm_，可选）
   --page-size         每页数量（1-30，默认 20；越界报错）
   --page-token        分页标记（可选）
+  --as                身份：bot | user | auto（默认 auto；已配置 User 刷新失败 fail-closed）
 
 示例:
   feishu-cli calendar event-search --query "会议"
@@ -49,9 +50,12 @@ var calendarEventSearchCmd = &cobra.Command{
 			return err
 		}
 
-		token := resolveOptionalUserTokenWithFallback(cmd)
+		token, err := resolveIdentityToken(cmd)
+		if err != nil {
+			return err
+		}
 
-		events, nextPageToken, err := client.SearchEventsWithParams(client.SearchEventsParams{
+		res, err := client.SearchEventsWithParams(client.SearchEventsParams{
 			CalendarID:  calendarID,
 			Query:       query,
 			StartTime:   startRFC,
@@ -66,18 +70,19 @@ var calendarEventSearchCmd = &cobra.Command{
 
 		if output == "json" {
 			return printJSON(map[string]interface{}{
-				"events":          events,
-				"next_page_token": nextPageToken,
+				"events":          res.Events,
+				"next_page_token": res.PageToken,
+				"has_more":        res.HasMore,
 			})
 		}
 
-		if len(events) == 0 {
+		if len(res.Events) == 0 {
 			fmt.Println("未找到匹配的日程")
 			return nil
 		}
 
-		fmt.Printf("搜索到 %d 个日程:\n\n", len(events))
-		for i, event := range events {
+		fmt.Printf("搜索到 %d 个日程:\n\n", len(res.Events))
+		for i, event := range res.Events {
 			fmt.Printf("[%d] %s\n", i+1, event.Summary)
 			fmt.Printf("    日程 ID:   %s\n", event.EventID)
 			fmt.Printf("    开始时间:  %s\n", event.StartTime)
@@ -88,8 +93,12 @@ var calendarEventSearchCmd = &cobra.Command{
 			fmt.Println()
 		}
 
-		if nextPageToken != "" {
-			fmt.Printf("下一页 token: %s\n", nextPageToken)
+		if res.HasMore {
+			fmt.Printf("还有更多结果")
+			if res.PageToken != "" {
+				fmt.Printf("，使用 --page-token %s 获取下一页", res.PageToken)
+			}
+			fmt.Println()
 		}
 
 		return nil
@@ -107,4 +116,5 @@ func init() {
 	calendarEventSearchCmd.Flags().String("page-token", "", "分页标记")
 	calendarEventSearchCmd.Flags().StringP("output", "o", "", "输出格式（json）")
 	calendarEventSearchCmd.Flags().String("user-access-token", "", "User Access Token（用户授权令牌）")
+	calendarEventSearchCmd.Flags().String("as", "auto", "身份选择: bot | user | auto（默认 auto；已配置 User 刷新失败 fail-closed）")
 }
