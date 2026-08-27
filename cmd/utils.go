@@ -56,6 +56,24 @@ func resolveFlagUserToken(cmd *cobra.Command) string {
 	return flagToken
 }
 
+// resolveAutoUserToken 在 auto 模式下解析 User Token。
+// 规则：
+// 1. 若未配置任何 User 身份（无 flag、无 env、无 token.json、无 config），返回 "", nil（安全回退到 Tenant/Bot）
+// 2. 若配置了 User 身份且解析/刷新成功，返回 token, nil
+// 3. 若检测到 User 身份配置，但解析或刷新失败，必须 fail-closed 返回具体错误，禁止切回 Bot
+func resolveAutoUserToken(cmd *cobra.Command) (string, error) {
+	flagToken, _ := cmd.Flags().GetString("user-access-token")
+	cfg := config.Get()
+	token, err := auth.ResolveUserAccessToken(flagToken, cfg.UserAccessToken, cfg.AppID, cfg.AppSecret, cfg.BaseURL)
+	if err != nil {
+		if auth.IsNoUserTokenConfigured(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return token, nil
+}
+
 // resolveOptionalUserTokenWithFallback 尝试完整优先级链解析 User Token（可选）
 // 与 resolveOptionalUserToken 不同，会额外尝试从 token.json 和 config 中读取
 // 找不到时返回空字符串（回退到 App Token），而非报错
@@ -105,15 +123,15 @@ func requireUserToken(cmd *cobra.Command, cmdName string) (string, error) {
 // 适用于底层飞书 API 同时支持 user / tenant 身份的命令组（如 bitable，
 // 其 base/v3 与 bitable/v1 client 都声明 SupportedAccessTokenTypes:[User, Tenant]）。
 //
-//	auto（默认）: User 优先、Tenant 兜底——已登录用 User Token，未登录/过期自动回落 App Token，
-//	             适配 cron 无人值守场景；
+//	auto（默认）: User 优先、Tenant 兜底——已登录用 User Token，未配置自动回落 App Token，
+//	             检测到 User 身份但刷新/解析失败时 fail-closed 报错，防止未授权切 Bot；
 //	bot/tenant/app: 强制 App Token（返回空字符串）；
 //	user: 强制 User Token，缺失则报错。
 func resolveIdentityToken(cmd *cobra.Command) (string, error) {
 	as, _ := cmd.Flags().GetString("as")
 	switch strings.ToLower(strings.TrimSpace(as)) {
 	case "", "auto":
-		return resolveOptionalUserTokenWithFallback(cmd), nil
+		return resolveAutoUserToken(cmd)
 	case "bot", "tenant", "app":
 		return "", nil
 	case "user":

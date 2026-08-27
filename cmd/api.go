@@ -13,8 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/itchyny/gojq"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/client"
+	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/riba2534/feishu-cli/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -103,6 +106,34 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 校验 --as 取值合法性（前置验证）
+	asLower := strings.ToLower(strings.TrimSpace(apiAs))
+	switch asLower {
+	case "", "auto", "bot", "tenant", "app", "user":
+		// 合法
+	default:
+		return fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", apiAs)
+	}
+
+	// 校验 --format / --jq 参数合法性（在网络请求与 token 刷新前验证）
+	if apiFormat != "" || apiJQ != "" {
+		if _, err := output.NewOptions(apiFormat, apiJQ); err != nil {
+			return err
+		}
+		if apiJQ != "" {
+			if _, err := gojq.Parse(apiJQ); err != nil {
+				return fmt.Errorf("jq 表达式解析失败: %w", err)
+			}
+		}
+	}
+
+	// 校验 --output 路径合法性（前置验证）
+	if apiOutput != "" {
+		if err := validateOutputPath(apiOutput, ""); err != nil {
+			return err
+		}
+	}
+
 	// 解析 query 参数：优先合并 path 中内嵌的 query，再用 --params 追加/覆盖
 	queryParams, err := parseQueryParams(apiParams)
 	if err != nil {
@@ -117,7 +148,7 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 解析 body
+	// 解析 body（在网络调用前验证合法 JSON）
 	bodyBytes, err := loadAPIBody(apiData, apiDataFile)
 	if err != nil {
 		return err
@@ -132,15 +163,19 @@ func runAPI(cmd *cobra.Command, args []string) error {
 		body = probe
 	}
 
-	// 解析 token 策略
+	// dry-run：静态检查 token 策略，打印请求后直接返回（不触发 token refresh，不写 token 文件，不发网络请求）
+	if apiDryRun {
+		tokenTypes, hasUserToken, err := resolveAPITokenDryRun(cmd, apiAs)
+		if err != nil {
+			return err
+		}
+		return printAPIDryRun(method, apiPath, queryParams, body, tokenTypes, hasUserToken)
+	}
+
+	// 解析 token 策略（auto 模式下若检测到 User 身份但刷新/解析失败，将 fail-closed 报错，绝不静默切 Bot）
 	tokenTypes, userToken, err := resolveAPIToken(cmd, apiAs)
 	if err != nil {
 		return err
-	}
-
-	// dry-run：打印请求后返回
-	if apiDryRun {
-		return printAPIDryRun(method, apiPath, queryParams, body, tokenTypes, userToken != "")
 	}
 
 	// 构造请求
@@ -212,6 +247,11 @@ func runAPI(cmd *cobra.Command, args []string) error {
 	// 业务错误码提示（飞书：code != 0 表示业务错误）
 	if hint := detectFeishuBizError(resp.StatusCode, resp.RawBody); hint != "" {
 		fmt.Fprintln(os.Stderr, hint)
+	}
+
+	// 飞书业务错误码（code != 0）返回非零退出码
+	if bizCode, bizMsg, hasBizErr := parseFeishuBizError(resp.RawBody); hasBizErr {
+		return fmt.Errorf("飞书业务错误: code=%d, msg=%s", bizCode, bizMsg)
 	}
 
 	// 非 2xx 返回非零退出码（响应已打印）
@@ -353,12 +393,20 @@ func resolveAPIToken(cmd *cobra.Command, as string) ([]larkcore.AccessTokenType,
 	as = strings.ToLower(strings.TrimSpace(as))
 	switch as {
 	case "", "auto":
-		userToken := resolveOptionalUserTokenWithFallback(cmd)
-		// 同时支持两种，SDK 会根据是否传 WithUserAccessToken 决定
+		userToken, err := resolveAutoUserToken(cmd)
+		if err != nil {
+			return nil, "", err
+		}
+		if userToken != "" {
+			return []larkcore.AccessTokenType{
+				larkcore.AccessTokenTypeTenant,
+				larkcore.AccessTokenTypeUser,
+			}, userToken, nil
+		}
+		// 自然未配置 User Token，回退到 Tenant Token
 		return []larkcore.AccessTokenType{
 			larkcore.AccessTokenTypeTenant,
-			larkcore.AccessTokenTypeUser,
-		}, userToken, nil
+		}, "", nil
 
 	case "bot", "tenant", "app":
 		return []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant}, "", nil
@@ -372,6 +420,39 @@ func resolveAPIToken(cmd *cobra.Command, as string) ([]larkcore.AccessTokenType,
 
 	default:
 		return nil, "", fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", as)
+	}
+}
+
+// resolveAPITokenDryRun 在 dry-run 模式下静态解析 token 策略，不发起任何网络请求，不写 token 文件
+func resolveAPITokenDryRun(cmd *cobra.Command, as string) ([]larkcore.AccessTokenType, bool, error) {
+	as = strings.ToLower(strings.TrimSpace(as))
+	flagToken, _ := cmd.Flags().GetString("user-access-token")
+	cfg := config.Get()
+	hasUserToken := auth.HasUserTokenConfigured(flagToken, cfg.UserAccessToken)
+
+	switch as {
+	case "", "auto":
+		if hasUserToken {
+			return []larkcore.AccessTokenType{
+				larkcore.AccessTokenTypeTenant,
+				larkcore.AccessTokenTypeUser,
+			}, true, nil
+		}
+		return []larkcore.AccessTokenType{
+			larkcore.AccessTokenTypeTenant,
+		}, false, nil
+
+	case "bot", "tenant", "app":
+		return []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant}, false, nil
+
+	case "user":
+		if !hasUserToken {
+			return nil, false, fmt.Errorf("--as user 需要 User Access Token（请先 `feishu-cli auth login`）")
+		}
+		return []larkcore.AccessTokenType{larkcore.AccessTokenTypeUser}, true, nil
+
+	default:
+		return nil, false, fmt.Errorf("--as 仅支持 bot|user|auto，得到 %q", as)
 	}
 }
 
@@ -454,26 +535,35 @@ func writeAPIResponse(w io.Writer, body []byte, raw bool) error {
 	return err
 }
 
-// detectFeishuBizError 检查飞书业务错误码并给出友好提示
-// 飞书约定：HTTP 200 但 body.code != 0 表示业务错误
-func detectFeishuBizError(_ int, body []byte) string {
+// parseFeishuBizError 解析飞书响应体中的业务错误码
+func parseFeishuBizError(body []byte) (int, string, bool) {
 	if len(body) == 0 {
-		return ""
+		return 0, "", false
 	}
 	var env struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return ""
+		return 0, "", false
 	}
 	if env.Code == 0 {
+		return 0, "", false
+	}
+	return env.Code, env.Msg, true
+}
+
+// detectFeishuBizError 检查飞书业务错误码并给出友好提示
+// 飞书约定：HTTP 200 但 body.code != 0 表示业务错误
+func detectFeishuBizError(_ int, body []byte) string {
+	code, msg, hasErr := parseFeishuBizError(body)
+	if !hasErr {
 		return ""
 	}
 
 	// 已知常见错误码 → 解决建议
 	var hint string
-	switch env.Code {
+	switch code {
 	case 99991661, 99991663, 99991668, 99991672, 99991679, 99991677:
 		hint = "提示：Token 失效或权限不足。请运行 `feishu-cli auth status` 检查，或 `feishu-cli auth login --recommend` 重新授权。"
 	case 1254005, 1254404:
@@ -495,7 +585,7 @@ func detectFeishuBizError(_ int, body []byte) string {
 		hint = "提示：App 未启用机器人能力。请到飞书开放平台 → 应用 → 应用能力 → 添加「机器人」能力并发布。"
 	}
 
-	header := fmt.Sprintf("⚠️  飞书业务错误：code=%d, msg=%s", env.Code, env.Msg)
+	header := fmt.Sprintf("⚠️  飞书业务错误：code=%d, msg=%s", code, msg)
 	if hint != "" {
 		return header + "\n" + hint
 	}

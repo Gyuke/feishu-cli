@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -8,6 +9,36 @@ import (
 // logf 输出日志到 stderr，避免污染 stdout 的 JSON 输出
 func logf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
+}
+
+// ErrNoUserTokenConfigured 表示未找到任何 User Token 来源（无 flag/env/token.json/config）。
+var ErrNoUserTokenConfigured = errors.New("缺少 User Access Token，请通过以下方式之一提供:\n" +
+	"  1. OAuth 登录: feishu-cli auth login\n" +
+	"  2. 命令行参数: --user-access-token <token>\n" +
+	"  3. 环境变量: export FEISHU_USER_ACCESS_TOKEN=<token>\n" +
+	"  4. 配置文件: user_access_token: <token>")
+
+// IsNoUserTokenConfigured 判断是否为未配置 User Token 的自然缺失状态。
+func IsNoUserTokenConfigured(err error) bool {
+	return errors.Is(err, ErrNoUserTokenConfigured)
+}
+
+// HasUserTokenConfigured 静态探测当前环境是否存在 User Token 配置（无网络请求，不执行刷新）。
+func HasUserTokenConfigured(flagValue, configValue string) bool {
+	if flagValue != "" {
+		return true
+	}
+	if os.Getenv("FEISHU_USER_ACCESS_TOKEN") != "" {
+		return true
+	}
+	token, err := LoadToken()
+	if err == nil && token != nil && (token.AccessToken != "" || token.RefreshToken != "") {
+		return true
+	}
+	if configValue != "" {
+		return true
+	}
+	return false
 }
 
 // ResolveUserAccessToken 按优先级链获取 user_access_token，支持自动刷新
@@ -20,7 +51,7 @@ func logf(format string, a ...any) {
 //  2. FEISHU_USER_ACCESS_TOKEN 环境变量（同样支持本机身份延伸时的自动刷新）
 //  3. token.json（access_token 有效直接返回；过期则用 refresh_token 刷新）
 //  4. configValue（config.yaml 静态配置）
-//  5. 全部为空 → 返回错误
+//  5. 全部为空 → 返回 ErrNoUserTokenConfigured
 func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL string) (string, error) {
 	// 1. 命令行参数
 	if flagValue != "" {
@@ -41,7 +72,10 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 	// 3. token.json
 	var tokenFileExpired bool
 	token, err := LoadToken()
-	if err == nil && token != nil {
+	if err != nil {
+		return "", fmt.Errorf("读取本地 token 文件失败: %w", err)
+	}
+	if token != nil {
 		if token.IsAccessTokenValid() {
 			return token.AccessToken, nil
 		}
@@ -55,15 +89,15 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 			newToken, refreshErr := RefreshAccessToken(token, appID, appSecret, baseURL)
 			if refreshErr != nil {
 				logf("[自动刷新] 刷新失败: %v", refreshErr)
-			} else {
-				if saveErr := SaveToken(newToken); saveErr != nil {
-					logf("[自动刷新] Token 已刷新但保存失败: %v", saveErr)
-				} else {
-					logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
-				}
-				// 无论保存是否成功，刷新后的 token 都可以使用
-				return newToken.AccessToken, nil
+				return "", fmt.Errorf("自动刷新 Access Token 失败: %w", refreshErr)
 			}
+			if saveErr := SaveToken(newToken); saveErr != nil {
+				logf("[自动刷新] Token 已刷新但保存失败: %v", saveErr)
+			} else {
+				logf("[自动刷新] 刷新成功，新 Token 有效期至 %s", newToken.ExpiresAt.Format("2006-01-02 15:04:05"))
+			}
+			// 无论保存是否成功，刷新后的 token 都可以使用
+			return newToken.AccessToken, nil
 		}
 		tokenFileExpired = true // token.json 存在但所有 token 都过期了
 	}
@@ -78,11 +112,7 @@ func ResolveUserAccessToken(flagValue, configValue, appID, appSecret, baseURL st
 		return "", fmt.Errorf("User Access Token 已过期（access_token 和 refresh_token 均已失效）。\n" +
 			"请重新登录: feishu-cli auth login")
 	}
-	return "", fmt.Errorf("缺少 User Access Token，请通过以下方式之一提供:\n" +
-		"  1. OAuth 登录: feishu-cli auth login\n" +
-		"  2. 命令行参数: --user-access-token <token>\n" +
-		"  3. 环境变量: export FEISHU_USER_ACCESS_TOKEN=<token>\n" +
-		"  4. 配置文件: user_access_token: <token>")
+	return "", ErrNoUserTokenConfigured
 }
 
 // refreshIfStaleLocalToken 当显式传入的 token 等于 token.json 里已过期的 access_token 时，

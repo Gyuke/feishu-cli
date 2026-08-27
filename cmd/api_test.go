@@ -1,9 +1,65 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/riba2534/feishu-cli/internal/auth"
+	"github.com/spf13/cobra"
 )
+
+func resetAPIFlags() {
+	apiParams = ""
+	apiData = ""
+	apiDataFile = ""
+	apiAs = "auto"
+	apiOutput = ""
+	apiDryRun = false
+	apiRaw = false
+	apiIncludeHeaders = false
+	apiTimeoutSec = 30
+	apiFormat = ""
+	apiJQ = ""
+}
+
+func newTestAPICmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:  "api <METHOD> <path>",
+		Args: cobra.ExactArgs(2),
+		RunE: runAPI,
+	}
+	c.Flags().StringVarP(&apiParams, "params", "p", "", "")
+	c.Flags().StringVarP(&apiData, "data", "d", "", "")
+	c.Flags().StringVar(&apiDataFile, "data-file", "", "")
+	c.Flags().StringVar(&apiAs, "as", "auto", "")
+	c.Flags().StringVarP(&apiOutput, "output", "o", "", "")
+	c.Flags().BoolVar(&apiDryRun, "dry-run", false, "")
+	c.Flags().BoolVar(&apiRaw, "raw", false, "")
+	c.Flags().BoolVar(&apiIncludeHeaders, "include-headers", false, "")
+	c.Flags().IntVar(&apiTimeoutSec, "timeout", 30, "")
+	c.Flags().StringVar(&apiFormat, "format", "", "")
+	c.Flags().StringVar(&apiJQ, "jq", "", "")
+	c.Flags().String("user-access-token", "", "")
+	return c
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
 
 func TestNormalizeAPIPath(t *testing.T) {
 	tests := []struct {
@@ -137,7 +193,6 @@ func TestParseQueryParams(t *testing.T) {
 					t.Errorf("query[%s] = %q，期望 %q", k, got, want)
 				}
 			}
-			// 检查多余的 key（null 应被跳过）
 			if tc.name == "null 被跳过" {
 				if _, exists := q["b"]; exists {
 					t.Errorf("key b 不应存在（null 应被跳过）")
@@ -171,7 +226,7 @@ func TestIsValidHTTPMethod(t *testing.T) {
 			t.Errorf("isValidHTTPMethod(%q) = false，期望 true", m)
 		}
 	}
-	invalid := []string{"BOGUS", "get", "", "HEAD", "OPTIONS"} // 小写在 caller 处 ToUpper 后才到这
+	invalid := []string{"BOGUS", "get", "", "HEAD", "OPTIONS"}
 	for _, m := range invalid {
 		if isValidHTTPMethod(m) {
 			t.Errorf("isValidHTTPMethod(%q) = true，期望 false", m)
@@ -183,8 +238,8 @@ func TestDetectFeishuBizError(t *testing.T) {
 	tests := []struct {
 		name       string
 		body       []byte
-		wantHint   string // 期望 hint 包含此子串
-		wantNohint bool   // 期望返回空字符串
+		wantHint   string
+		wantNohint bool
 	}{
 		{
 			name:       "code 0 不提示",
@@ -239,5 +294,393 @@ func TestDetectFeishuBizError(t *testing.T) {
 				t.Errorf("hint = %q，期望包含 %q", got, tc.wantHint)
 			}
 		})
+	}
+}
+
+func TestParseFeishuBizError(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       []byte
+		wantCode   int
+		wantMsg    string
+		wantHasErr bool
+	}{
+		{
+			name:       "成功 code 0",
+			body:       []byte(`{"code":0,"msg":"success"}`),
+			wantHasErr: false,
+		},
+		{
+			name:       "非零 code",
+			body:       []byte(`{"code":99991679,"msg":"Unauthorized."}`),
+			wantCode:   99991679,
+			wantMsg:    "Unauthorized.",
+			wantHasErr: true,
+		},
+		{
+			name:       "非 JSON",
+			body:       []byte(`not json`),
+			wantHasErr: false,
+		},
+		{
+			name:       "空 body",
+			body:       []byte{},
+			wantHasErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, msg, hasErr := parseFeishuBizError(tc.body)
+			if hasErr != tc.wantHasErr {
+				t.Fatalf("hasErr = %v, want %v", hasErr, tc.wantHasErr)
+			}
+			if hasErr {
+				if code != tc.wantCode || msg != tc.wantMsg {
+					t.Errorf("got code=%d msg=%q, want code=%d msg=%q", code, msg, tc.wantCode, tc.wantMsg)
+				}
+			}
+		})
+	}
+}
+
+func isolateAPITestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FEISHU_PROFILE", "")
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+	t.Setenv("FEISHU_BASE_URL", "")
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+	resetAPIFlags()
+}
+
+// TestRunAPI_PreflightValidation 验证非法参数组合在发起任何网络请求前直接报错
+func TestRunAPI_PreflightValidation(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+
+	var serverHits int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&serverHits, 1)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	defer cleanup()
+
+	tests := []struct {
+		name       string
+		args       []string
+		setup      func(cmd *cobra.Command)
+		wantErrSub string
+	}{
+		{
+			name:       "非法 HTTP Method",
+			args:       []string{"INVALID_METHOD", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) {},
+			wantErrSub: "不支持的 HTTP method",
+		},
+		{
+			name:       "非法 --as",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiAs = "invalid_identity" },
+			wantErrSub: "--as 仅支持 bot|user|auto",
+		},
+		{
+			name:       "非法 --format",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiFormat = "xml" },
+			wantErrSub: "不支持的 --format",
+		},
+		{
+			name:       "非法 --jq 表达式",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiJQ = ".[invalid" },
+			wantErrSub: "jq 表达式解析失败",
+		},
+		{
+			name:       "非法 --params JSON",
+			args:       []string{"GET", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiParams = "{not-json}" },
+			wantErrSub: "解析 --params 失败",
+		},
+		{
+			name:       "非法 --data JSON",
+			args:       []string{"POST", "/open-apis/im/v1/messages"},
+			setup:      func(cmd *cobra.Command) { apiData = "not-json" },
+			wantErrSub: "--data/--data-file 不是合法 JSON",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			atomic.StoreInt32(&serverHits, 0)
+			cmd := newTestAPICmd()
+			tc.setup(cmd)
+
+			err := cmd.RunE(cmd, tc.args)
+			if err == nil {
+				t.Fatalf("期望前置验证报错，实际返回 nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("错误信息 = %q，期望包含 %q", err.Error(), tc.wantErrSub)
+			}
+			if hits := atomic.LoadInt32(&serverHits); hits != 0 {
+				t.Errorf("前置验证失败时不应发出任何网络请求，实际收到 %d 次请求", hits)
+			}
+		})
+	}
+}
+
+// TestRunAPI_DryRun_NoNetworkAndNoTokenRefresh 验证 --dry-run 不解析/刷新真实 token、不写 token 文件、不发网络请求
+func TestRunAPI_DryRun_NoNetworkAndNoTokenRefresh(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+
+	// 写入一个已过期的 token.json（带有有效 refresh_token）
+	tokenDir := filepath.Join(tmpHome, ".feishu-cli")
+	_ = os.MkdirAll(tokenDir, 0700)
+	tokenFile := filepath.Join(tokenDir, "token.json")
+	initialStore := auth.TokenStore{
+		AccessToken:      "expired-access-token",
+		RefreshToken:     "valid-refresh-token",
+		TokenType:        "Bearer",
+		ExpiresAt:        time.Now().Add(-1 * time.Hour), // 已过期
+		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		Scope:            "im:message",
+	}
+	data, _ := json.MarshalIndent(initialStore, "", "  ")
+	if err := os.WriteFile(tokenFile, data, 0600); err != nil {
+		t.Fatalf("写入 token.json 失败: %v", err)
+	}
+
+	hashBefore, err := fileSHA256(tokenFile)
+	if err != nil {
+		t.Fatalf("计算 token.json hash 失败: %v", err)
+	}
+
+	var serverHits int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&serverHits, 1)
+		http.Error(w, "dry-run 不应调用任何服务端接口", http.StatusInternalServerError)
+	})
+	defer cleanup()
+
+	for _, asMode := range []string{"auto", "user", "bot"} {
+		t.Run("as="+asMode, func(t *testing.T) {
+			cmd := newTestAPICmd()
+			apiDryRun = true
+			apiAs = asMode
+
+			err := cmd.RunE(cmd, []string{"POST", "/open-apis/im/v1/messages"})
+			if err != nil {
+				t.Fatalf("dry-run 模式执行失败: %v", err)
+			}
+
+			if hits := atomic.LoadInt32(&serverHits); hits != 0 {
+				t.Errorf("--dry-run 模式下不应触发任何网络请求，得到 %d 次请求", hits)
+			}
+
+			hashAfter, err := fileSHA256(tokenFile)
+			if err != nil {
+				t.Fatalf("计算 token.json hash 失败: %v", err)
+			}
+			if hashBefore != hashAfter {
+				t.Errorf("token.json 文件 hash 发生了改变！before=%s, after=%s", hashBefore, hashAfter)
+			}
+		})
+	}
+}
+
+// TestRunAPI_BizErrorReturnsNonZero 验证飞书业务错误码（HTTP 2xx + code != 0）返回非零 error
+func TestRunAPI_BizErrorReturnsNonZero(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+
+	tests := []struct {
+		name       string
+		respStatus int
+		respBody   string
+		wantErr    bool
+		wantErrSub string
+	}{
+		{
+			name:       "HTTP 200 + 业务错误 99991679 返回非零",
+			respStatus: http.StatusOK,
+			respBody:   `{"code":99991679,"msg":"Unauthorized."}`,
+			wantErr:    true,
+			wantErrSub: "code=99991679",
+		},
+		{
+			name:       "HTTP 200 + 业务错误 232033 返回非零",
+			respStatus: http.StatusOK,
+			respBody:   `{"code":232033,"msg":"forbidden"}`,
+			wantErr:    true,
+			wantErrSub: "code=232033",
+		},
+		{
+			name:       "HTTP 200 + 业务成功 code 0 返回 nil",
+			respStatus: http.StatusOK,
+			respBody:   `{"code":0,"msg":"success","data":{"id":"123"}}`,
+			wantErr:    false,
+		},
+		{
+			name:       "HTTP 500 + code 非零返回非零",
+			respStatus: http.StatusInternalServerError,
+			respBody:   `{"code":99999999,"msg":"server error"}`,
+			wantErr:    true,
+			wantErrSub: "code=99999999",
+		},
+		{
+			name:       "HTTP 404 + JSON 错误码返回非零",
+			respStatus: http.StatusNotFound,
+			respBody:   `{"code":1254404,"msg":"resource not found"}`,
+			wantErr:    true,
+			wantErrSub: "code=1254404",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-fake","expire":7200}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.respStatus)
+				_, _ = fmt.Fprint(w, tc.respBody)
+			})
+			defer cleanup()
+
+			cmd := newTestAPICmd()
+			apiAs = "bot"
+			err := cmd.RunE(cmd, []string{"GET", "/open-apis/im/v1/messages"})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("期望返回错误，实际返回 nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Errorf("错误信息 = %q，期望包含 %q", err.Error(), tc.wantErrSub)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("非预期错误: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestRunAPI_AutoFailClosedOnUserRefreshError 验证在 auto 身份下，已存在 User 身份但刷新失败时 fail closed，绝不发送 Bot 请求
+func TestRunAPI_AutoFailClosedOnUserRefreshError(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+
+	// 写入一个已过期的 token.json（带有 refresh_token）
+	tokenDir := filepath.Join(tmpHome, ".feishu-cli")
+	_ = os.MkdirAll(tokenDir, 0700)
+	tokenFile := filepath.Join(tokenDir, "token.json")
+	initialStore := auth.TokenStore{
+		AccessToken:      "expired-access-token",
+		RefreshToken:     "broken-refresh-token",
+		TokenType:        "Bearer",
+		ExpiresAt:        time.Now().Add(-1 * time.Hour), // 已过期
+		RefreshExpiresAt: time.Now().Add(24 * time.Hour),
+		Scope:            "im:message",
+	}
+	data, _ := json.MarshalIndent(initialStore, "", "  ")
+	if err := os.WriteFile(tokenFile, data, 0600); err != nil {
+		t.Fatalf("写入 token.json 失败: %v", err)
+	}
+
+	var bizRequests int32
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// token 刷新端点返回失败
+		if r.URL.Path == "/open-apis/authen/v2/oauth/token" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"refresh token is invalid"}`)
+			return
+		}
+
+		// 业务端点
+		if strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages") {
+			atomic.AddInt32(&bizRequests, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"success"}`)
+			return
+		}
+
+		// tenant token 端点（如果被调用说明尝试了切 Bot）
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			t.Errorf("User refresh 失败时不应请求 tenant access token 尝试切 Bot")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-fake","expire":7200}`)
+			return
+		}
+	})
+	defer cleanup()
+
+	cmd := newTestAPICmd()
+	apiAs = "auto"
+	err := cmd.RunE(cmd, []string{"GET", "/open-apis/im/v1/messages"})
+	if err == nil {
+		t.Fatalf("User token 刷新失败时，--as auto 应当 fail closed 返回错误，实际返回 nil")
+	}
+
+	if hits := atomic.LoadInt32(&bizRequests); hits != 0 {
+		t.Fatalf("User token 刷新失败时绝不能以 Bot 身份向业务端点发请求，实际收到 %d 次请求", hits)
+	}
+}
+
+// TestRunAPI_AutoFallbacksToBotWhenNoUserToken 验证当完全未配置 User 身份时，auto 模式正常以 Bot 身份调用
+func TestRunAPI_AutoFallbacksToBotWhenNoUserToken(t *testing.T) {
+	isolateAPITestEnv(t)
+	defer resetAPIFlags()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("FEISHU_USER_ACCESS_TOKEN", "")
+
+	var bizCalled bool
+	var capturedAuth string
+
+	cleanup := stubCmdFeishuServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/open-apis/auth/v3/tenant_access_token/internal") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"ok","tenant_access_token":"t-bot-token","expire":7200}`)
+			return
+		}
+		if r.URL.Path == "/open-apis/im/v1/messages" {
+			bizCalled = true
+			capturedAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"code":0,"msg":"success","data":{"items":[]}}`)
+			return
+		}
+		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+	})
+	defer cleanup()
+
+	cmd := newTestAPICmd()
+	apiAs = "auto"
+	err := cmd.RunE(cmd, []string{"GET", "/open-apis/im/v1/messages"})
+	if err != nil {
+		t.Fatalf("未配置 User token 时，--as auto 应该正常回退到 Bot 身份，实际报错: %v", err)
+	}
+	if !bizCalled {
+		t.Errorf("期望调用业务端点")
+	}
+	if !strings.HasPrefix(capturedAuth, "Bearer t-") {
+		t.Errorf("Authorization = %q, want Bearer t-...", capturedAuth)
 	}
 }
