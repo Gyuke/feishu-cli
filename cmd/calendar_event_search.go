@@ -21,6 +21,7 @@ var calendarEventSearchCmd = &cobra.Command{
   --attendee-ids      参与人 ID，逗号分隔（ou_/oc_/omm_，可选）
   --page-size         每页数量（1-30，默认 20；越界报错）
   --page-token        分页标记（可选）
+  --output, -o        json 时输出 events / next_page_token / has_more（has_more 以服务端为准）
   --as                身份：bot | user | auto（默认 auto；已配置 User 刷新失败 fail-closed）
 
 示例:

@@ -122,7 +122,7 @@ feishu-cli search messages "关键词" --chat-type p2p_chat --as auto -o json
 feishu-cli search messages --chat-ids oc_xxx --is-at-me -o json   # 可省略 query
 ```
 
-搜消息属于 `feishu-cli-platform`，走 current `POST /open-apis/im/v1/messages/search`（`filter.time_range` / `from_ids` / `chat_ids` / `include_attachment_types` / `exclude_from_types` / `is_at_me`）。`--as bot|user|auto`。`msg search-chats` 走 `POST /open-apis/im/v2/chats/search`，解析 `next_page_token`，含连字符的关键词会自动加引号。`msg mget` 走 `GET /open-apis/im/v1/messages/mget`（`with_sender_name=true`，每批最多 50）。
+搜消息属于 `feishu-cli-platform`，走 current `POST /open-apis/im/v1/messages/search`（`filter.time_range` / `from_ids` / `chat_ids` / `include_attachment_types` / `exclude_from_types` / `is_at_me`）。`--as bot|user|auto`。`msg search-chats` 走 `POST /open-apis/im/v2/chats/search`，解析 `next_page_token`，含连字符的关键词会自动加引号。`--page-all` 最多 40 页；`--page-limit` 1–40，`0` 在 `--page-all` 时等于 40（不是无限）；负数发网前失败。`has_more` 但游标为空或重复时失败，避免死循环。`msg mget` 走 `GET /open-apis/im/v1/messages/mget`（`with_sender_name=true`，每批最多 50）。
 
 ## 消息互动
 

@@ -169,6 +169,22 @@ func TestParseOptionsDefaults(t *testing.T) {
 	}
 }
 
+func TestNewOptionsRejectsInvalidFormatAndJQ(t *testing.T) {
+	if _, err := NewOptions("xml", ""); err == nil {
+		t.Fatal("invalid format must fail")
+	}
+	if _, err := NewOptions(FormatJSON, "not("); err == nil {
+		t.Fatal("invalid jq must fail")
+	}
+	o, err := NewOptions(FormatJSON, ".[]")
+	if err != nil {
+		t.Fatalf("valid jq: %v", err)
+	}
+	if o == nil || o.Format != FormatJSON || o.JQ != ".[]" {
+		t.Errorf("got %+v", o)
+	}
+}
+
 func TestParseOptionsInvalidFormat(t *testing.T) {
 	cmd := &cobra.Command{Use: "x", Run: func(*cobra.Command, []string) {}}
 	AddOutputFlags(cmd)

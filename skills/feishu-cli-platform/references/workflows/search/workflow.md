@@ -160,13 +160,12 @@ feishu-cli search messages "关键词" [选项]
 | `--end-time` | string | 结束时间（RFC3339 或 Unix 秒）→ `filter.time_range.end_time` |
 | `--page-size` | int | 每页数量（默认 20） |
 | `--page-token` | string | 分页 token（上一页返回） |
-| `--page-all` | bool | 自动翻页拉取全部（受 `--page-limit` 限制） |
-| `--page-limit` | int | 自动翻页最大页数，`0`=不限（默认 0）；配合 `--page-all` 防失控 |
+| `--page-all` | bool | 自动翻页（最多 40 页） |
+| `--page-limit` | int | 1–40；`--page-all` 时 `0` 等于 40（不是无限）；负数发网前失败 |
 | `--enrich` | bool | 补全内容/发送者/群名/时间（opt-in，额外 API 调用） |
 | `--card-content-type` | string | interactive 卡片富化格式：`user`（默认，提取 `card_texts`）/ `raw`（平台内部完整 cardDSL）/ `rendered`（OAPI 渲染版/降级版）。**仅在 `--enrich` 时生效**，非 enrich 路径忽略 |
 | `--format` | string | 结构化输出：`json`/`pretty`/`table`/`ndjson`/`csv` |
-| `--jq` | string | 用 jq 表达式过滤结构化输出 |
-| `--user-id-type` | string | 用户 ID 类型：`open_id`（默认）/`union_id`/`user_id` |
+| `--jq` | string | 用 jq 表达式过滤结构化输出（非法语法在身份解析/发网前失败） |
 | `-o json` | string | JSON 格式输出（等价 `--format json`） |
 
 > **`--page-all` 上限 40 页**：`--page-limit` 范围 1–40；`0` 在 `--page-all` 时等于 40（不是无限）。负数会在发网前失败。空/重复游标也会停止以免死循环。

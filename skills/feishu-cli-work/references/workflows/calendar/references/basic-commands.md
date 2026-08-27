@@ -98,7 +98,7 @@ feishu-cli calendar event-search \
   [--page-size 20]
 ```
 
-`--page-size` 范围 1-30（默认 20，越界报错不截断）。`--attendee-ids` 按前缀拆分：`ou_` → 用户、`oc_` → 群、`omm_` → 会议室。
+`--page-size` 范围 1-30（默认 20，越界报错不截断）。`--attendee-ids` 按前缀拆分：`ou_` → 用户、`oc_` → 群、`omm_` → 会议室。`-o json` 输出 `{events, next_page_token, has_more}`：`has_more` 取服务端字段，即使 `next_page_token` 为空也原样给出。
 
 ## 回复日程邀请
 

@@ -17,7 +17,7 @@ Token 有效期约 2 小时，Refresh Token 有效期 30 天（Device Flow 自�
 
 ## 搜索消息
 
-走 `POST /open-apis/im/v1/messages/search`。`--start-time`/`--end-time` 写入 `filter.time_range`（RFC3339；纯数字仍按 Unix 秒转换）。`--chat-type group_chat|p2p_chat` 映射为 `group|p2p`。`--enrich` 用 `GET /im/v1/messages/mget` 批量补全（每批最多 50）。
+走 `POST /open-apis/im/v1/messages/search`。`--as bot|user|auto`（默认 auto；已配置 User 刷新失败 fail-closed）。`--start-time`/`--end-time` 写入 `filter.time_range`（RFC3339；纯数字仍按 Unix 秒转换）。`--chat-type group_chat|p2p_chat` 映射为 `group|p2p`。`--enrich` 用 `GET /im/v1/messages/mget` 批量补全（每批最多 50）。`--page-all` 最多 40 页；`--page-limit` 1–40，`0` 在 `--page-all` 时等于 40（不是无限）。非法 `--format`/`--jq` 在身份解析和发网前失败。
 
 ```bash
 feishu-cli search messages "关键词" \

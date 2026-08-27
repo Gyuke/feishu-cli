@@ -289,4 +289,10 @@ func init() {
 	addCardContentTypeFlag(searchMessagesCmd)
 	output.AddFormatFlags(searchMessagesCmd)
 	output.AddPaginationFlags(searchMessagesCmd)
+	if f := searchMessagesCmd.Flags().Lookup("page-all"); f != nil {
+		f.Usage = "自动翻页拉取结果（最多 40 页）"
+	}
+	if f := searchMessagesCmd.Flags().Lookup("page-limit"); f != nil {
+		f.Usage = "自动翻页页数（1-40；0 在 --page-all 时等于 40，不是无限）"
+	}
 }

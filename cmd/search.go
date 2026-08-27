@@ -15,7 +15,8 @@ var searchCmd = &cobra.Command{
   docs      搜索文档和 Wiki
 
 注意:
-  搜索功能必须使用 User Access Token（用户授权令牌）。
+  search docs / search apps 必须使用 User Access Token。
+  search messages 使用 --as bot|user|auto（默认 auto；已配置 User 刷新失败 fail-closed）。
   推荐先用 auth check 预检 scope，再通过 Device Flow 登录。
 
 获取 User Access Token:
