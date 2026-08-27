@@ -7,6 +7,7 @@ import (
 	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/config"
+	"github.com/riba2534/feishu-cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -36,7 +37,7 @@ var authStatusCmd = &cobra.Command{
 		token, err := auth.LoadToken()
 		if err != nil {
 			if output == "json" {
-				out := map[string]any{"logged_in": false, "error": err.Error()}
+				out := map[string]any{"logged_in": false, "error": err.Error(), "catalog": registry.Status()}
 				attachProfileContext(out)
 				return printJSON(out)
 			}
@@ -49,12 +50,14 @@ var authStatusCmd = &cobra.Command{
 					"logged_in": false,
 					"identity":  "bot",
 					"note":      "未登录用户身份，仅可使用应用身份（App Token）能力",
+					"catalog":   registry.Status(),
 				}
 				attachProfileContext(out)
 				return printJSON(out)
 			}
 			fmt.Println("授权状态: 未登录")
 			printProfileContextHuman()
+			printCatalogHuman()
 			fmt.Println("  使用 feishu-cli auth login 进行授权")
 			return nil
 		}
@@ -92,6 +95,7 @@ var authStatusCmd = &cobra.Command{
 			"access_token_valid":    token.IsAccessTokenValid(),
 			"refresh_token_present": refreshPresent,
 			"health":                health,
+			"catalog":               registry.Status(),
 		}
 		if note != "" {
 			result["note"] = note
@@ -165,6 +169,7 @@ var authStatusCmd = &cobra.Command{
 		if note != "" {
 			fmt.Printf("  提示:           %s\n", note)
 		}
+		printCatalogHuman()
 		if verify {
 			if verified, _ := result["verified"].(bool); verified {
 				fmt.Println("  在线校验:       通过")
@@ -175,6 +180,12 @@ var authStatusCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+func printCatalogHuman() {
+	info := registry.Status()
+	fmt.Printf("  Catalog:        source=%s version=%s services=%d methods=%d\n",
+		info.Source, info.RuntimeVersion, info.ServiceCount, info.MethodCount)
 }
 
 // formatDuration 格式化时间间隔为友好显示

@@ -74,6 +74,62 @@ func TestSchemaJSONFormat(t *testing.T) {
 	}
 }
 
+func TestSchemaStatusJSON(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runSchemaStatus(&buf, "json"); err != nil {
+		t.Fatal(err)
+	}
+	var info map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &info); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	for _, k := range []string{"source", "embedded_version", "runtime_version", "service_count", "method_count", "brand"} {
+		if _, ok := info[k]; !ok {
+			t.Errorf("schema status missing %s", k)
+		}
+	}
+	src, _ := info["source"].(string)
+	if src != "embedded" && src != "cache" && src != "runtime" {
+		t.Errorf("unexpected source %q", src)
+	}
+	if n, _ := info["service_count"].(float64); n < 1 {
+		t.Errorf("service_count = %v", info["service_count"])
+	}
+}
+
+func TestSchemaPrettyIncludesCatalog(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runSchema(&buf, "", "pretty"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "Catalog:") {
+		t.Fatalf("pretty service list should include Catalog header:\n%s", buf.String())
+	}
+}
+
+func TestFindResourceByPathNested(t *testing.T) {
+	resources := map[string]interface{}{
+		"spaces": map[string]interface{}{
+			"methods": map[string]interface{}{"list": map[string]interface{}{"httpMethod": "GET"}},
+			"resources": map[string]interface{}{
+				"items": map[string]interface{}{
+					"methods": map[string]interface{}{"get": map[string]interface{}{"httpMethod": "GET"}},
+				},
+			},
+		},
+	}
+	res, name, remaining := findResourceByPath(resources, []string{"spaces", "items", "get"})
+	if res == nil {
+		t.Fatal("nested resource not found")
+	}
+	if name != "spaces.items" {
+		t.Fatalf("name = %q", name)
+	}
+	if len(remaining) != 1 || remaining[0] != "get" {
+		t.Fatalf("remaining = %v", remaining)
+	}
+}
+
 func TestSchemaRejectsUnknownFormat(t *testing.T) {
 	var buf bytes.Buffer
 	err := runSchema(&buf, "im.messages.delete", "yaml")

@@ -16,6 +16,7 @@ import (
 	"github.com/riba2534/feishu-cli/internal/auth"
 	"github.com/riba2534/feishu-cli/internal/config"
 	"github.com/riba2534/feishu-cli/internal/profile"
+	"github.com/riba2534/feishu-cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -61,6 +62,7 @@ var doctorCmd = &cobra.Command{
   endpoint_larksuite   open.larksuite.com HTTPS 可达
   proxy                HTTP(S)_PROXY 与 NO_PROXY 配置合理
   dependencies         Go 版本 / SDK 版本
+  catalog              OpenAPI catalog 来源（embedded/cache/runtime）、版本、service/method 数
 
 输出：
   默认：pretty 表格
@@ -70,6 +72,9 @@ var doctorCmd = &cobra.Command{
   0 = 全部通过（或仅 warn）
   1 = 至少一项 fail`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if doctorOffline {
+			registry.DisableRemoteForProcess()
+		}
 		_ = config.Init(cfgFile) // 复用 root.go 的 cfgFile
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -129,6 +134,11 @@ var doctorCmd = &cobra.Command{
 			results = append(results, checkDependencies())
 		}
 
+		// 7. catalog
+		if shouldRun("catalog", only) {
+			results = append(results, checkCatalog())
+		}
+
 		// 输出
 		if doctorJSON {
 			return outputJSON(results)
@@ -155,6 +165,7 @@ var validOnlyNames = map[string]bool{
 	"endpoint_larksuite": true,
 	"proxy":              true,
 	"dependencies":       true,
+	"catalog":            true,
 }
 
 // parseOnly 解析 --only 参数；空字符串表示全部；包含未知 name 返回 error
@@ -377,6 +388,20 @@ func checkDependencies() checkResult {
 		}
 	}
 	return checkPass("dependencies", fmt.Sprintf("go=%s larksuite-sdk=%s", goVer, sdkVer))
+}
+
+func checkCatalog() checkResult {
+	info := registry.Status()
+	msg := fmt.Sprintf("source=%s brand=%s embedded=%s runtime=%s services=%d methods=%d remote=%v",
+		info.Source, info.Brand, info.EmbeddedVersion, info.RuntimeVersion,
+		info.ServiceCount, info.MethodCount, info.RemoteEnabled)
+	if info.ServiceCount == 0 {
+		return checkFail("catalog", msg, "embedded catalog 为空；检查编译是否包含 meta_data.json，或设置 FEISHU_CLI_META_URL 拉取 overlay")
+	}
+	if !info.RemoteEnabled {
+		return checkWarn("catalog", msg, "远端 overlay 已关闭（--offline 或 FEISHU_CLI_REMOTE_META=off），使用 embedded baseline")
+	}
+	return checkPass("catalog", msg)
 }
 
 // ── 输出 ──

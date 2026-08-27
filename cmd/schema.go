@@ -50,30 +50,34 @@ var schemaCmd = &cobra.Command{
 	Short: "查询 OpenAPI Schema（path/verb/参数/scope）",
 	Long: `查询飞书开放平台 OpenAPI 的方法 schema：HTTP 路径、动词、参数、请求体、响应体、scope。
 
-数据来源于内置 internal/registry/meta_data.json（编译期 embed），无需网络也无需 token。
+数据来源：编译期 embed 的 internal/registry/meta_data.json 永远是离线 baseline；
+运行时可从官方 public api_definition?protocol=meta 拉取 overlay（5s 超时、10MB 上限、24h TTL、无凭证）。
+远端失败时静默回退 embedded。FEISHU_CLI_REMOTE_META=off 可关闭 overlay。
 
 路径格式: <service>.<resource>.<method>
   - service:  域名（im / docs / drive / bitable / calendar / vc / mail / ...）
-  - resource: 资源（messages / events / records / ...，可含 .，如 chat.members）
+  - resource: 资源（messages / events / records / ...，可含 .，如 chat.members；支持嵌套 resources）
   - method:   动作（create / get / list / update / delete / ...）
 
 子命令:
   schema list                列出所有可用 service
   schema list --service im   列出 im 域下所有 resource.method
+  schema status              显示 catalog 来源（embedded/cache/runtime）、版本、service/method 数
   schema <path>              查询某个具体 method（默认 pretty 输出）
   schema <path> --format json   JSON 格式输出（AI Agent 推荐）
 
 示例:
   feishu-cli schema list
   feishu-cli schema list --service im
+  feishu-cli schema status --format json
   feishu-cli schema im.messages.delete
   feishu-cli schema im.messages.delete --format json
   feishu-cli schema calendar.events
   feishu-cli schema drive.files
 
 注意事项:
-  - 不需要 token，纯本地查询
-  - 内置 schema 覆盖 12 个 service（approval/attendance/calendar/drive/im/mail/minutes/sheets/slides/task/vc/wiki）
+  - 查询 schema 不需要 token；overlay 请求也不携带 App/User 凭证
+  - 内置 baseline 覆盖 12 个 service；overlay 可能增加官方新增 service/method
   - 完整 OpenAPI 文档见 docUrl 字段或 https://open.feishu.cn/`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -88,6 +92,46 @@ var schemaCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(schemaCmd)
 	schemaCmd.Flags().StringVar(&schemaFormat, "format", "pretty", "输出格式: pretty (默认) | json")
+	schemaCmd.AddCommand(schemaStatusCmd)
+	schemaStatusCmd.Flags().StringVar(&schemaFormat, "format", "pretty", "输出格式: pretty (默认) | json")
+}
+
+var schemaStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "显示 OpenAPI catalog 来源、版本与规模",
+	Long: `显示当前进程使用的 OpenAPI catalog：
+
+  source            embedded（仅编译期基线）/ cache（磁盘 overlay）/ runtime（本次远端拉取）
+  embedded_version  编译进二进制的 meta 版本
+  cache_version     本地 ~/.feishu-cli/cache/remote_meta.json 版本
+  runtime_version   当前合并后实际使用的版本
+  service_count / method_count  含嵌套 resource 的统计
+
+overlay 从官方 public api_definition?protocol=meta 拉取，不携带凭证；失败回退 embedded。`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSchemaStatus(os.Stdout, schemaFormat)
+	},
+}
+
+func runSchemaStatus(w io.Writer, format string) error {
+	var err error
+	format, err = normalizeSchemaFormat(format)
+	if err != nil {
+		return err
+	}
+	info := registry.Status()
+	if format == "json" {
+		return writeJSON(w, info)
+	}
+	fmt.Fprintln(w, formatCatalogPretty(info))
+	return nil
+}
+
+func formatCatalogPretty(info registry.CatalogInfo) string {
+	return fmt.Sprintf("Catalog: source=%s brand=%s embedded=%s runtime=%s cache=%s services=%d methods=%d remote=%v",
+		info.Source, info.Brand, info.EmbeddedVersion, info.RuntimeVersion, info.CacheVersion,
+		info.ServiceCount, info.MethodCount, info.RemoteEnabled)
 }
 
 // runSchema dispatches based on path depth.
@@ -164,17 +208,34 @@ func runSchema(w io.Writer, path, format string) error {
 func findResourceByPath(resources map[string]interface{}, parts []string) (map[string]interface{}, string, []string) {
 	for i := len(parts); i >= 1; i-- {
 		candidate := strings.Join(parts[:i], ".")
-		if res, ok := resources[candidate]; ok {
-			if resMap, ok := res.(map[string]interface{}); ok {
-				return resMap, candidate, parts[i:]
+		res, ok := resources[candidate]
+		if !ok {
+			continue
+		}
+		resMap, ok := res.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		remaining := parts[i:]
+		if len(remaining) > 0 {
+			if nested, ok := resMap["resources"].(map[string]interface{}); ok && len(nested) > 0 {
+				if sub, subName, subRem := findResourceByPath(nested, remaining); sub != nil {
+					full := candidate
+					if subName != "" {
+						full = candidate + "." + subName
+					}
+					return sub, full, subRem
+				}
 			}
 		}
+		return resMap, candidate, remaining
 	}
 	return nil, "", nil
 }
 
 func printServices(w io.Writer, format string) error {
 	services := registry.ListFromMetaProjects()
+	info := registry.Status()
 	if format == "json" {
 		list := make([]map[string]interface{}, 0, len(services))
 		for _, s := range services {
@@ -188,6 +249,7 @@ func printServices(w io.Writer, format string) error {
 		}
 		return writeJSON(w, list)
 	}
+	fmt.Fprintln(w, formatCatalogPretty(info))
 	fmt.Fprintln(w, "可用 service（共", len(services), "个）：")
 	fmt.Fprintln(w)
 	for _, s := range services {
@@ -213,28 +275,37 @@ func printResourceList(w io.Writer, spec map[string]interface{}) error {
 	fmt.Fprintf(w, "Base path: %s\n\n", servicePath)
 
 	resources, _ := spec["resources"].(map[string]interface{})
-	for _, resName := range sortedKeys(resources) {
-		resMap, _ := resources[resName].(map[string]interface{})
-		methods, _ := resMap["methods"].(map[string]interface{})
-		if len(methods) == 0 {
-			continue
-		}
-		fmt.Fprintf(w, "  %s\n", resName)
-		for _, methodName := range sortedKeys(methods) {
-			m, _ := methods[methodName].(map[string]interface{})
-			httpMethod := registry.GetStrFromMap(m, "httpMethod")
-			desc := registry.GetStrFromMap(m, "description")
-			desc = schemaTruncate(desc, 70)
-			danger := ""
-			if d, _ := m["danger"].(bool); d {
-				danger = " [danger]"
-			}
-			fmt.Fprintf(w, "    %-7s %-22s %s%s\n", httpMethod, methodName, desc, danger)
-		}
-		fmt.Fprintln(w)
-	}
+	printNamedResources(w, resources, "")
 	fmt.Fprintf(w, "用法: feishu-cli schema %s.<resource>.<method>\n", name)
 	return nil
+}
+
+func printNamedResources(w io.Writer, resources map[string]interface{}, prefix string) {
+	for _, resName := range sortedKeys(resources) {
+		resMap, _ := resources[resName].(map[string]interface{})
+		full := resName
+		if prefix != "" {
+			full = prefix + "." + resName
+		}
+		methods, _ := resMap["methods"].(map[string]interface{})
+		if len(methods) > 0 {
+			fmt.Fprintf(w, "  %s\n", full)
+			for _, methodName := range sortedKeys(methods) {
+				m, _ := methods[methodName].(map[string]interface{})
+				httpMethod := registry.GetStrFromMap(m, "httpMethod")
+				desc := schemaTruncate(registry.GetStrFromMap(m, "description"), 70)
+				danger := ""
+				if d, _ := m["danger"].(bool); d {
+					danger = " [danger]"
+				}
+				fmt.Fprintf(w, "    %-7s %-22s %s%s\n", httpMethod, methodName, desc, danger)
+			}
+			fmt.Fprintln(w)
+		}
+		if nested, ok := resMap["resources"].(map[string]interface{}); ok {
+			printNamedResources(w, nested, full)
+		}
+	}
 }
 
 func printResourceDetail(w io.Writer, serviceName, resName string, resource map[string]interface{}) error {

@@ -255,6 +255,29 @@ func TestCheckProxy_NoProxyFormats(t *testing.T) {
 	}
 }
 
+func TestCheckCatalog(t *testing.T) {
+	r := checkCatalog()
+	if r.Name != "catalog" {
+		t.Errorf("name = %s", r.Name)
+	}
+	if r.Status == "fail" {
+		t.Errorf("embedded catalog 不应 fail: %s", r.Message)
+	}
+	if !strings.Contains(r.Message, "source=") || !strings.Contains(r.Message, "services=") {
+		t.Errorf("message 应含 source/services: %s", r.Message)
+	}
+}
+
+func TestParseOnlyCatalog(t *testing.T) {
+	got, err := parseOnly("catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got["catalog"] {
+		t.Fatal("catalog should be a valid doctor check")
+	}
+}
+
 func TestCheckDependencies(t *testing.T) {
 	r := checkDependencies()
 	if r.Status != "pass" {

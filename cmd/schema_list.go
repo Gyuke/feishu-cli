@@ -57,22 +57,33 @@ func runSchemaList(w io.Writer, service, format string) error {
 		// Return flat list of {service, resource, method, httpMethod, description}
 		var rows []map[string]interface{}
 		resources, _ := spec["resources"].(map[string]interface{})
-		for _, resName := range sortedKeys(resources) {
-			resMap, _ := resources[resName].(map[string]interface{})
-			methods, _ := resMap["methods"].(map[string]interface{})
-			for _, mName := range sortedKeys(methods) {
-				m, _ := methods[mName].(map[string]interface{})
-				rows = append(rows, map[string]interface{}{
-					"service":     service,
-					"resource":    resName,
-					"method":      mName,
-					"path":        service + "." + resName + "." + mName,
-					"httpMethod":  registry.GetStrFromMap(m, "httpMethod"),
-					"description": registry.GetStrFromMap(m, "description"),
-				})
-			}
-		}
+		appendSchemaListRows(&rows, service, resources, "")
 		return writeJSON(w, rows)
 	}
 	return printResourceList(w, spec)
+}
+
+func appendSchemaListRows(rows *[]map[string]interface{}, service string, resources map[string]interface{}, prefix string) {
+	for _, resName := range sortedKeys(resources) {
+		resMap, _ := resources[resName].(map[string]interface{})
+		full := resName
+		if prefix != "" {
+			full = prefix + "." + resName
+		}
+		methods, _ := resMap["methods"].(map[string]interface{})
+		for _, mName := range sortedKeys(methods) {
+			m, _ := methods[mName].(map[string]interface{})
+			*rows = append(*rows, map[string]interface{}{
+				"service":     service,
+				"resource":    full,
+				"method":      mName,
+				"path":        service + "." + full + "." + mName,
+				"httpMethod":  registry.GetStrFromMap(m, "httpMethod"),
+				"description": registry.GetStrFromMap(m, "description"),
+			})
+		}
+		if nested, ok := resMap["resources"].(map[string]interface{}); ok {
+			appendSchemaListRows(rows, service, nested, full)
+		}
+	}
 }
