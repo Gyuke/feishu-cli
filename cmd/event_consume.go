@@ -20,8 +20,9 @@ var eventConsumeCmd = &cobra.Command{
 	Long: `通过飞书 WebSocket 长连接订阅指定 EventKey，每条事件作为一行 JSON（NDJSON）写到 stdout。
 
 启动协议:
-  本命令启动后会先在 stderr 输出一行 [event] ready event_key=<key>。
-  AI Agent / subprocess 父进程应阻塞等待该 ready marker，再开始读 stdout。
+  服务端订阅（如审批/VC）注册完成、且 WebSocket 握手就绪后，才会在 stderr 输出
+  一行 [event] ready event_key=<key>。父进程应阻塞等待该行再读 stdout；
+  握手完成前不会发 ready。VC EventKey 还需 User Token 做 pre-consume。
 
 退出条件（whichever 先触发）:
   - 接收 N 条事件后退出：--max-events N
@@ -168,7 +169,7 @@ func init() {
 	eventConsumeCmd.Flags().Int("max-events", 0, "接收到 N 条事件后退出（0=不限制）")
 	eventConsumeCmd.Flags().Duration("timeout", 0, "运行 D 时长后退出（如 30s / 5m，0=不限制）")
 	eventConsumeCmd.Flags().String("jq", "", "极简点路径过滤，如 .event.message（不支持完整 jq 语法）")
-	eventConsumeCmd.Flags().String("user-access-token", "", "User Access Token（审批等需服务端订阅注册的 EventKey 使用）")
+	eventConsumeCmd.Flags().String("user-access-token", "", "User Access Token（审批/VC 等需服务端订阅注册的 EventKey 使用）")
 	eventConsumeCmd.Flags().String("output-dir", "", "把每条事件 dump 为 <event_id>.json 到该目录（不影响 stdout）")
 	eventConsumeCmd.Flags().Bool("quiet", false, "静默模式：抑制 stderr 诊断（不影响 stdout 事件流；ready marker 仍会输出，便于父进程判断就绪）")
 }

@@ -122,3 +122,74 @@ func TestRegisterSubscriptionsRequiresUserToken(t *testing.T) {
 		t.Fatalf("缺 User Token 应报错并提示登录，实际: %v", err)
 	}
 }
+
+func TestSubscriptionRequestBodiesApprovalVsVC(t *testing.T) {
+	approval := KeyDefinition{
+		EventType:      "approval.instance.status_changed_v4",
+		SubscribeTypes: []string{"INVOLVED_APPROVAL", "MANAGED_APPROVAL"},
+	}
+	got := subscriptionRequestBodies(approval)
+	if len(got) != 2 || got[0]["subscription_type"] != "INVOLVED_APPROVAL" || got[1]["subscription_type"] != "MANAGED_APPROVAL" {
+		t.Fatalf("审批 body = %#v", got)
+	}
+	if _, ok := got[0]["event_type"]; ok {
+		t.Fatal("审批 body 不应带 event_type")
+	}
+
+	vc := KeyDefinition{
+		EventType:          "vc.meeting.participant_meeting_started_v1",
+		SubscribeEventType: true,
+		SubscribeTypes:     []string{"should-be-ignored"},
+	}
+	got = subscriptionRequestBodies(vc)
+	if len(got) != 1 || got[0]["event_type"] != "vc.meeting.participant_meeting_started_v1" {
+		t.Fatalf("VC body = %#v, want event_type=participant_meeting_started", got)
+	}
+	if _, ok := got[0]["subscription_type"]; ok {
+		t.Fatal("VC body 不应带 subscription_type")
+	}
+}
+
+func TestRegisterSubscriptionsVCEventTypePathAndBody(t *testing.T) {
+	var gotPath, gotBody, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		buf := new(strings.Builder)
+		_, _ = io.Copy(buf, r.Body)
+		gotBody = buf.String()
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	r := NewRuntime(ConsumeOptions{
+		AppID:           "cli_test",
+		AppSecret:       "secret",
+		EventKey:        "vc.meeting.participant_meeting_started_v1",
+		BaseURL:         srv.URL,
+		UserAccessToken: "u-test",
+		ErrOut:          io.Discard,
+	})
+	def := KeyDefinition{
+		Key:                "vc.meeting.participant_meeting_started_v1",
+		EventType:          "vc.meeting.participant_meeting_started_v1",
+		SubscribePath:      "/open-apis/vc/v1/meetings/subscription",
+		SubscribeEventType: true,
+		Scopes:             []string{"vc:meeting.meetingevent:read"},
+	}
+	if err := r.registerSubscriptions(context.Background(), def); err != nil {
+		t.Fatalf("VC 订阅应成功，实际: %v", err)
+	}
+	if gotPath != "/open-apis/vc/v1/meetings/subscription" {
+		t.Errorf("path = %s", gotPath)
+	}
+	if gotAuth != "Bearer u-test" {
+		t.Errorf("Authorization = %s", gotAuth)
+	}
+	if !strings.Contains(gotBody, `"event_type":"vc.meeting.participant_meeting_started_v1"`) {
+		t.Errorf("body = %s, want event_type", gotBody)
+	}
+	if strings.Contains(gotBody, "subscription_type") {
+		t.Errorf("VC body 不应含 subscription_type: %s", gotBody)
+	}
+}

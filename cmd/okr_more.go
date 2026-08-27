@@ -107,7 +107,7 @@ var okrProgressUpdateCmd = &cobra.Command{
   --content           纯文本内容（自动包装为 ContentBlock 富文本）
   --content-json      原始 ContentBlock JSON（与 --content 二选一）
   --progress-percent  进度百分比（数字，配合 --progress-status 使用）
-  --progress-status   进度状态：normal / risky / overdue
+  --progress-status   进度状态：normal / overdue / done
   --user-id-type      用户 ID 类型：open_id（默认）/ union_id / user_id
   --output, -o        输出格式：json
 
@@ -277,9 +277,12 @@ func parseOKRProgressRate(percentStr, statusStr string) (*client.OKRProgressRate
 	}
 	rate := &client.OKRProgressRateInput{Percent: percent}
 	if statusStr != "" {
+		if hint := client.OKRProgressStatusCompatHint(statusStr); hint != "" {
+			return nil, fmt.Errorf("%s", hint)
+		}
 		status, ok := client.ParseOKRProgressStatus(statusStr)
 		if !ok {
-			return nil, fmt.Errorf("--progress-status 必须为 normal / risky / overdue")
+			return nil, fmt.Errorf("--progress-status 必须为 normal / overdue / done")
 		}
 		rate.Status = &status
 	}
@@ -297,7 +300,7 @@ func init() {
 	okrProgressUpdateCmd.Flags().String("content", "", "纯文本内容")
 	okrProgressUpdateCmd.Flags().String("content-json", "", "原始 ContentBlock JSON")
 	okrProgressUpdateCmd.Flags().String("progress-percent", "", "进度百分比")
-	okrProgressUpdateCmd.Flags().String("progress-status", "", "进度状态：normal / risky / overdue")
+	okrProgressUpdateCmd.Flags().String("progress-status", "", "进度状态：normal / overdue / done")
 	okrProgressUpdateCmd.Flags().String("user-id-type", "open_id", "用户 ID 类型：open_id / union_id / user_id")
 	okrProgressUpdateCmd.Flags().StringP("output", "o", "", "输出格式：json")
 

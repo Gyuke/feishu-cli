@@ -40,10 +40,17 @@ type KeyDefinition struct {
 	CardCallback bool `json:"card_callback,omitempty"`
 
 	// SubscribePath 非空时，consume 启动前需以 User 身份 POST 该端点完成服务端订阅注册
-	// （否则连上 WS 也收不到事件）。对 SubscribeTypes 中每个类型各调一次，
-	// body 形如 {"subscription_type": "<type>"}。订阅是持久的用户级关系，进程退出不注销。
-	SubscribePath  string   `json:"subscribe_path,omitempty"`
-	SubscribeTypes []string `json:"subscribe_types,omitempty"`
+	// （否则连上 WS 也收不到事件）。
+	//
+	//   - SubscribeEventType=true：body 为 {"event_type": EventType}（VC/note/recording）。
+	//   - SubscribeTypes 非空：对每个类型各调一次，body 形如 {"subscription_type": "<type>"}（审批 v4）。
+	//
+	// UnsubscribePath 非空时，进程退出会 best-effort POST 注销（VC 订阅是会话级）；
+	// 审批订阅是持久用户级关系，不填 UnsubscribePath。
+	SubscribePath      string   `json:"subscribe_path,omitempty"`
+	UnsubscribePath    string   `json:"unsubscribe_path,omitempty"`
+	SubscribeTypes     []string `json:"subscribe_types,omitempty"`
+	SubscribeEventType bool     `json:"subscribe_event_type,omitempty"`
 }
 
 // keyRegistry 是手工维护的常用 EventKey 列表。
@@ -321,20 +328,104 @@ var keyRegistry = []KeyDefinition{
 		SubscribeTypes: []string{"INVOLVED_APPROVAL", "MANAGED_APPROVAL"},
 	},
 
-	// ---------- 视频会议 ----------
+	// ---------- 视频会议（用户参会生命周期 + 纪要/录制；均需 User 身份 pre-consume）----------
 	{
-		Key:         "vc.meeting.meeting_started_v1",
-		EventType:   "vc.meeting.meeting_started_v1",
-		Description: "VC 会议开始",
+		Key:         "vc.meeting.participant_meeting_started_v1",
+		EventType:   "vc.meeting.participant_meeting_started_v1",
+		Description: "当前用户参与的会议已开始",
 		Domain:      "vc",
-		Scopes:      []string{"vc:meeting"},
+		Scopes:      []string{"vc:meeting.meetingevent:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.meeting.participant_meeting_started_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/meetings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/meetings/unsubscription",
+		SubscribeEventType: true,
 	},
 	{
-		Key:         "vc.meeting.meeting_ended_v1",
-		EventType:   "vc.meeting.meeting_ended_v1",
-		Description: "VC 会议结束",
+		Key:         "vc.meeting.participant_meeting_joined_v1",
+		EventType:   "vc.meeting.participant_meeting_joined_v1",
+		Description: "当前用户已加入会议",
 		Domain:      "vc",
-		Scopes:      []string{"vc:meeting"},
+		Scopes:      []string{"vc:meeting.meetingevent:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.meeting.participant_meeting_joined_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/meetings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/meetings/unsubscription",
+		SubscribeEventType: true,
+	},
+	{
+		Key:         "vc.meeting.participant_meeting_ended_v1",
+		EventType:   "vc.meeting.participant_meeting_ended_v1",
+		Description: "当前用户参与的会议已结束",
+		Domain:      "vc",
+		Scopes:      []string{"vc:meeting.meetingevent:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.meeting.participant_meeting_ended_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/meetings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/meetings/unsubscription",
+		SubscribeEventType: true,
+	},
+	{
+		Key:         "vc.note.generated_v1",
+		EventType:   "vc.note.generated_v1",
+		Description: "智能纪要已生成（会议/录制/上传等来源）",
+		Domain:      "vc",
+		Scopes:      []string{"vc:note:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.note.generated_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/notes/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/notes/unsubscription",
+		SubscribeEventType: true,
+	},
+	{
+		Key:         "vc.recording.recording_started_v1",
+		EventType:   "vc.recording.recording_started_v1",
+		Description: "录制开始（recording_bean；仅飞书软件侧）",
+		Domain:      "vc",
+		Scopes:      []string{"vc:recording:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.recording.recording_started_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/recordings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/recordings/unsubscription",
+		SubscribeEventType: true,
+	},
+	{
+		Key:         "vc.recording.recording_transcript_generated_v1",
+		EventType:   "vc.recording.recording_transcript_generated_v1",
+		Description: "录制逐字稿条目已生成（recording_bean；仅飞书软件侧）",
+		Domain:      "vc",
+		Scopes:      []string{"vc:recording:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.recording.recording_transcript_generated_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/recordings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/recordings/unsubscription",
+		SubscribeEventType: true,
+	},
+	{
+		Key:         "vc.recording.recording_ended_v1",
+		EventType:   "vc.recording.recording_ended_v1",
+		Description: "录制结束并上传成功（recording_bean；仅飞书软件侧）",
+		Domain:      "vc",
+		Scopes:      []string{"vc:recording:read"},
+		AuthTypes:   []string{"user"},
+		RequiredConsoleEvents: []string{
+			"vc.recording.recording_ended_v1",
+		},
+		SubscribePath:      "/open-apis/vc/v1/recordings/subscription",
+		UnsubscribePath:    "/open-apis/vc/v1/recordings/unsubscription",
+		SubscribeEventType: true,
 	},
 }
 

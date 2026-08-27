@@ -143,6 +143,74 @@ func TestValidateOutputDir(t *testing.T) {
 	}
 }
 
+func TestVCEventKeyCatalogOfficial(t *testing.T) {
+	for _, old := range []string{"vc.meeting.meeting_started_v1", "vc.meeting.meeting_ended_v1"} {
+		if _, ok := Lookup(old); ok {
+			t.Errorf("旧 EventKey %s 应替换为 participant_meeting_* / note / recording", old)
+		}
+	}
+
+	type want struct {
+		scope   string
+		subPath string
+		unsub   string
+	}
+	required := map[string]want{
+		"vc.meeting.participant_meeting_started_v1": {
+			scope: "vc:meeting.meetingevent:read", subPath: "/open-apis/vc/v1/meetings/subscription", unsub: "/open-apis/vc/v1/meetings/unsubscription",
+		},
+		"vc.meeting.participant_meeting_joined_v1": {
+			scope: "vc:meeting.meetingevent:read", subPath: "/open-apis/vc/v1/meetings/subscription", unsub: "/open-apis/vc/v1/meetings/unsubscription",
+		},
+		"vc.meeting.participant_meeting_ended_v1": {
+			scope: "vc:meeting.meetingevent:read", subPath: "/open-apis/vc/v1/meetings/subscription", unsub: "/open-apis/vc/v1/meetings/unsubscription",
+		},
+		"vc.note.generated_v1": {
+			scope: "vc:note:read", subPath: "/open-apis/vc/v1/notes/subscription", unsub: "/open-apis/vc/v1/notes/unsubscription",
+		},
+		"vc.recording.recording_started_v1": {
+			scope: "vc:recording:read", subPath: "/open-apis/vc/v1/recordings/subscription", unsub: "/open-apis/vc/v1/recordings/unsubscription",
+		},
+		"vc.recording.recording_transcript_generated_v1": {
+			scope: "vc:recording:read", subPath: "/open-apis/vc/v1/recordings/subscription", unsub: "/open-apis/vc/v1/recordings/unsubscription",
+		},
+		"vc.recording.recording_ended_v1": {
+			scope: "vc:recording:read", subPath: "/open-apis/vc/v1/recordings/subscription", unsub: "/open-apis/vc/v1/recordings/unsubscription",
+		},
+	}
+	for key, w := range required {
+		def, ok := Lookup(key)
+		if !ok {
+			t.Errorf("缺少官方 EventKey %s", key)
+			continue
+		}
+		if def.EventType != key {
+			t.Errorf("%s EventType = %q", key, def.EventType)
+		}
+		if def.Domain != "vc" {
+			t.Errorf("%s Domain = %q, want vc", key, def.Domain)
+		}
+		if !containsString(def.Scopes, w.scope) {
+			t.Errorf("%s Scopes = %v, want %s", key, def.Scopes, w.scope)
+		}
+		if !containsString(def.AuthTypes, "user") {
+			t.Errorf("%s AuthTypes = %v, want user", key, def.AuthTypes)
+		}
+		if !containsString(def.RequiredConsoleEvents, key) {
+			t.Errorf("%s RequiredConsoleEvents = %v", key, def.RequiredConsoleEvents)
+		}
+		if def.SubscribePath != w.subPath {
+			t.Errorf("%s SubscribePath = %q, want %q", key, def.SubscribePath, w.subPath)
+		}
+		if def.UnsubscribePath != w.unsub {
+			t.Errorf("%s UnsubscribePath = %q, want %q", key, def.UnsubscribePath, w.unsub)
+		}
+		if !def.SubscribeEventType {
+			t.Errorf("%s 应以 event_type 做 User pre-consume", key)
+		}
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {

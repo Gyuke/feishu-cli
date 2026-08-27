@@ -41,11 +41,19 @@ type ConsumeOptions struct {
 	Timeout   time.Duration // 0 = 不限制
 
 	// UserAccessToken 供需要服务端订阅注册的 EventKey（KeyDefinition.SubscribePath 非空，
-	// 如审批 v4 事件）在 consume 启动前以 User 身份注册订阅关系。其余 EventKey 不需要。
+	// 如审批 v4、VC participant/note/recording）在 consume 启动前以 User 身份注册订阅关系。
 	UserAccessToken string
 
 	// 守护进程协议
 	Bus *Bus // 已构造好的 bus 句柄；nil 时不注册到 bus.json（test 模式）
+
+	// StartWS 注入 WebSocket 启动（测试用）。onHandshake 必须在真实连接就绪后调用一次。
+	// nil 时走 oapi-sdk-go ws.Client；SDK 无 OnConnected 回调，生产路径用其
+	// Dial 成功后的 "connected to" Info 日志作为握手证明。
+	StartWS func(ctx context.Context, onHandshake func()) error
+
+	// ReadyOut 覆盖 ready marker 输出；nil 时写 os.Stderr（--quiet 也不吞，供父进程等待）。
+	ReadyOut io.Writer
 }
 
 // Runtime 表示一次 consume 会话的运行时状态。
@@ -53,11 +61,12 @@ type ConsumeOptions struct {
 type Runtime struct {
 	opts ConsumeOptions
 
-	received atomic.Int64       // 已发出的事件计数（受 MaxEvents 约束）
-	stopOnce atomic.Bool        // 多触发源（signal/timeout/maxEvents）下保证 cancel 只触发一次
-	cancel   context.CancelFunc // emit 触发 max-events 退出时调用，由 Run 在派生 subCtx 后注入
-	reasonMu sync.Mutex         // 串行写入 reason 字段，避免 timeout/maxEvents 并发竞争
-	reason   string             // 多触发源时记录原因；Run 末尾读取
+	received  atomic.Int64       // 已发出的事件计数（受 MaxEvents 约束）
+	stopOnce  atomic.Bool        // 多触发源（signal/timeout/maxEvents）下保证 cancel 只触发一次
+	readyOnce atomic.Bool        // ready marker 只发一次，且必须在 pre-consume + 握手之后
+	cancel    context.CancelFunc // emit 触发 max-events 退出时调用，由 Run 在派生 subCtx 后注入
+	reasonMu  sync.Mutex         // 串行写入 reason 字段，避免 timeout/maxEvents 并发竞争
+	reason    string             // 多触发源时记录原因；Run 末尾读取
 }
 
 // NewRuntime 构造一个 consume runtime。
@@ -95,11 +104,15 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		return "error", err
 	}
 
-	// 需要服务端订阅注册的 EventKey（如审批 v4）：连 WS 前先以 User 身份注册订阅关系，
-	// 否则连上也收不到事件。订阅是持久用户级关系，进程退出不注销。
+	// 需要服务端订阅注册的 EventKey（审批 v4 / VC）：连 WS 前先以 User 身份注册订阅关系，
+	// 否则连上也收不到事件。审批订阅是持久用户级关系，进程退出不注销；
+	// VC 填了 UnsubscribePath，退出时 best-effort 注销。
 	if def.SubscribePath != "" {
 		if err := r.registerSubscriptions(ctx, def); err != nil {
 			return "error", err
+		}
+		if def.UnsubscribePath != "" {
+			defer r.unregisterSubscriptions(def)
 		}
 	}
 
@@ -165,56 +178,167 @@ func (r *Runtime) Run(ctx context.Context) (reason string, err error) {
 		})
 	}
 
-	// 安装 panic recover 包装的 logger，避免 SDK 日志炸 stderr
+	handshakeCh := make(chan struct{})
+	var handshakeOnce sync.Once
+	onHandshake := func() {
+		handshakeOnce.Do(func() { close(handshakeCh) })
+	}
+
+	// ws.Client.Start 在成功握手后会永远阻塞；失败则返回 error。
+	// ready 只能在 pre-consume（上面已完成）且握手信号到达之后发出。
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- r.runWebSocket(subCtx, dis, onHandshake)
+	}()
+
+	select {
+	case <-handshakeCh:
+		r.emitReady()
+		select {
+		case <-subCtx.Done():
+			return r.exitReason(), nil
+		case wsErr := <-errCh:
+			return r.wsExit(wsErr)
+		}
+	case wsErr := <-errCh:
+		// 握手前失败：禁止发 ready。
+		return r.wsExit(wsErr)
+	case <-subCtx.Done():
+		return r.exitReason(), nil
+	}
+}
+
+func (r *Runtime) runWebSocket(ctx context.Context, dis *dispatcher.EventDispatcher, onHandshake func()) error {
+	if r.opts.StartWS != nil {
+		return r.opts.StartWS(ctx, onHandshake)
+	}
+	logger := &handshakeLogger{
+		inner:       newQuietLogger(r.opts.ErrOut),
+		onHandshake: onHandshake,
+	}
 	cli := larkws.NewClient(
 		r.opts.AppID, r.opts.AppSecret,
 		larkws.WithEventHandler(dis),
 		larkws.WithDomain(r.opts.BaseURL),
 		larkws.WithAutoReconnect(true),
-		larkws.WithLogger(newQuietLogger(r.opts.ErrOut)),
-		larkws.WithLogLevel(larkcore.LogLevelWarn),
+		larkws.WithLogger(logger),
+		larkws.WithLogLevel(larkcore.LogLevelInfo),
 	)
+	return cli.Start(ctx)
+}
 
-	// 触发 ready marker：宣告进程初始化完成（WS 握手在 cli.Start 异步执行）。
-	// ★ marker 走真实 os.Stderr 而非 r.opts.ErrOut，避免 --quiet 时 ErrOut=io.Discard
-	//   导致 orchestrator 父进程永远等不到 marker。
-	// ★ 语义提示：父进程看到 marker 后**还需额外等 1-3s 让 WS 握手完成**才能可靠收到事件；
-	//   生产环境推荐父进程发"自检事件"+ 等待 echo 来确认链路通。
-	fmt.Fprintf(os.Stderr, "[event] ready event_key=%s (init complete; WS handshake in progress)\n", r.opts.EventKey)
-
-	// ws.Client.Start 阻塞，需要外部 cancel；包一层 goroutine 让 ctx 控制退出
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- cli.Start(subCtx)
-	}()
-
-	select {
-	case <-subCtx.Done():
-		// 正常退出（signal/timeout/maxEvents）— 优先用 emit/timeout goroutine 写入的 reason；
-		// 都没写时按计数兜底（仅作为防御性 fallback）。
-		final := r.getReason()
-		if final == "" {
-			if r.received.Load() >= int64(r.opts.MaxEvents) && r.opts.MaxEvents > 0 {
-				final = "limit"
-			} else {
-				final = "signal"
-			}
-		}
-		return final, nil
-	case wsErr := <-errCh:
-		if wsErr != nil && !isContextCanceled(wsErr) {
-			return "error", fmt.Errorf("WebSocket 连接失败: %w", wsErr)
-		}
-		return "signal", nil
+func (r *Runtime) wsExit(wsErr error) (string, error) {
+	if wsErr != nil && !isContextCanceled(wsErr) {
+		return "error", fmt.Errorf("WebSocket 连接失败: %w", wsErr)
 	}
+	return r.exitReason(), nil
+}
+
+func (r *Runtime) exitReason() string {
+	final := r.getReason()
+	if final != "" {
+		return final
+	}
+	if r.received.Load() >= int64(r.opts.MaxEvents) && r.opts.MaxEvents > 0 {
+		return "limit"
+	}
+	return "signal"
+}
+
+// emitReady 写出 AI 面向的稳定 ready 行。必须在 pre-consume 与真实握手之后调用。
+func (r *Runtime) emitReady() {
+	if !r.readyOnce.CompareAndSwap(false, true) {
+		return
+	}
+	w := r.opts.ReadyOut
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "[event] ready event_key=%s\n", r.opts.EventKey)
+}
+
+// handshakeLogger 把 SDK 握手成功的 Info 日志转成 onHandshake。
+// oapi-sdk-go v3.5.3 ws.Client 没有 OnConnected；connect() 在 Dial 得到 HTTP 101 后
+// 会打 "connected to ..."。不得把 "disconnected to" 误判为就绪。
+type handshakeLogger struct {
+	inner       larkcore.Logger
+	onHandshake func()
+}
+
+func (l *handshakeLogger) Debug(ctx context.Context, args ...interface{}) {
+	if l.inner != nil {
+		l.inner.Debug(ctx, args...)
+	}
+}
+func (l *handshakeLogger) Info(ctx context.Context, args ...interface{}) {
+	if looksLikeWSConnected(args) && l.onHandshake != nil {
+		l.onHandshake()
+	}
+	if l.inner != nil {
+		l.inner.Info(ctx, args...)
+	}
+}
+func (l *handshakeLogger) Warn(ctx context.Context, args ...interface{}) {
+	if l.inner != nil {
+		l.inner.Warn(ctx, args...)
+	}
+}
+func (l *handshakeLogger) Error(ctx context.Context, args ...interface{}) {
+	if l.inner != nil {
+		l.inner.Error(ctx, args...)
+	}
+}
+
+func looksLikeWSConnected(args []interface{}) bool {
+	for _, a := range args {
+		s, ok := a.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(s, "connected to ") && !strings.Contains(s, "disconnected") {
+			return true
+		}
+	}
+	return false
 }
 
 // subscribeHTTPTimeout 订阅注册请求的超时上限：注册是 consume 启动的前置步骤，
 // 不能因端点挂起阻塞整个启动流程。
 const subscribeHTTPTimeout = 15 * time.Second
 
-// registerSubscriptions 对 def.SubscribeTypes 逐个 POST def.SubscribePath 注册服务端订阅。
-// 需要 User Access Token；任一类型注册失败即报错（已注册的类型服务端幂等处理）。
+// subscriptionRequestBodies 构造服务端订阅/退订请求体。
+// VC 走 {"event_type": EventType}；审批走 {"subscription_type": ...}。
+func subscriptionRequestBodies(def KeyDefinition) []map[string]string {
+	if def.SubscribeEventType {
+		return []map[string]string{{"event_type": def.EventType}}
+	}
+	types := def.SubscribeTypes
+	if len(types) == 0 {
+		types = []string{""}
+	}
+	out := make([]map[string]string, 0, len(types))
+	for _, st := range types {
+		body := map[string]string{}
+		if st != "" {
+			body["subscription_type"] = st
+		}
+		out = append(out, body)
+	}
+	return out
+}
+
+func subscriptionBodyLabel(body map[string]string) string {
+	if v := body["event_type"]; v != "" {
+		return "event_type=" + v
+	}
+	if v := body["subscription_type"]; v != "" {
+		return "subscription_type=" + v
+	}
+	return ""
+}
+
+// registerSubscriptions 对 subscriptionRequestBodies 逐个 POST def.SubscribePath。
+// 需要 User Access Token；任一请求失败即报错（已注册的类型服务端幂等处理）。
 // fail-closed：HTTP 非 2xx、响应体不可解析都视为注册失败——订阅没建立时连上 WS 也收不到
 // 事件，静默继续只会制造"看似在跑却永远无事件"的假象。
 func (r *Runtime) registerSubscriptions(ctx context.Context, def KeyDefinition) error {
@@ -222,43 +346,57 @@ func (r *Runtime) registerSubscriptions(ctx context.Context, def KeyDefinition) 
 		return fmt.Errorf("EventKey %s 需要以 User 身份注册服务端订阅，请先 `feishu-cli auth login`（scope: %s）",
 			def.Key, strings.Join(def.Scopes, " "))
 	}
-	httpClient := &http.Client{Timeout: subscribeHTTPTimeout}
-	types := def.SubscribeTypes
-	if len(types) == 0 {
-		types = []string{""}
+	for _, body := range subscriptionRequestBodies(def) {
+		label := subscriptionBodyLabel(body)
+		if err := r.postSubscription(ctx, def.SubscribePath, body); err != nil {
+			return fmt.Errorf("注册订阅（%s %s）失败: %w", def.SubscribePath, label, err)
+		}
+		fmt.Fprintf(r.opts.ErrOut, "[event] 已注册服务端订阅: %s %s\n", def.Key, label)
 	}
-	for _, st := range types {
-		body := map[string]string{}
-		if st != "" {
-			body["subscription_type"] = st
+	return nil
+}
+
+// unregisterSubscriptions 进程退出时 best-effort 注销 VC 等会话级订阅。
+func (r *Runtime) unregisterSubscriptions(def KeyDefinition) {
+	if def.UnsubscribePath == "" || r.opts.UserAccessToken == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), subscribeHTTPTimeout)
+	defer cancel()
+	for _, body := range subscriptionRequestBodies(def) {
+		if err := r.postSubscription(ctx, def.UnsubscribePath, body); err != nil {
+			fmt.Fprintf(r.opts.ErrOut, "[event] 注销订阅失败（可忽略，下次 subscribe 幂等覆盖）: %s %v\n", def.Key, err)
 		}
-		payload, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.opts.BaseURL+def.SubscribePath, bytes.NewReader(payload))
-		if err != nil {
-			return fmt.Errorf("构造订阅请求失败: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+r.opts.UserAccessToken)
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("注册订阅（%s）失败: %w", st, err)
-		}
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		_ = resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("注册订阅（%s %s）失败: HTTP %d, body: %s", def.SubscribePath, st, resp.StatusCode, truncateForErr(respBody))
-		}
-		var apiResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		if err := json.Unmarshal(respBody, &apiResp); err != nil {
-			return fmt.Errorf("注册订阅（%s %s）失败: 响应不可解析（%v），body: %s", def.SubscribePath, st, err, truncateForErr(respBody))
-		}
-		if apiResp.Code != 0 {
-			return fmt.Errorf("注册订阅（%s %s）失败: code=%d, msg=%s", def.SubscribePath, st, apiResp.Code, apiResp.Msg)
-		}
-		fmt.Fprintf(r.opts.ErrOut, "[event] 已注册服务端订阅: %s subscription_type=%s\n", def.Key, st)
+	}
+}
+
+func (r *Runtime) postSubscription(ctx context.Context, path string, body map[string]string) error {
+	httpClient := &http.Client{Timeout: subscribeHTTPTimeout}
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.opts.BaseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("构造订阅请求失败: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+r.opts.UserAccessToken)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d, body: %s", resp.StatusCode, truncateForErr(respBody))
+	}
+	var apiResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return fmt.Errorf("响应不可解析（%v），body: %s", err, truncateForErr(respBody))
+	}
+	if apiResp.Code != 0 {
+		return fmt.Errorf("code=%d, msg=%s", apiResp.Code, apiResp.Msg)
 	}
 	return nil
 }

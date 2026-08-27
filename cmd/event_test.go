@@ -82,6 +82,15 @@ func TestEventConsumeCmd_RegisteredFlags(t *testing.T) {
 	}
 }
 
+func TestEventConsumeHelpDocumentsReadyAfterHandshake(t *testing.T) {
+	if strings.Contains(eventConsumeCmd.Long, "handshake in progress") {
+		t.Fatal("consume help 不得再声称 ready 时握手仍在进行")
+	}
+	if !strings.Contains(eventConsumeCmd.Long, "握手") {
+		t.Fatal("consume help 应说明 ready 发生在握手之后")
+	}
+}
+
 func TestEventStopCmd_RegisteredFlags(t *testing.T) {
 	for _, flag := range []string{"pid", "event-key", "all", "force", "json"} {
 		if eventStopCmd.Flag(flag) == nil {

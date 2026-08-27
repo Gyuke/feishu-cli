@@ -102,12 +102,24 @@ func TestVCBotHelpDocumentsTenantDefault(t *testing.T) {
 			t.Errorf("%s --user-access-token help 应说明默认 Bot/Tenant 身份，实际 %q", c.Use, f.Usage)
 		}
 	}
-	// meeting-events 端点不接受 Tenant Token，help 应说明走 User 身份。
-	if !strings.Contains(vcBotEventsCmd.Long, "User Token") && !strings.Contains(vcBotEventsCmd.Long, "User 身份") {
-		t.Errorf("meeting-events Long 应说明走 User Token，实际:\n%s", vcBotEventsCmd.Long)
+	// meeting-events 同时支持 User 与 Bot，help 必须把身份与 meeting_id 来源绑在一起。
+	if !strings.Contains(vcBotEventsCmd.Long, "User") || !strings.Contains(vcBotEventsCmd.Long, "Bot") {
+		t.Errorf("meeting-events Long 应说明 User/Bot 双身份，实际:\n%s", vcBotEventsCmd.Long)
 	}
-	if f := vcBotEventsCmd.Flags().Lookup("user-access-token"); f == nil || !strings.Contains(f.Usage, "User 身份") {
-		t.Errorf("meeting-events --user-access-token help 应说明 User 身份")
+	if !strings.Contains(vcBotEventsCmd.Long, "meeting_id 来源") {
+		t.Errorf("meeting-events Long 应说明身份须与 meeting_id 来源一致，实际:\n%s", vcBotEventsCmd.Long)
+	}
+	if f := vcBotEventsCmd.Flags().Lookup("user-access-token"); f == nil || !strings.Contains(f.Usage, "Bot 身份") {
+		t.Errorf("meeting-events --user-access-token help 应说明 Bot 回落，实际 %q", f.Usage)
+	}
+	if !strings.Contains(vcBotLeaveCmd.Long, "vc:meeting.bot.join:write") {
+		t.Errorf("meeting-leave Long 应使用官方 join scope，实际:\n%s", vcBotLeaveCmd.Long)
+	}
+	if strings.Contains(vcBotLeaveCmd.Long, "vc:meeting.bot.leave:write") {
+		t.Errorf("meeting-leave 不应再宣传不存在的 leave scope")
+	}
+	if !strings.Contains(vcBotCmd.Long, "vc:meeting.bot.join:write") || strings.Contains(vcBotCmd.Long, "vc:meeting.bot.leave:write") {
+		t.Errorf("bot Long 的 leave scope 应与 join 相同，实际:\n%s", vcBotCmd.Long)
 	}
 }
 

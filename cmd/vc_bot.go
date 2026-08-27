@@ -52,13 +52,14 @@ var vcBotCmd = &cobra.Command{
 
 权限:
   - meeting-join 需要 vc:meeting.bot.join:write
-  - meeting-leave 需要 vc:meeting.bot.leave:write
-  - meeting-events 需要 User Token（先 auth login）+ vc:meeting.meetingevent:read
+  - meeting-leave 需要 vc:meeting.bot.join:write（与入会同一 scope；官方无独立 leave scope）
+  - meeting-events：User 身份需要 vc:meeting.meetingevent:read；Bot 身份需要 vc:meeting.bot.join:write
 
 身份:
   meeting-join / meeting-leave 默认使用 Bot/Tenant Access Token；显式传 --user-access-token 改用 User 身份。
-  meeting-events 走「User 优先 + Tenant 兜底」：已登录自动用 User Token（该端点不接受 Tenant Token，
-  未登录会被 99991663 拒绝，请先 feishu-cli auth login）。
+  meeting-events 走「User 优先 + Bot/Tenant 兜底」：已登录自动用 User Token；未登录回落 Bot Token。
+  读取身份必须与 meeting_id 来源一致（用户发现的会议用 User，机器人入会得到的会议用 Bot），
+  随意切换会得到空列表或无权限。Bot 身份要求机器人在会中（结束后约 5 分钟内曾入会仍可读）。
 
 示例:
   feishu-cli vc bot meeting-join --meeting-number 123456789
@@ -176,7 +177,7 @@ var vcBotLeaveCmd = &cobra.Command{
   --user-access-token 显式改用 User Token；默认使用 Bot/Tenant 身份
 
 权限:
-  vc:meeting.bot.leave:write
+  vc:meeting.bot.join:write
 
 示例:
   feishu-cli vc bot meeting-leave --meeting-id 6911188411932033028`,
@@ -236,7 +237,7 @@ var vcBotEventsCmd = &cobra.Command{
   --page-token   分页标记
   --dry-run      只打印将要发送的请求参数，不实际调用
   --output, -o   输出格式（json）
-  --user-access-token 覆盖登录态；缺省时自动用已登录 User Token（本端点必须 User 身份，不接受 Tenant Token）
+  --user-access-token 覆盖登录态；缺省时 User 优先、未登录回落 Bot 身份（须与 meeting_id 来源一致）
 
 示例:
   feishu-cli vc bot meeting-events --meeting-id 6911188411932033028
@@ -311,10 +312,9 @@ var vcBotEventsCmd = &cobra.Command{
 			})
 		}
 
-		// meeting-events 端点（GET /bots/events）不接受 tenant_access_token（会被网关以
-		// 99991663 "Invalid access token for authorization" 拒绝），故走「User 优先 + Tenant 兜底」：
-		// 已登录时自动用 token.json 的 User Token；未登录才回落 Tenant（回落后该端点仍会 99991663，
-		// 提示用户需先 feishu-cli auth login）。与 CLAUDE.md 既有 vc 读类策略一致。
+		// meeting-events 支持 User 与 Bot 两种身份，必须与 meeting_id 来源一致：
+		// 用户发现的会议用 User（vc:meeting.meetingevent:read），机器人入会得到的会议用 Bot
+		// （vc:meeting.bot.join:write）。已登录时 User 优先；未登录回落 Bot/Tenant。
 		token := resolveOptionalUserTokenWithFallback(cmd)
 
 		data, err := client.VCBotMeetingEvents(req, token)
@@ -372,6 +372,6 @@ func init() {
 	vcBotEventsCmd.Flags().String("page-token", "", "分页标记")
 	vcBotEventsCmd.Flags().Bool("dry-run", false, "只打印请求参数，不实际调用")
 	vcBotEventsCmd.Flags().StringP("output", "o", "", "输出格式（json）")
-	vcBotEventsCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态；缺省自动用已登录 User Token，本端点必须 User 身份）")
+	vcBotEventsCmd.Flags().String("user-access-token", "", "User Access Token（覆盖登录态；缺省 User 优先，未登录回落 Bot 身份，须与 meeting_id 来源一致）")
 	mustMarkFlagRequired(vcBotEventsCmd, "meeting-id")
 }

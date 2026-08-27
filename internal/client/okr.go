@@ -100,19 +100,21 @@ func (o *okrRawOwner) toOwner() OKROwner {
 
 type okrCycleStatus int
 
+// 飞书官方周期展示状态（v1/periods.status / 文档 Block OkrPeriodDisplayStatus）：
+// 0=default, 1=normal, 2=invalid, 3=hidden。不得把 0 误标成 normal。
 const (
-	okrCycleStatusNormal  okrCycleStatus = 0
-	okrCycleStatusPending okrCycleStatus = 1
+	okrCycleStatusDefault okrCycleStatus = 0
+	okrCycleStatusNormal  okrCycleStatus = 1
 	okrCycleStatusInvalid okrCycleStatus = 2
 	okrCycleStatusHidden  okrCycleStatus = 3
 )
 
 func (s okrCycleStatus) String() string {
 	switch s {
+	case okrCycleStatusDefault:
+		return "default"
 	case okrCycleStatusNormal:
 		return "normal"
-	case okrCycleStatusPending:
-		return "pending"
 	case okrCycleStatusInvalid:
 		return "invalid"
 	case okrCycleStatusHidden:
@@ -517,37 +519,48 @@ func ParseOKRTargetType(s string) (OKRProgressTargetType, bool) {
 }
 
 // OKRProgressStatus 进展状态
-// 飞书官方枚举：normal / risky / overdue（无 done；undefined 不暴露给 CLI）
-// 服务端 SDK docs: https://open.feishu.cn/document/server-docs/okr-v1/progress_record/create
+// 官方写入/读取 wire：0=normal, 1=overdue, 2=done。
+// risky 不是合法写入值，不得映射到 1（1 是 overdue）。
 type OKRProgressStatus int
 
 const (
 	OKRProgressStatusNormal  OKRProgressStatus = 0
-	OKRProgressStatusRisky   OKRProgressStatus = 1
-	OKRProgressStatusOverdue OKRProgressStatus = 2
+	OKRProgressStatusOverdue OKRProgressStatus = 1
+	OKRProgressStatusDone    OKRProgressStatus = 2
 )
 
-// ParseOKRProgressStatus 把 normal / risky / overdue 转为枚举
+// ParseOKRProgressStatus 把 normal / overdue / done 或其数字串转为枚举。
+// 不接受 risky：旧写入语义已删除，调用方应使用 OKRProgressStatusCompatHint 给出提示。
 func ParseOKRProgressStatus(s string) (OKRProgressStatus, bool) {
-	switch s {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "normal", "0":
 		return OKRProgressStatusNormal, true
-	case "risky", "1":
-		return OKRProgressStatusRisky, true
-	case "overdue", "2":
+	case "overdue", "1":
 		return OKRProgressStatusOverdue, true
+	case "done", "2":
+		return OKRProgressStatusDone, true
 	}
 	return 0, false
+}
+
+// OKRProgressStatusCompatHint 对已删除的 risky 写入给出兼容提示，而不是错误映射到 overdue。
+// 非 risky 别名返回空串。
+func OKRProgressStatusCompatHint(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "risky", "risk":
+		return `--progress-status "risky" 已移除写入语义：官方 wire 为 normal(0) / overdue(1) / done(2)，不会把 risky 映射为 overdue 或其他值。请改用 normal、overdue 或 done`
+	}
+	return ""
 }
 
 func (s OKRProgressStatus) String() string {
 	switch s {
 	case OKRProgressStatusNormal:
 		return "normal"
-	case OKRProgressStatusRisky:
-		return "risky"
 	case OKRProgressStatusOverdue:
 		return "overdue"
+	case OKRProgressStatusDone:
+		return "done"
 	}
 	return ""
 }

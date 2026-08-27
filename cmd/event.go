@@ -18,8 +18,9 @@ var eventCmd = &cobra.Command{
 
 输出协议:
   - stdout      每条事件一行 JSON（NDJSON），适合 jq / 脚本管道
-  - stderr      诊断信息；启动完成会有一行 [event] ready event_key=<key>，
-                AI Agent 父进程应阻塞 stderr 等该行出现后再读 stdout
+  - stderr      诊断信息；pre-consume 与 WebSocket 握手都完成后会有一行
+                [event] ready event_key=<key>。父进程应阻塞等该行后再读 stdout
+                （ready 前握手未完成，不得把 ready 当作「进程已启动即可收事件」）
 
 状态文件:
   ~/.feishu-cli/events/<app_id>/bus.json     当前活跃 consumer 列表（PID/EventKey/启动时间）

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/riba2534/feishu-cli/internal/client"
 )
 
 // TestOKRProgressCreateCmdRegistered 验证 okr progress create 子命令注册
@@ -22,6 +24,13 @@ func TestOKRProgressCreateCmdRegistered(t *testing.T) {
 	userIDType := okrProgressCreateCmd.Flags().Lookup("user-id-type")
 	if userIDType == nil || userIDType.DefValue != "open_id" {
 		t.Fatalf("--user-id-type default = %v, want open_id", userIDType)
+	}
+	status := okrProgressCreateCmd.Flags().Lookup("progress-status")
+	if status == nil || !strings.Contains(status.Usage, "normal / overdue / done") {
+		t.Fatalf("--progress-status help 应对齐官方枚举，实际 %v", status)
+	}
+	if strings.Contains(status.Usage, "risky") {
+		t.Fatal("--progress-status help 不得再宣传 risky 写入")
 	}
 }
 
@@ -78,5 +87,29 @@ func TestBuildOKRProgressContentJSON(t *testing.T) {
 	}
 	if !strings.Contains(got, `"text":"hello"`) {
 		t.Fatalf("wrapped output should include text=hello, got %s", got)
+	}
+}
+
+func TestParseOKRProgressRateEnum(t *testing.T) {
+	rate, err := parseOKRProgressRate("80", "done")
+	if err != nil || rate == nil || rate.Status == nil || *rate.Status != client.OKRProgressStatusDone {
+		t.Fatalf("done 应写入 wire=2，got rate=%+v err=%v", rate, err)
+	}
+	rate, err = parseOKRProgressRate("10", "1")
+	if err != nil || rate == nil || rate.Status == nil || *rate.Status != client.OKRProgressStatusOverdue {
+		t.Fatalf("数字 1 应是 overdue 而非 risky，got rate=%+v err=%v", rate, err)
+	}
+
+	_, err = parseOKRProgressRate("50", "risky")
+	if err == nil {
+		t.Fatal("risky 不得再映射为写入值")
+	}
+	if !strings.Contains(err.Error(), "已移除写入语义") || !strings.Contains(err.Error(), "done(2)") {
+		t.Fatalf("risky 应给出兼容提示而非错误映射，实际: %v", err)
+	}
+
+	_, err = parseOKRProgressRate("50", "unknown")
+	if err == nil || !strings.Contains(err.Error(), "normal / overdue / done") {
+		t.Fatalf("非法枚举应列出官方取值，实际: %v", err)
 	}
 }
