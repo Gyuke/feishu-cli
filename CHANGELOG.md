@@ -4,7 +4,7 @@
 
 版本格式：[MAJOR.MINOR.PATCH](https://semver.org/lang/zh-CN/)
 
-## [Unreleased]
+## [v1.40.0] - 2026-08-28
 
 ### 修复 — 深度 review：数据破坏、功能失效与静默降级（23 项）
 
