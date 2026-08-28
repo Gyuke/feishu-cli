@@ -6,6 +6,76 @@
 
 ## [Unreleased]
 
+### 修复 — 深度 review：数据破坏、功能失效与静默降级（23 项）
+
+对分支全量改动做分域深审并逐条用编译二进制真实调用飞书 API 验证。以下缺陷均**无法**被
+`gofmt`/`go vet`/`go test`/`-race` 捕获（基线本来全绿），属"代码自洽但与服务端契约不符"。
+
+**数据破坏（原实现 exit 0 静默发生）**
+
+- `doc content-update --mode replace_all`：无 `#` 的模糊标题选择器同时命中父标题与其子标题时，
+  外层范围会吞掉内层与其后未匹配的兄弟章节（实测 7 块文档替换后只剩 2 块，无关章节被销毁，
+  却报告"成功替换 2 处"）。现 fail-closed 要求用带级别选择器或 `replace_range`。
+- `drive pull --delete-local` / `push --delete-remote`：身份静默降级 Bot 后远端视图更小、差集更大，
+  会把本地文件当作"远端已不存在"删除。改用 `resolveOptionalUserTokenForDestructive` fail-closed。
+- `event` last-consumer 注销：`unsubscription` 在文件锁外执行，会抹掉窗口期内新 consumer 刚建立的
+  订阅（新 consumer 已 ready 却静默收不到事件）。注销后复检存活 consumer 数并幂等补订阅。
+- `calendar agenda`：午夜发生 DST 跳变的时区（如 America/Sao_Paulo 2018-11-04）区间倒挂
+  （实测 `dur=-1s`），静默返回空结果。start/end 改用日历日期分量计算。
+- `wiki delete`：确认提示未提级联范围（`--include-children` 默认 true），用户以为删单节点实际销毁整棵子树。
+  现按实际范围提示；JSON 的 `ready`/`failed` 改用任务终态判定（不再恒为 `ready=true`）。
+
+**功能完全失效**
+
+- `mail triage`：`page_size` 是该端点必填参数，条件发送导致命令 100% 失败（99992402）。
+  现始终发送并按端点上限截断（list 20 / search 15，对齐官方 shortcuts/mail）。
+- `schema` / `api` catalog overlay：此前**完全不生效**（`source` 恒为 `embedded`、cache 目录为空）。
+  三重原因：① 版本门禁要求严格更新，而官方顶层 `version` 恒为 `1.0.0`；② 短命 CLI 进程中后台刷新
+  goroutine 被杀；③ 传 `data_version` 触发条件请求返回 `data:{}`。修复后 **12 service/152 method →
+  15 service/250 method**，首启约 190ms 后走 cache，新增 `FEISHU_CLI_META_FIRST_SYNC_MS` 可调预算。
+- `sheet write/append/prepend/batch`：删除 bool→`"TRUE"`/`"FALSE"` 转换后，v2 API 拒绝 JSON Boolean
+  （实测 `code=90204 invalid cell type, type is bool`），含布尔值的写入全部失败。已恢复转换（官方
+  `stringifyCellValue` 同样如此），4 条写入路径统一处理。
+- `sheet protect` / `unprotect`：被误判「官方已废弃且无替代」而整体禁用并隐藏，实测两端点均返回
+  `code=0` 可用。恢复实现，并修正 `protectId` 解析层级（在 `addProtectedDimension[i]` 顶层，非嵌套 `dimension` 内）。
+- `calendar agenda` 长区间：193103/193104 随 HTTP 400 下发，而 `StatusCode != 200` 提前返回短路了
+  自动切分恢复逻辑。修复后 90 天窗口从直接失败变为返回 334 个日程。
+
+**安全**
+
+- `markdown` 取 tenant token 用裸 `http.Post`（`http.DefaultClient`），绕过本分支新增的重定向/凭证
+  策略层——`app_secret` 可随 3xx 重放到任意 host 且无超时。改走 `auth.FetchTenantAccessTokenResult`。
+  同类问题统一修 4 处（markdown preview_download、drive download、message resource、event subscribe），
+  全部改用 `config.NewHTTPClient`（host 校验 + 重定向剥离 Authorization）。
+- `wiki delete` 的 HTTP loopback 豁免用 `strings.HasPrefix(hostname, "127.0.0.")`，会把攻击者可注册的
+  `127.0.0.evil.com` 当本地地址放行。改用 `net.ParseIP` 精确判定。
+- `multipart_session`：`block_size` 守卫以 `maxNativeInt64()` 为上限，在 64 位平台等于钳制值而永久
+  失效，服务端返回 `1<<62` 会让 `make([]byte)` panic。加 64MB 合理上限；原测试因 `t.Skip` 在 64 位
+  平台从不执行，改为全平台有效。
+
+**静默失败 / 契约不符**
+
+- `internal/client/timeparse`：13 位毫秒时间戳被当秒解析（得到公元 56971 年）。现按数量级识别。
+- `api_code`：正则从 `code=N` 放宽后会命中 `status code: 500`，使永久 4xx 被 `IsRetryableError`
+  判成可重试。收紧匹配并对 4xx 前置判定（保留 `task.go` 的 `(code: N)` 形态）。
+- `api --page-all`：`has_more` 类型严格断言致静默截断（现容忍 bool/数字/字符串）；`page_token` 为空
+  时不再中止翻页而回落 `next_page_token`。
+- `api --params`：流式 decoder 静默丢弃尾部残留（`'{"a":1} {"b":2}'` 只取前半）。现显式报错。
+- `doc content-update`：`<!-- feishu-colwidth: ... -->` 指令被静默丢弃（此前只拦 flag）。两条入口都 fail-closed。
+- `markdown overwrite`：取不到远端名时回落 `<token>.md`、`--content-file` 时用本地文件名，两条路径
+  都会静默重命名远端文件。现缺省一律读远端现有名，读不到则报错。
+- 读类命令身份降级：`resolveOptionalUserTokenWithFallback` 把所有错误静默吞掉（含新增的 app_id 绑定
+  守卫），与 `--as` 类命令 fail-closed 的行为自相矛盾。现在 stderr 明确告警（stdout 不受影响）。
+- `approval task query --topic started`：topic=3 已被官方下线（服务端仅接受 1/2/17/18），
+  前置报错并指向 `approval instance initiated`。
+- `approval:approval:read`（`approval get` 实测必需）不在官方 scope 快照中，`--recommend` 会少授权，
+  在 `scope_overrides.json` 显式放行。
+- `drive export` 原子写入补齐 Chmod / 目录 fsync / Windows 覆盖兜底（与 `internal/auth` 版本对齐）。
+- `internal/registry` 生产文件曾 `import "testing"` 并按 `testing.Testing()` 分支，改为注入式 seam。
+
+**文档同步**：CLAUDE.md（Token 策略五 helper、列宽适用范围、审批 topic、catalog 数字）、
+11 处 skill 工作流文档、`attendance user-stats query --user-ids` 必填示例。
+
 ### 修复 / 协议对齐 — native Markdown 与 Drive import/export/move
 
 - **Markdown 源/历史下载**改为 `GET /open-apis/drive/v1/medias/{token}/preview_download?preview_type=16`，支持 `--version`。

@@ -41,7 +41,7 @@ feishu-cli 是一个功能完整的飞书开放平台命令行工具。它将飞
 - **图表原生渲染** — Mermaid（8 种图表类型）和 PlantUML 自动转换为飞书画板，不是截图，是可编辑的矢量图
 - **大规模文档处理** — 三阶段并发管道架构，实测 10,000+ 行 / 127 个图表 / 170+ 个表格一次导入
 - **P2P 私聊原生可读** — `msg history --user-email` 一条命令打通「搜用户 → 反查 p2p chat_id → 读消息」，输出自动带 `sender_names` 映射，AI Agent 直接拿结构化带名消息流，无需额外查群成员
-- **AI Agent 原生** — 9 个领域技能覆盖飞书全功能（499 个命令全部归属），AI 助手即装即用
+- **AI Agent 原生** — 9 个领域技能覆盖飞书全功能（503 个命令全部归属），AI 助手即装即用
 - **为脚本与 Agent 设计的健壮性** — 错拼命令/flag 报错并给拼写建议（绝不静默成功）、写操作 `--dry-run`、幂等键防重发、统一 `--jq`/`--format` 结构化输出
 - **一个工具覆盖全平台** — 文档、知识库、表格、多维表格、消息、邮箱、日历、任务、考勤、OKR、视频会议、妙记、云盘、权限、画板、Slides、事件、Schema、Profile、健康检查
 
@@ -107,7 +107,7 @@ PlantUML 同样支持：时序图、活动图、类图、用例图、组件图�
 ### 智能表格处理
 
 - **列宽自动计算** — 根据内容智能调整，中英文字符区分宽度（中文 14px，英文 8px）
-- **列宽自定义**（v1.29+，issue #156）— 支持紧邻表格上方注释 `<!-- feishu-colwidth: 80,200,*,30% -->`（单位 px / 百分比 / `*` 走 auto）或 CLI flag `--table-column-width=auto|fixed|N1,N2,...` 全局覆盖；注释优先级高于 flag
+- **列宽自定义**（v1.29+，issue #156）— 支持紧邻表格上方注释 `<!-- feishu-colwidth: 80,200,*,30% -->`（单位 px / 百分比 / `*` 走 auto）或 CLI flag `--table-column-width=auto|fixed|N1,N2,...` 全局覆盖；注释优先级高于 flag。**仅 `doc import` / `doc add` 支持**——`doc content-update` 走官方原子更新协议不支持自定义列宽，传非 `auto` 的 flag 或内容含该注释都会报错
 - **大表格保持单表连贯** — 行数超过飞书 `create_block` 9 行限制时，先创建 9 行初始表，剩余行通过 `insert_table_row` API 追加到同一个 block，视觉上为一张连贯的表，不再拆成多张独立表格
 - **批量填充加速**（v1.29+，issue #159）— 单元格填充改用 `batch_update` API（每批 ≤30）+ 文档级 3 QPS 节流，典型 4×6×8 表场景从 ~70s 降到 ~3s
 - **单元格多块内容** — 支持 bullet / heading / text 混合内容
@@ -614,11 +614,15 @@ feishu-cli approval task query --topic todo
 # 查询我已审批的任务
 feishu-cli approval task query --topic done
 
-# 查询我发起的审批任务分组
-feishu-cli approval task query --topic started --output json
+# 查询抄送给我的（未读 / 已读）
+feishu-cli approval task query --topic cc-unread --output json
+feishu-cli approval task query --topic cc-read
 
 # 输出飞书 API 原始响应
-feishu-cli approval task query --topic started --output raw-json
+feishu-cli approval task query --topic todo --output raw-json
+
+# 注：--topic 仅接受 todo / done / cc-unread / cc-read（服务端 options 为 1/2/17/18）。
+# started（topic=3）已被官方下线，查「我发起的」请用上面的 approval instance initiated
 
 # 翻页查询
 feishu-cli approval task query --topic todo --page-size 20 --page-token <token>

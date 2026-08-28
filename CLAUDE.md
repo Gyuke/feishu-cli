@@ -92,12 +92,15 @@ export FEISHU_APP_SECRET=xxx
 
 通过 **OAuth 2.0 Device Flow（RFC 8628）** 获取 User Access Token，用于搜索、审批任务查询等需要用户授权的功能。**无需配置重定向 URL 白名单**（v1.18+ 已删除 Authorization Code Flow）。
 
-**Token 使用策略**（按命令分四类，对应 `cmd/utils.go` 四个 helper）：
-- **读类 · User 优先 + Tenant 兜底**（`resolveOptionalUserTokenWithFallback`，约 85 个命令）：`msg history/list/get/mget/thread-messages/resource-download`、`chat list`、`doc read`、`sheet table-get`、`task get/list/subtask list/comment list/tasklist get/list/tasks`、`calendar get/list/primary/freebusy/suggestion/room-find/event get/list/attendee list`、`file meta/stats/list/version list/get/download`、`board image/nodes/export-code/lint`、`user read`、`wiki get/nodes/spaces/export/member list`、`drive pull/push/status`、**sheet 全家桶**（所有 sheet 子命令含写）等。优先级链：`--user-access-token` → `FEISHU_USER_ACCESS_TOKEN` → `~/.feishu-cli/token.json`（过期自动刷新）→ `config.yaml` 的 `user_access_token` → App Token 兜底。**注意**：此 helper 在 token 损坏/刷新失败时会静默切 Bot，不适合身份敏感的 Markdown/Drive import-export-move。`vc bot meeting-events` 改为显式 `--as bot|user|auto`（见「身份可选」）。
+**Token 使用策略**（按命令分四类，对应 `cmd/utils.go` 五个 helper）：
+- **读类 · User 优先 + Tenant 兜底**（`resolveOptionalUserTokenWithFallback`，约 85 个命令）：`msg history/list/get/mget/thread-messages/resource-download`、`chat list`、`doc read`、`sheet table-get`、`task get/list/subtask list/comment list/tasklist get/list/tasks`、`calendar get/list/primary/freebusy/suggestion/room-find/event get/list/attendee list`、`file meta/stats/list/version list/get/download`、`board image/nodes/export-code/lint`、`user read`、`wiki get/nodes/spaces/export/member list`、`drive pull/push/status`、**sheet 全家桶**（所有 sheet 子命令含写）等。优先级链：`--user-access-token` → `FEISHU_USER_ACCESS_TOKEN` → `~/.feishu-cli/token.json`（过期自动刷新）→ `config.yaml` 的 `user_access_token` → App Token 兜底。**注意**：此 helper 在 token 损坏/刷新失败时会**在 stderr 告警后**切 Bot（不再静默；stdout 不受影响，`-o json` 管道安全），仍不适合身份敏感的 Markdown/Drive import-export-move。
+  **破坏性操作例外**：`drive pull --delete-local` / `drive push --delete-remote` 走 `resolveOptionalUserTokenForDestructive`——已配置 User Token 但不可用时 **fail-closed 报错、拒绝降级 Bot**（Bot 视角远端条目更少、差集更大，会误删本地文件）。未配置 User Token 的纯 Bot 场景仍正常放行。
+  `vc bot meeting-events` 改为显式 `--as bot|user|auto`（见「身份可选」）。
 - **写类 · 默认 Bot 身份**（`resolveOptionalUserToken`）：所有 `add/create/update/delete/move/copy/import/upload/send/reply/forward/merge-forward` 类命令、`comment reply`、`doc content-update / table 写`、`file version revert`、`wiki move-to-drive`、`msg delete`（Bot 自撤回）等。**不会自动加载 token.json**，仅当显式传 `--user-access-token` 或 `FEISHU_USER_ACCESS_TOKEN` 时切到 User Token。`vc bot meeting-join/leave` 同属默认 Bot 身份，但用更严格的 `resolveFlagUserToken`：**只认 `--user-access-token` flag，连 `FEISHU_USER_ACCESS_TOKEN` 环境变量都不读**。
 - **必须 User Token**（`resolveRequiredUserToken` / `requireUserToken`）：`search docs/apps`、`approval get`、`approval task query/approve/reject/transfer`、`approval instance get/initiated/create/cancel/cc`、`task my`（`my_tasks`）、`msg pin/reaction/flag`、`chat get/update/delete/member`、`vc search/notes/recording/detail`、`vc note detail/transcript`、`task search`、`minutes` 全部（含 `minutes search/apply-permission`）、`mail` 写类与管理命令（`mail send/reply/forward/draft-*/message-modify/message-trash`）、`drive secure-label`、`drive upload/download/add-comment/search`、`calendar rsvp` 等。失败直接报错。
 - **身份可选 · `--as` 显式切换**（`resolveIdentityToken` / `resolveVCBotEventsIdentity`）：`bitable` 全家桶（所有子命令含读写，默认 auto）、`okr` 全家桶（默认 **bot**——OKR 的 user scope 通常未随默认登录域授予；实测身份墙按端点分化：`cycle list` 仅收 Tenant，其余端点 user/tenant 双支持）、**native Markdown 全家桶**（`markdown create/fetch/overwrite/patch/diff`，默认 auto）、**Drive import/export/export-download/move/task-result**（默认 auto）、current IM 搜索 `search messages` / `msg search-chats` 与 `calendar agenda` / `calendar event-search`（默认 auto，端点同时支持 User/Bot；`primary` 必须跟对身份，User 刷新失败不得静默切 Bot）、`attendance user-task`（打卡查询，支持 `--as bot|user|auto` 及本人自查）、`mail triage/message/messages/thread`（邮件只读类，支持 `--as bot|user|auto`；Bot 身份不支持 `mailbox="me"`，需显式指定邮箱）、以及 `vc bot meeting-events`（默认 auto；`--as bot` 即使已登录也走 Bot，`--as user` 缺 Token 失败；实调 auto 走 `resolveAutoUserToken` fail-closed，刷新/token 文件错误禁止静默切 Bot；dry-run 用 `HasUserTokenConfigured` 静态探测，不联网不写 token）。命令组或入口 persistent/普通 flag `--as bot|user|auto`：`auto` 为 User 优先、未配置回退 Bot，**已配置 User 但解析/刷新失败 fail-closed**（禁止静默切 Bot）；`--as bot` 强制 App Token（cron/无人值守）；`--as user` 强制 User Token（缺失报错）。身份在 `--dry-run` 之后才 resolve。底层 API 同时支持 User/Tenant。
-- **审批任务查询**：`approval task query` 走 `GET /open-apis/approval/v4/tasks`，身份取当前 User Token，不再传 `user_id` query
+- **审批任务查询**：`approval task query` 走 `GET /open-apis/approval/v4/tasks`，身份取当前 User Token，不再传 `user_id` query。
+  `--topic` 仅接受 `todo`/`done`/`cc-unread`/`cc-read`（服务端 options 为 1/2/17/18）；`started`（topic=3）已被官方下线，CLI 前置报错并指向 `approval instance initiated`
 
 **登录命令四种模式**：
 - `auth login --scope "..."`：显式请求 scope，阻塞轮询
@@ -127,6 +130,7 @@ export FEISHU_APP_SECRET=xxx
 - **列宽自定义**（v1.29+，issue #156）：默认按内容启发式（中文 14px / 英文 8px，最小 80 / 最大 400）。可通过两种方式覆盖：
   - 紧邻表格上方注释 `<!-- feishu-colwidth: 80,200,*,30% -->`：单位 px / 百分比 / `*`(走 auto)
   - CLI flag `--table-column-width=auto|fixed|N1,N2,...`（覆盖整篇文档；注释优先级高于 flag）
+  - **适用范围**：`doc import` / `doc add`。`doc content-update` 走官方原子更新协议、不支持自定义列宽，传非 `auto` 的 flag **或**内容中含该注释都会 fail-closed 报错（两条入口都拦，避免注释被静默丢弃）；需要控制列宽改用 `doc import`
 - **单元格多块支持**：单元格内可混合 bullet/heading/text
 
 ### 图表导入容错
@@ -168,6 +172,8 @@ feishu-cli doc export <doc_id> -o output.md
 feishu-cli doc read <doc_id> {--outline | --heading "标题" | --keyword "正则" [--context N]}  # 大文档选择性读取
 feishu-cli doc content-update <doc_id> --mode <mode> --markdown "..."
 #   mode: append / overwrite / replace_range / replace_all / delete_range / insert_before / insert_after（对齐 docs_ai 单操作原子协议；支持 --revision-id 乐观锁与无 # 标题选择器）
+#   注意：无 # 的模糊标题选择器若同时命中父标题与其子标题（父范围含子范围），会 fail-closed 报错——
+#   替换父范围会连带删掉其中未匹配的兄弟章节。改用带级别选择器（"## 子标题"）或 replace_range 逐个处理
 feishu-cli doc htmlbox {create|update|get|delete} <doc_id> [block_id] --html-file x.html  # 妙笔BOX HTML 小组件（文档里跑动画/ECharts/可交互图表，唯一能"动"的载体）
 
 # 多维表格（统一用 --base-token，底层 base/v3 + 部分 bitable/v1 API）
@@ -398,9 +404,10 @@ Major：不兼容变更；Minor：新功能；Patch：Bug 修复。
 feishu-cli api <METHOD> </open-apis/...> [--params '<JSON>'] [--data '<JSON>'] [--as bot|user|auto] [--dry-run]
 ```
 
-自动复用本地 token（含自动刷新）、自动错误码翻译（含 232033/99991679/scope 不足等中文提示）、支持 URL 内嵌 query 拆解、`--dry-run` 预览请求。
+自动复用本地 token（含自动刷新）、自动错误码翻译（含 232033/99991679/scope 不足等中文提示）、支持 URL 内嵌 query 拆解、`--params` 严格只收单个 JSON 对象（尾部多余内容报错）、`--dry-run` 预览请求。
 
-先用 `feishu-cli schema <service>.<resource>.<method>` 查参数和 path，再用 `feishu-cli api` 调即可。常见场景：调本地 152 个本地元数据未覆盖的 API（飞书开放平台 2500+ 端点 ≈ 94% 用 `api` 命令）。
+先用 `feishu-cli schema <service>.<resource>.<method>` 查参数和 path，再用 `feishu-cli api` 调即可。
+本地 catalog 覆盖：embedded baseline 12 service / 152 method；运行时 overlay 生效后为 **15 service / 250 method**（`schema status` 的 `source` 为 `runtime`/`cache`）。飞书开放平台 2500+ 端点中其余约 90% 靠 `api` 命令透传。
 
 ## 外部群操作（重要）
 
