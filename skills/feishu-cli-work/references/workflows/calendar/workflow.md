@@ -74,8 +74,8 @@ feishu-cli calendar suggestion \
 |------|------|--------|
 | `--attendee-ids`（必填） | 参与者 ID 列表，逗号分隔，`ou_xxx`（用户）+ `oc_xxx`（群聊）混合 | — |
 | `--duration`（必填） | 会议时长，`30m` / `1h30m` / `90`（纯数字按分钟），范围 1-1440 | — |
-| `--start` | 搜索起点（RFC3339） | 当前时间 |
-| `--end` | 搜索终点（RFC3339） | `start` 当天 23:59:59 |
+| `--start` | 搜索起点（RFC3339 / `YYYY-MM-DD` / Unix 秒或毫秒，13 位自动识别为毫秒） | 当前时间 |
+| `--end` | 搜索终点（同 `--start` 的格式） | `start` 当天 23:59:59 |
 | `--timezone` | 时区，如 `Asia/Shanghai` | — |
 | `--event-rrule` | 周期性规则 rrule 字符串（找系列会议共同空闲） | — |
 | `--exclude` | 排除时段，多段逗号分隔，单段 `start~end` RFC3339 | — |

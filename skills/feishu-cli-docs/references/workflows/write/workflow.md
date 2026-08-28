@@ -77,10 +77,11 @@ feishu-cli doc content-update <document_id> --mode replace_all \
 关键规则：
 - **原子更新安全协议**：`doc content-update` 全面走官方单操作原子能力（`PUT /open-apis/docs_ai/v1/documents/{id}`），彻底杜绝先删后写的数据破坏窗口；支持 `--revision-id` 透传进行乐观锁并发保护。
 - **标题选择器**：`--selection-by-title` 支持无 `#` 匹配任意级别标题（如 `"架构设计"`），并精准映射为实际 `start_block_id` / `end_block_id`；带 `#` 则精准匹配对应级别。
+  ⚠️ 无 `#` 的模糊选择器若同时命中**父标题与其子标题**（如 `"部署"` 同时命中 H1「部署总览」和 H2「部署检查」），命令会 fail-closed 报错——因为父范围按定义包含子范围及其后所有兄弟章节，替换父范围会连带删除未匹配的章节。此时改用带级别的选择器（`"## 部署检查"`）或 `replace_range` 逐个处理。
 - **本地资源提示**：为确保原子更新数据不损坏，`content-update` 暂不支持本地文件/图片混合上传；如需嵌入本地图片，请使用网络图片 URL，或使用 `feishu-cli doc import` 全量导入。
 - 用户说“修改/替换/更新某段”时用 `replace_range` 或 `replace_all`，不要 append 导致重复。
 
-`--table-column-width`（content-update / add 通用，默认 `auto`）：控制 Markdown 表格列宽，仅 Markdown 内容类型生效；取值与 `<!-- feishu-colwidth: ... -->` 注释的完整规则（单位/优先级/clamp）以 `../import/references/doc-guide.md` 表格章节为权威。
+`--table-column-width`：**`content-update` 不支持自定义列宽**（原子更新协议限制），传非 `auto` 值或内容中含 `<!-- feishu-colwidth: ... -->` 注释都会 fail-closed 报错；需要控制列宽请改用 `feishu-cli doc import`。`doc add` 仍支持该 flag，取值与注释的完整规则（单位/优先级/clamp）以 `../import/references/doc-guide.md` 表格章节为权威。
 
 ## Markdown 图片
 

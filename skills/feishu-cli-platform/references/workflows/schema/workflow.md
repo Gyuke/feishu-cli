@@ -30,9 +30,15 @@
 
 ### 数据来源
 
-编译期 embed 的 `internal/registry/meta_data.json` 是离线 baseline（约 690KB，12 个 service）。
-运行时默认从官方 public `api_definition?protocol=meta` 拉 overlay（5s 超时、10MB 上限、24h TTL、
-原子 cache、无凭证）；失败回退 embedded。`FEISHU_CLI_REMOTE_META=off` 可关闭。
+编译期 embed 的 `internal/registry/meta_data.json` 是离线 baseline（约 690KB，12 个 service / 152 个 method）。
+运行时默认从官方 public `api_definition?protocol=meta` 拉 overlay（10MB 上限、24h TTL、原子 cache、无凭证）；
+失败回退 embedded。`FEISHU_CLI_REMOTE_META=off` 可关闭。
+
+**overlay 实际覆盖范围**：远端提供 **15 个 service / 250 个 method**（比 embedded 多约 98 个方法）。
+首次运行会同步拉取（约 190ms，预算 2s，可用 `FEISHU_CLI_META_FIRST_SYNC_MS` 调整，`0` 表示只走后台刷新），
+之后命中本地 cache（`~/.feishu-cli/cache/remote_meta.json`）。
+判断 overlay 是否生效看 `schema status` 的 `source`：`runtime`（本次刚拉取）/ `cache`（命中缓存）/
+`embedded`（未生效，检查网络或 `FEISHU_CLI_REMOTE_META`）。
 
 `feishu-cli schema status --format json` 报告 `source`（embedded/cache/runtime）、版本、
 service/method 数；`doctor --only catalog` 与 `auth status -o json` 的 `catalog` 字段同样可读。
@@ -211,7 +217,7 @@ feishu-cli api GET '/open-apis/authen/v1/user_info?foo=bar' --as user
 2. **路径不存在分级提示**：未知 service / resource / method 都会列出该层的所有可用候选名，便于纠正。
 3. **resource 含点号用最长前缀匹配**：`im.chat.members.create` 会匹配 resource = `chat.members`、method = `create`，不必担心拆错。
 4. **查询不需要 token**：schema 查询走本地/缓存 catalog。overlay 是无凭证的 public meta 请求，失败不影响命令。
-5. **覆盖范围**：embedded baseline 仍是 12 个 service；开启 overlay 后 `schema status` 的 `service_count` 可能变大。本地仍没有的域请用 `schema status` 确认，或去飞书 OpenAPI Explorer / 专用 `feishu-cli <模块>` 命令。
+5. **覆盖范围**：embedded baseline 是 12 个 service / 152 method；overlay 生效后为 15 个 service / 250 method（`schema status` 的 `source` 为 `runtime` 或 `cache`）。overlay 仍未收录的域请去飞书 OpenAPI Explorer 查，或直接用专用 `feishu-cli <模块>` 命令 / `feishu-cli api` 透传。
 6. **JSON 输出不转义 HTML**：`<` / `>` / `&` 保留原样，便于直接吞进 jq / yq 管道。
 
 ---

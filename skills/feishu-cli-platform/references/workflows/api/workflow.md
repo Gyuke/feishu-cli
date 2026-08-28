@@ -25,7 +25,7 @@ OpenAPI host：`open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`�
 
 | Flag | 说明 |
 |------|------|
-| `--params '<json>'` | query 参数（JSON 对象），如 `'{"page_size":10}'` |
+| `--params '<json>'` | query 参数（**单个** JSON 对象），如 `'{"page_size":10}'`；尾部有多余内容（如 `'{"a":1} {"b":2}'`）会报错而非静默只取前半 |
 | `--data '<json>'` / `--data-file <file>` | 请求体：`--data` 传 JSON 字符串，或 `--data-file` 从文件读（`-` 表示 stdin）；二者互斥 |
 | `--as auto\|user\|bot` | 身份：auto（User 优先 Tenant 兜底，默认）/ user（强制 User Token，需先 `auth login`）/ bot（强制 Tenant/应用 Token） |
 | `--user-access-token` | 显式传 User Access Token（显式传入时无条件生效，覆盖 `--as`） |
@@ -36,7 +36,7 @@ OpenAPI host：`open.feishu.cn` / `open.larksuite.com` / `open.larkoffice.com`�
 | `--timeout <seconds>` | 单次请求超时，默认 30 秒 |
 | `--format json\|pretty\|table\|ndjson\|csv` | 响应渲染格式（指定后走内置渲染，覆盖默认 pretty；仅适用于 JSON 响应） |
 | `--jq '<expr>'` | 用内置 gojq 过滤响应（无需外部 jq；仅适用于 JSON 响应） |
-| `--page-all` | 自动翻页：仅识别 `data.has_more` + `page_token`/`next_page_token`；空/重复 cursor 停止并报错 |
+| `--page-all` | 自动翻页：识别 `data.has_more`（容忍 bool/数字/字符串写法）+ `page_token`/`next_page_token`（前者为空自动回落后者）；两者皆空或重复 cursor 停止并报错 |
 | `--page-limit` | 配合 `--page-all` 的最大页数（默认 10，`0`=不限） |
 | `--page-delay` | 翻页间隔毫秒（默认 200） |
 

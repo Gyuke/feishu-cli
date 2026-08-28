@@ -35,6 +35,11 @@ feishu-cli wiki delete <node_token> [-f]
 feishu-cli wiki delete-space <space_id> --yes
 ```
 
+⚠️ **`--include-children` 默认 true（级联删除整棵子树）**。交互确认会明说级联范围
+（"将级联删除该节点及其**全部子节点**"）；只删单节点须显式 `--include-children=false`。
+用 `-f` 跳过确认时**没有任何提示**，请先确认清楚范围。
+JSON 输出的 `ready` / `failed` 如实反映异步任务终态（不再恒为 ready=true），可据此判断是否真正删成功。
+
 ### 移出知识库到云盘（move-to-drive）
 
 `wiki move-to-drive` 是 `wiki move-docs`（云盘 → 知识库）的**反向操作**：把知识库节点移出知识空间、

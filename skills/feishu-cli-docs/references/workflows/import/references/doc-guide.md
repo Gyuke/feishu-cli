@@ -75,6 +75,7 @@ Bob --> Alice: Hi
   - CLI flag 全局覆盖：`feishu-cli doc import doc.md --table-column-width=80,200,*,120`
   - 优先级：注释 > flag explicit > flag fixed > auto；最终都过 `[80, 400]` 像素 clamp
   - 列宽数量与表实际列数不一致时 stderr 打印警告（多写截断、少写补 auto）
+  - **适用范围**：`doc import` 与 `doc add`。`doc content-update` 走官方原子更新协议、不支持自定义列宽，传非 `auto` 的 flag 或内容中含该注释都会 fail-closed 报错，需要控制列宽时改用 `doc import`。
 
 ## Callout
 

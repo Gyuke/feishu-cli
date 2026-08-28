@@ -57,7 +57,7 @@ feishu-cli markdown create --name plan.md --content-file ./plan.md -o json
 
 | flag | 说明 |
 |------|------|
-| `--name` | 远端文件名，**必须 `.md` 结尾**。`create`：`--content` 时必填、`--content-file` 时可省取本地 basename。`overwrite`：`--content` 时必填、`--content-file` 时可省取本地 basename；显式传入 = 同时改名 |
+| `--name` | 远端文件名，**必须 `.md` 结尾**。`create`：`--content` 时必填、`--content-file` 时可省取本地 basename。`overwrite`：**缺省一律读远端现有名**（含 `--content-file` 场景，不会拿本地文件名顶替）；显式传入 = 同时改名。若读不到远端名则 fail-closed 报错，不会退化成 `<file_token>.md` 静默改名 |
 | `--content` | 字符串内容（与 `--content-file` 二选一） |
 | `--content-file` | 本地 `.md` 文件路径 |
 | `--file` | 兼容别名，等价于 `--content-file` |

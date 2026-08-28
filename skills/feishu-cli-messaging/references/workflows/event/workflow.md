@@ -217,6 +217,8 @@ feishu-cli event consume approval.instance.status_changed_v4
 
 `vc.meeting.participant_meeting_*` / `vc.note.generated_v1` / `vc.recording.*` 必须用 User Token 在 consume 启动前 POST 对应 `.../subscription`（body `{"event_type": "<key>"}`）。同一 EventKey 多个 consume 并存时，**每个 consumer 都幂等 POST subscribe**，自己的订阅成功后才发 ready（避免 first 的 subscribe 阻塞/失败时 second 跳过订阅并提前 ready）。最后一个人退出才 POST `.../unsubscription`（5s timeout），避免先退出者打断后者。
 
+**注销后复检补订阅**：unsubscription 是文件锁之外的网络调用，注销在途期间可能有新 consumer 完成注册并订阅。因此注销后会复检存活 consumer 数，若 > 0 则幂等重新订阅并在 stderr 提示「注销后检测到 N 个新 consumer，正在恢复服务端订阅」——否则新 consumer 虽已 ready 却会静默收不到任何事件。看到该提示属正常自愈，无需干预。
+
 ## 权限与开放平台配置
 
 ### 默认 App Token，无需 `auth login`

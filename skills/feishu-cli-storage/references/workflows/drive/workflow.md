@@ -215,6 +215,7 @@ feishu-cli drive push --folder-token fldxxx --local-dir ./mirror --delete-remote
 **安全语义**：
 - `--local-dir` 走 `filepath.EvalSymlinks` + 限定在 cwd 子树内，防 symlink 越界
 - `--delete-local` / `--delete-remote` 必须配 `--yes`，不传 `--yes` 直接拒绝执行
+- **带 `--delete-*` 时身份 fail-closed**：若已配置 User Token 但不可用（token.json 未绑定 app_id、app_id 不匹配、刷新失败），命令**直接报错而非降级 Bot 身份**。原因是身份决定「远端有哪些文件」，Bot 视角的远端条目更少、差集更大，`--delete-local` 会把本地文件当作"远端已不存在"而删掉。不带 `--delete-*` 的普通同步仍按 User 优先 + App 兜底（降级时 stderr 告警）。修复办法：`feishu-cli auth token --bind-legacy-app --as user` 或重新 `auth login`
 - 上传/下载阶段有失败时**自动跳过 `--delete-*` 阶段**，避免「已删孤儿但部分文件没传成功」的半同步状态
 - pull 默认 `--if-exists=overwrite`（保持本地 = 远端），push 默认 `--if-exists=skip`（不动远端已有文件，更安全）
 - **1062507 按目录隔离**：push 过程中若上传/建文件夹命中错误码 `1062507`（父目录直接子节点超 1500 上限——该上限是**单个父文件夹**级的），会把该目录标记为已满，其下（含子树）条目全部跳过标记失败，**其余未满目录继续正常镜像**；收尾汇总列出已满目录清单与中文清理建议——先在这些文件夹清理/归档腾出空间，或把本地文件拆分到更细子目录，再重跑
@@ -407,8 +408,8 @@ feishu-cli drive export --token $DOC_TOKEN --doc-type docx --file-extension mark
 | `drive move` | `--as bot\|user\|auto`（默认 auto） | `drive:file:write` [^1] |
 | `drive add-comment` | 必需 User Token | `docs:document.comment:create`、`docs:document.comment:write_only`；wiki URL 还需 `wiki:node:read`；docx 局部评论还需 `docx:document:readonly` |
 | `drive task-result` | `--as bot\|user\|auto`（默认 auto） | `drive:drive.metadata:readonly`（具体依 scenario：`import` 还需 `docs:document:import`；`export` 还需 `docs:document:export`） |
-| `drive pull` / `status` | User 优先 + App 兜底 | `drive:drive.metadata:readonly`、`drive:file:download` |
-| `drive push` | User 优先 + App 兜底 | `drive:drive.metadata:readonly`、`drive:file:upload`、`space:folder:create`；带 `--delete-remote` 还需 `drive:file:delete` |
+| `drive pull` / `status` | User 优先 + App 兜底；带 `--delete-local` 时 fail-closed（不降级 Bot） | `drive:drive.metadata:readonly`、`drive:file:download`；带 `--delete-local` 还需本地删除权限 |
+| `drive push` | User 优先 + App 兜底；带 `--delete-remote` 时 fail-closed（不降级 Bot） | `drive:drive.metadata:readonly`、`drive:file:upload`、`space:folder:create`；带 `--delete-remote` 还需 `drive:file:delete` |
 | `drive search` | 必需 User Token | `search:docs:read` |
 | `drive upload --file-token`（覆盖） | 必需 User Token | `drive:file:upload`（覆盖不改变已有权限设置） |
 | `drive secure-label list` | 必需 User Token | `docs:secure_label:readonly` |

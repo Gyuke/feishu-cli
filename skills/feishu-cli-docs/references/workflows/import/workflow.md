@@ -25,7 +25,7 @@
 2. **Mermaid/PlantUML/SVG → 飞书画板**：`mermaid`/`plantuml`/`puml`/`svg` 代码块自动转换为飞书画板
 3. **图表故障容错**：语法错误自动降级为代码块展示，服务端错误自动重试（默认最多 10 次，可用 `--diagram-retries` 调整）
 4. **大表格智能处理**：行 > 9 时创建 9 行初始表 + `insert_table_row` API 追加到同一 block（视觉连贯，每行约 1 次 API 往返；verbose 模式 ≥ 5 行打印进度）；列 > 9 按列组拆分保留首列作为标识。**单元格内容填充已走 `batch_update` 批量加速（v1.29+，#159）**：阶段二预热 `cellMap` 后按批（single-group cell 每批 ≤ 30 个）一次性写入，失败再降级为 per-cell；典型 4×6×8 表从 ~70s 降到 ~3s（25-30x）。追加行产生的新 cell 由填充函数按表格局部补建映射，同样进入批量路径（#172 起）
-5. **表格列宽**：默认按内容启发式，可用紧邻表格上方注释 `<!-- feishu-colwidth: ... -->` 或 CLI flag `--table-column-width` 覆盖（注释优先级高于 flag）；完整规则（单位/优先级/clamp）以 `references/doc-guide.md` 表格章节为权威
+5. **表格列宽**：默认按内容启发式，可用紧邻表格上方注释 `<!-- feishu-colwidth: ... -->` 或 CLI flag `--table-column-width` 覆盖（注释优先级高于 flag）；仅 `doc import` / `doc add` 支持，`doc content-update` 会 fail-closed 报错；完整规则（单位/优先级/clamp/适用范围）以 `references/doc-guide.md` 表格章节为权威
 6. **API 限流自动重试**：画板创建和图表导入遇到 HTTP 429 时自动重试，读取服务端 `x-ogw-ratelimit-reset` 响应头精确计算退避时间，采用指数退避策略，默认最多重试 10 次
 7. **并发控制**：图表和表格分别使用独立的 worker 池（默认图表 5、表格 3 并发）
 8. **表格单元格图片真嵌入（#164）**：Markdown 表格单元格内的本地/网络图片，会在表格填充完成后（阶段 2.5）真正嵌入为单元格内的 Image 子块，而非丢失或退化为文字。细节：纯图片单元格不会把图片说明（alt）串成多余的标题文字；嵌入失败或单元格对不齐的图片计入统计 `cell_image_failed` 并打印，不静默丢弃；上传失败的空图块会被清理并补占位文本。仅 `doc import` 走真嵌入，`doc add/content-update` 等非导入场景的单元格图片降级为 `[图片: 说明]` 占位文本。JSON 输出新增 `cell_image_total/success/failed`
