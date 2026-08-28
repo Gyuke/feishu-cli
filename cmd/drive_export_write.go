@@ -80,7 +80,7 @@ func atomicWriteFile(path string, data []byte) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if err := tmp.Chmod(exportFilePerm); err != nil {
+	if err := tmp.Chmod(exportFilePermForTest); err != nil {
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
@@ -104,8 +104,16 @@ func atomicWriteFile(path string, data []byte) error {
 // exportFilePerm 导出文件权限：0600，与 token/缓存一致，避免多用户机器上被旁人读取。
 const exportFilePerm os.FileMode = 0600
 
+// exportFilePermForTest 实际使用的权限位，供测试注入以验证 Chmod 步骤真的生效
+// （os.CreateTemp 默认恰好也是 0600，用常量断言无法区分）。生产恒等于 exportFilePerm。
+var exportFilePermForTest = exportFilePerm
+
+// exportOnWindows 供测试注入，用于在非 Windows 平台验证 Windows 兜底分支。
+// 生产恒为 runtime.GOOS == "windows"。
+var exportOnWindows = func() bool { return runtime.GOOS == "windows" }
+
 func syncExportDir(dir string) error {
-	if runtime.GOOS == "windows" {
+	if exportOnWindows() {
 		return nil
 	}
 	f, err := os.Open(dir)
@@ -118,12 +126,12 @@ func syncExportDir(dir string) error {
 
 // replaceExportFile 提交临时文件；Windows 上 Rename 不能覆盖已存在目标，需先挪走旧文件。
 func replaceExportFile(tmp, dest string) error {
-	err := os.Rename(tmp, dest)
-	if err == nil {
-		return nil
+	if !exportOnWindows() {
+		return os.Rename(tmp, dest)
 	}
-	if runtime.GOOS != "windows" {
-		return err
+	// Windows：Rename 不能覆盖已存在目标，先把旧文件挪到 .bak，失败则回滚
+	if err := os.Rename(tmp, dest); err == nil {
+		return nil
 	}
 	bak := dest + ".bak"
 	_ = os.Remove(bak)
