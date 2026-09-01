@@ -23,6 +23,9 @@ var wikiSyncSubscribeCmd = &cobra.Command{
 
 需要文档拥有者的 User Access Token（仅拥有者可订阅，自动按 --user-access-token /
 登录态 / token.json 解析）。调用幂等，重复执行安全的，符合条件的条目会自动跳过。
+加 --verify 会先回查服务端真值、以服务端为准补订——能纠正"本地记为已订阅但服务端
+早已失效"的静默失明（订阅身份换用户/换应用、文档被回收都会造成这种漂移），代价是每个
+docx 一次 GET。
 
 运行结束后在 ~/.feishu-cli/state/wiki-sync/<config_hash>/subscriptions.json 写一份汇总，
 便于 status 与对账读取。`,
@@ -36,6 +39,7 @@ func runWikiSyncSubscribe(cmd *cobra.Command, _ []string) error {
 		configPath = filepath.Join(home, ".feishu-cli", "wiki-sync.yaml")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	verify, _ := cmd.Flags().GetBool("verify")
 
 	cfg, err := wikisync.LoadConfig(configPath)
 	if err != nil {
@@ -48,6 +52,15 @@ func runWikiSyncSubscribe(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	subscribeFn := func(e wikisync.IndexEntry) error {
+		fileType := client.DriveFileTypeFromObjType(e.ObjType)
+		return client.SubscribeDriveFile(e.ObjToken, fileType, token)
+	}
+	checkFn := func(e wikisync.IndexEntry) (bool, error) {
+		fileType := client.DriveFileTypeFromObjType(e.ObjType)
+		return client.GetDriveFileSubscribeStatus(e.ObjToken, fileType, token)
+	}
+
 	total := wikisync.SubscribeResult{}
 	for i := range cfg.Queries {
 		q := &cfg.Queries[i]
@@ -58,6 +71,15 @@ func runWikiSyncSubscribe(cmd *cobra.Command, _ []string) error {
 		}
 
 		if dryRun {
+			if verify {
+				vr := wikisync.VerifyServerSubscriptions(entries, checkFn)
+				fmt.Printf("[wiki-sync] (dry-run) 任务 %q：服务端已订 %d / 未订 %d / 回查失败 %d\n",
+					q.Name, vr.Subscribed, vr.Unsubscribed, vr.Failed)
+				for _, e := range vr.Targets {
+					fmt.Printf("  - 将补订 %s  %s  (%s)\n", e.ObjToken, e.Title, e.LocalPath)
+				}
+				continue
+			}
 			must := wikisync.PendingSubscriptions(entries)
 			if len(must) == 0 {
 				fmt.Printf("[wiki-sync] (dry-run) 任务 %q：没有需要订阅的 docx\n", q.Name)
@@ -70,17 +92,25 @@ func runWikiSyncSubscribe(cmd *cobra.Command, _ []string) error {
 			continue
 		}
 
-		res, updated := wikisync.RunSubscribe(entries, func(e wikisync.IndexEntry) error {
-			fileType := client.DriveFileTypeFromObjType(e.ObjType)
-			return client.SubscribeDriveFile(e.ObjToken, fileType, token)
-		}, time.Now().Format(time.RFC3339))
+		var res wikisync.SubscribeResult
+		var updated []wikisync.IndexEntry
+		ts := time.Now().Format(time.RFC3339)
+		if verify {
+			res, updated = wikisync.ReconcileSubscriptions(entries, checkFn, subscribeFn, ts)
+		} else {
+			res, updated = wikisync.RunSubscribe(entries, subscribeFn, ts)
+		}
 
 		if err := wikisync.SaveIndex(indexPath, updated); err != nil {
 			return fmt.Errorf("任务 %q 写回索引失败: %w", q.Name, err)
 		}
 
-		fmt.Printf("[wiki-sync] 任务 %q 完成: 总=%d 待订=%d 新订=%d 跳过=%d 失败=%d\n",
-			q.Name, res.Total, res.Pending, res.Subscribed, res.Skipped, res.Failed)
+		label := "完成"
+		if verify {
+			label = "回查+补订完成"
+		}
+		fmt.Printf("[wiki-sync] 任务 %q %s: 总=%d 处理=%d 服务端确认=%d 跳过=%d 失败=%d\n",
+			q.Name, label, res.Total, res.Pending, res.Subscribed, res.Skipped, res.Failed)
 		for _, f := range res.Failures {
 			fmt.Fprintf(os.Stderr, "[wiki-sync]   ✗ %s (%s): %s\n", f.ObjToken, f.Title, f.Error)
 		}
@@ -140,4 +170,5 @@ func writeSubscriptionsSummary(configPath string, res wikisync.SubscribeResult) 
 func init() {
 	wikiSyncCmd.AddCommand(wikiSyncSubscribeCmd)
 	wikiSyncSubscribeCmd.Flags().String("user-access-token", "", "User Access Token（可选；优先登录态，缺失报错）")
+	wikiSyncSubscribeCmd.Flags().Bool("verify", false, "先回查服务端订阅真值再补订（纠正本地漂移；每个 docx 一次 GET）")
 }
