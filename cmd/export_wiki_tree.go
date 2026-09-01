@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -75,6 +77,7 @@ var exportWikiTreeCmd = &cobra.Command{
 		if err := validateOutputPath(outputDir, ""); err != nil {
 			return fmt.Errorf("输出目录不安全: %w", err)
 		}
+		mappingFile, _ := cmd.Flags().GetString("mapping-file")
 
 		maxDepth, _ := cmd.Flags().GetInt("max-depth")
 		includeTypes, _ := cmd.Flags().GetStringSlice("include-types")
@@ -99,6 +102,14 @@ var exportWikiTreeCmd = &cobra.Command{
 			return fmt.Errorf("收集子树失败: %w", err)
 		}
 		fmt.Printf("共发现 %d 个节点，开始导出\n\n", len(jobs))
+
+		// 把 node_token / obj_token / 本地路径 / 原始 URL 的映射先落盘。
+		// 事件驱动的增量同步会用 drive.file.* 事件里的 file_token 反查这条映射。
+		if mappingFile != "" {
+			if err := writeWikiMappingFile(mappingFile, jobs, outputDir, args[0]); err != nil {
+				return fmt.Errorf("写入映射文件失败: %w", err)
+			}
+		}
 
 		// 3. 逐个导出
 		stats := newTreeStats(len(jobs))
@@ -201,6 +212,56 @@ type treeFailure struct {
 	Title     string `json:"title"`
 	Path      string `json:"path"`
 	Error     string `json:"error"`
+}
+
+// wikiMappingEntry 是 export-tree 落盘的一条本地镜像映射，
+// 供事件消费调度把 drive.file.* 事件中的 file_token 反查回 node_token 和本地目录。
+type wikiMappingEntry struct {
+	NodeToken string `json:"node_token"`
+	ObjToken  string `json:"obj_token"`
+	ObjType   string `json:"obj_type"`
+	Title     string `json:"title"`
+	LocalPath string `json:"local_path"`
+	WikiURL   string `json:"wiki_url"`
+}
+
+// writeWikiMappingFile 把所有 treeJob 的 token 与本地路径写入 JSON 数组。
+// 输出使用相对 outputDir 的路径，便于同一份映射文件随目录整体移动。
+func writeWikiMappingFile(mappingFile string, jobs []treeJob, outputDir, source string) error {
+	if err := os.MkdirAll(filepath.Dir(mappingFile), 0700); err != nil && filepath.Dir(mappingFile) != "." {
+		return err
+	}
+	entries := make([]wikiMappingEntry, 0, len(jobs))
+	for _, job := range jobs {
+		localPath, err := filepath.Rel(outputDir, job.OutputPath)
+		if err != nil {
+			localPath = job.OutputPath
+		}
+		entries = append(entries, wikiMappingEntry{
+			NodeToken: job.Node.NodeToken,
+			ObjToken:  job.Node.ObjToken,
+			ObjType:   job.Node.ObjType,
+			Title:     job.Node.Title,
+			LocalPath: filepath.ToSlash(localPath),
+			WikiURL:   buildWikiNodeURL(job.Node.NodeToken, source),
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(mappingFile, append(data, '\n'), 0600)
+}
+
+// buildWikiNodeURL 生成节点在飞书网页端的可访问 URL；source 是 wiki URL 时保留其 host。
+func buildWikiNodeURL(nodeToken, source string) string {
+	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Host != "" {
+		u.Path = "/wiki/" + nodeToken
+		u.RawQuery = ""
+		u.Fragment = ""
+		return u.String()
+	}
+	return "https://feishu.cn/wiki/" + nodeToken
 }
 
 // treeStats 跟踪导出统计。
@@ -740,5 +801,6 @@ func init() {
 	exportWikiTreeCmd.Flags().Bool("expand-mentions", true, "展开 @用户为友好格式（false 时保留 <mention-user/> 标签以支持导入还原）")
 	exportWikiTreeCmd.Flags().Bool("skip-existing", false, "已存在且非空的 md 跳过（适合增量同步）")
 	exportWikiTreeCmd.Flags().Bool("continue-on-error", true, "单个节点导出失败时是否继续后续节点")
+	exportWikiTreeCmd.Flags().String("mapping-file", "", "把 node_token/obj_token/本地路径/原始 URL 映射写入该 JSON 文件（供事件驱动增量同步使用）")
 	exportWikiTreeCmd.Flags().String("user-access-token", "", "User Access Token（可选；默认优先使用 auth login 登录态，失败时回退 App Token）")
 }

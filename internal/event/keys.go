@@ -249,6 +249,67 @@ var keyRegistry = []KeyDefinition{
 		Domain:      "drive",
 		Scopes:      []string{"drive:drive"},
 	},
+	{
+		Key:         "drive.file.edit_v1",
+		EventType:   "drive.file.edit_v1",
+		Description: "文档内容被编辑",
+		Domain:      "drive",
+		Scopes:      []string{"docs:event.document_edited:read"},
+		RequiredConsoleEvents: []string{
+			"drive.file.edit_v1",
+		},
+		PayloadSchema: `{
+  "schema": "2.0",
+  "header": {"event_id": "...", "event_type": "drive.file.edit_v1", "create_time": "..."},
+  "event": {
+    "file_type": "docx|sheet|...",
+    "file_token": "doccn...|shtcn...",
+    "operator_id_list": [{"open_id": "ou_xxx"}],
+    "subscriber_id_list": [{"open_id": "ou_xxx"}],
+    "sheet_id": "sheet 子表 ID（仅 sheet 编辑时有）"
+  }
+}`,
+	},
+	{
+		Key:         "drive.file.deleted_v1",
+		EventType:   "drive.file.deleted_v1",
+		Description: "文档被彻底删除",
+		Domain:      "drive",
+		Scopes:      []string{"docs:event.document_deleted:read"},
+		RequiredConsoleEvents: []string{
+			"drive.file.deleted_v1",
+		},
+		PayloadSchema: `{
+  "schema": "2.0",
+  "header": {"event_id": "...", "event_type": "drive.file.deleted_v1", "create_time": "..."},
+  "event": {
+    "file_type": "docx|sheet|...",
+    "file_token": "doccn...|shtcn...",
+    "operator_id": {"open_id": "ou_xxx"},
+    "subscriber_id_list": [{"open_id": "ou_xxx"}]
+  }
+}`,
+	},
+	{
+		Key:         "drive.file.trashed_v1",
+		EventType:   "drive.file.trashed_v1",
+		Description: "文档被移入回收站",
+		Domain:      "drive",
+		Scopes:      []string{"docs:event.document_deleted:read"},
+		RequiredConsoleEvents: []string{
+			"drive.file.trashed_v1",
+		},
+		PayloadSchema: `{
+  "schema": "2.0",
+  "header": {"event_id": "...", "event_type": "drive.file.trashed_v1", "create_time": "..."},
+  "event": {
+    "file_type": "docx|sheet|...",
+    "file_token": "doccn...|shtcn...",
+    "operator_id": {"open_id": "ou_xxx"},
+    "subscriber_id_list": [{"open_id": "ou_xxx"}]
+  }
+}`,
+	},
 
 	// ---------- 交互回调 ----------
 	{

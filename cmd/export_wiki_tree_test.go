@@ -181,6 +181,28 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestBuildWikiNodeURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		nodeToken string
+		source    string
+		want      string
+	}{
+		{"token fallback", "AbC123", "AbC123", "https://feishu.cn/wiki/AbC123"},
+		{"wiki url keeps host", "AbC123", "https://example.feishu.cn/wiki/RootToken", "https://example.feishu.cn/wiki/AbC123"},
+		{"larkoffice url", "AbC123", "https://x.larkoffice.com/wiki/RootToken?from=abc", "https://x.larkoffice.com/wiki/AbC123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildWikiNodeURL(tt.nodeToken, tt.source)
+			if got != tt.want {
+				t.Errorf("buildWikiNodeURL(%q, %q) = %q, want %q", tt.nodeToken, tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWikiTreeNodeAssetsDirUsesPerDocumentDirectory(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("download-images", true, "")
