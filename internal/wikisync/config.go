@@ -80,12 +80,13 @@ func (c *Config) normalizeDefaults() {
 			q.Name = fmt.Sprintf("query-%d", i+1)
 		}
 		q.WikiURL = strings.TrimSpace(q.WikiURL)
-		q.LocalDir = strings.TrimSpace(q.LocalDir)
+		q.LocalDir = ExpandTilde(strings.TrimSpace(q.LocalDir))
 
 		// assets_dir 是 query 级别字段，默认 local_dir/assets（options 层不提供）。
 		if q.AssetsDir == "" {
 			q.AssetsDir = filepath.Join(q.LocalDir, "assets")
 		}
+		q.AssetsDir = ExpandTilde(q.AssetsDir)
 		if len(q.IncludeTypes) == 0 {
 			if len(opt.IncludeTypes) > 0 {
 				q.IncludeTypes = opt.IncludeTypes
@@ -115,6 +116,27 @@ func (c *Config) normalizeDefaults() {
 		q.ExpandMentions = opt.ExpandMentions
 		q.ContinueOnErr = opt.ContinueOnError
 	}
+}
+
+// ExpandTilde 把路径开头的 `~`（或 `~/`）展开为用户主目录。
+// 配置文件里的路径不会经过 shell 展开，`local_dir: ~/Documents/...` 若不加处理会被
+// 当作字面量目录名（`filepath.Abs` 会相对 cwd 解析），因此这里显式展开 `~`。
+// 若 `~` 后面不是 `/` 或 `\`（如 `~user`），保持原样，交由后续逻辑自行判断。
+func ExpandTilde(p string) string {
+	if p == "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		return filepath.Join(home, p[2:])
+	}
+	return p
 }
 
 // Validate 校验配置，返回中文错误。

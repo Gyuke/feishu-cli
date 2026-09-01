@@ -1,6 +1,7 @@
 package wikisync
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -116,5 +117,30 @@ func TestQueryIncludesType(t *testing.T) {
 	}
 	if !q.IncludesType("DOCX") {
 		t.Error("大小写不同也应命中")
+	}
+}
+
+func TestExpandTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("无法获取用户主目录: %v", err)
+	}
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"空串", "", ""},
+		{"仅波浪号", "~", home},
+		{"波浪号加斜杠", "~/Documents", home + string(os.PathSeparator) + "Documents"},
+		{"相对路径不动", "./docs/api", "./docs/api"},
+		{"绝对路径不动", "/data/x", "/data/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExpandTilde(tc.in); got != tc.want {
+				t.Errorf("ExpandTilde(%q) = %q, 期望 %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
