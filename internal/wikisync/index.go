@@ -30,6 +30,9 @@ type IndexEntry struct {
 	LocalPath        string `json:"local_path"`
 	SubscribeStatus  string `json:"subscribe_status"`
 	LastSubscribedAt string `json:"last_subscribed_at"`
+	// SyncStatus 记录条目相对最后一次对账的种类：""（正常/当前）、"gone"（云端已删/移出/回收站）。
+	// 由 reconcile 写入；readonly/订阅/重导均忽略。
+	SyncStatus string `json:"sync_status,omitempty"`
 }
 
 // LocalPath 返回本地相对路径（来自 index 项，适合直接用于事件反查）。

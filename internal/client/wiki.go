@@ -175,6 +175,8 @@ func ListWikiNodes(spaceID string, parentNodeToken string, pageSize int, pageTok
 				HasChild:        BoolVal(item.HasChild),
 				Creator:         StringVal(item.Creator),
 				Owner:           StringVal(item.Owner),
+				ObjCreateTime:   StringVal(item.ObjCreateTime),
+				ObjEditTime:     StringVal(item.ObjEditTime),
 			})
 		}
 	}
