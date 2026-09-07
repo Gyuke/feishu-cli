@@ -313,9 +313,6 @@ func reconcileOneQuery(q *wikisync.Query, userAccessToken string, cutoff int64, 
 		if err := mergeIndexForTask(q, indexEntries); err != nil {
 			return res, err
 		}
-		if err := writeLegacyMap(q, indexEntries); err != nil {
-			return res, err
-		}
 	}
 	return res, nil
 }

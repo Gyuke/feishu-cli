@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,7 +20,6 @@ var wikiSyncPullCmd = &cobra.Command{
 
   <local_dir>/.feishu-cli/wiki-index.json      合并索引（RAG 来源 URL 查询）
   <local_dir>/.feishu-cli/manifests/<hash>.json  单任务文件清单（clean 用）
-  <local_dir>/.feishu-cli-manifests/<hash>.map.json  legacy 映射（脚本回退通道）
 
 复用 wiki export-tree 的遍历与导出能力，只做一次遍历。`,
 	RunE: runWikiSyncPull,
@@ -167,11 +165,6 @@ func pullOneQuery(q *wikisync.Query, userAccessToken string, dryRun bool) (*pull
 		return res, err
 	}
 
-	// 写 legacy map：让 scripts/wiki_event_watch.sh 回退通道继续可用。
-	if err := writeLegacyMap(q, indexEntries); err != nil {
-		return res, err
-	}
-
 	return res, nil
 }
 
@@ -219,35 +212,6 @@ func mergeIndexForTask(q *wikisync.Query, newEntries []wikisync.IndexEntry) erro
 		}
 	}
 	return wikisync.SaveIndex(indexPath, append(kept, newEntries...))
-}
-
-// writeLegacyMap 写出与 scripts/wiki_export_batch.sh / wiki_event_watch.sh 兼容的映射文件。
-// 键文件名 = sha256(wiki_url)，与该脚本一致。
-func writeLegacyMap(q *wikisync.Query, entries []wikisync.IndexEntry) error {
-	path := filepath.Join(q.LocalDir, ".feishu-cli-manifests", q.TaskID()+".map.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	type legacyEntry struct {
-		NodeToken string `json:"node_token"`
-		ObjToken  string `json:"obj_token"`
-		ObjType   string `json:"obj_type"`
-		Title     string `json:"title"`
-		LocalPath string `json:"local_path"`
-		WikiURL   string `json:"wiki_url"`
-	}
-	list := make([]legacyEntry, 0, len(entries))
-	for _, e := range entries {
-		list = append(list, legacyEntry{
-			NodeToken: e.NodeToken, ObjToken: e.ObjToken, ObjType: e.ObjType,
-			Title: e.Title, LocalPath: e.LocalPath, WikiURL: e.WikiURL,
-		})
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0600)
 }
 
 // collectAssetFiles 收集某节点下载的 assets 文件（相对 local_dir），保证 manifest 完整。

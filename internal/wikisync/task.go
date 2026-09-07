@@ -9,8 +9,7 @@ import (
 //
 // 规则：hex(sha256(wiki_url))，输入为配置里原始的 wiki_url 字符串。
 // 只依赖 wiki_url、不依赖 local_dir 或 name，因此目录移动、进程重启后身份不变；
-// 且与 scripts/wiki_export_batch.sh 的 sha256(url) 完全一致，保证 legacy
-// .feishu-cli-manifests/<hash>.map.json 文件名可直接复用（Phase 5 兼容）。
+// 该值同时用于任务 manifest 路径：<local_dir>/.feishu-cli/manifests/<task_hash>.json。
 func TaskID(wikiURL string) string {
 	sum := sha256.Sum256([]byte(wikiURL))
 	return hex.EncodeToString(sum[:])

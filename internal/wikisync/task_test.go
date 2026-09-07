@@ -3,11 +3,11 @@ package wikisync
 import "testing"
 
 func TestTaskIDStableAndKnown(t *testing.T) {
-	// 锁定一个已知值，防止 hash 规则悄悄变化破坏 legacy `.map.json` 文件名兼容。
+	// 锁定一个已知值，防止 hash 规则悄悄变化破坏任务 manifest 路径的文件名兼容。
 	const want = "4ff5be3aea0a5b2e54bcb03aea479ba3125eccd5daa62447cbc7d48604ae90f6"
 	got := TaskID("https://example.feishu.cn/wiki/ABC123")
 	if got != want {
-		t.Fatalf("TaskID 期望 %s，得到 %s（稳定值变更会破坏脚本兼容）", want, got)
+		t.Fatalf("TaskID 期望 %s，得到 %s（稳定值变更会破坏 manifest 路径）", want, got)
 	}
 }
 

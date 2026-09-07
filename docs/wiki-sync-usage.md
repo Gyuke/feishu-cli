@@ -71,7 +71,7 @@ queries:
 ## 3. 完整命令（拉取 + 订阅 + 变更→重导）
 
 ```bash
-# ① 全量拉取到本地（生成 Markdown + 索引 + manifest + legacy map）
+# ① 全量拉取到本地（生成 Markdown + 索引 + manifest）
 feishu-cli wiki sync pull --config ~/.feishu-cli/wiki-sync.yaml
 
 # ② 建立订阅（对索引里的 docx 批量订阅云端事件，回写索引 subscribe_status）
