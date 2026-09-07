@@ -1,7 +1,9 @@
 # 知识库增量同步使用指南（`wiki sync pull / subscribe / watch / reconcile / status`）
 
-`feishu-cli wiki sync` 命令组的**使用文档**：从「把云端知识库拉取到本地（指定保存目录）」、
-「建立事件订阅」到「常驻监听文档改动并定向重导」与「定时全量对账」的完整流程。
+本文是 `feishu-cli wiki sync` 命令组的**使用文档**：从「把云端知识库拉取到本地（指定保存目录）」、
+「建立事件订阅」到「常驻监听文档改动并定向重导」与「定时全量对账」的完整流程，以及每步生成的
+元数据和文档存放在哪里、被哪些命令消费。文中的 URL、token 均为占位符，实际使用请替换，并**不要**
+把企业前缀域名或真实凭证写入仓库。
 
 > 对应旧命令：`wiki export-tree <url> -o <dir>`（一次性全量拉取）已被 `wiki sync pull` 取代。
 > `temp.md` 里的 `./bin/feishu-cli wiki export-tree '...' -o ./doc_sop_test`，等价于
@@ -134,7 +136,110 @@ feishu-cli wiki sync reconcile --config scripts/wiki-sync.yaml --since today
 
 ---
 
-## 4. 端到端示例
+## 4. 每个命令的产物：位置 + 内容 + 谁消费
+
+### 4.1 产物总览（按 `local_dir` 下）
+
+```text
+<local_dir>/
+  <知识库层级>.md                      # 镜像下来的文档内容（每篇一个 .md）
+  <子目录>/<文档>.md
+  assets/                              # 下载的图片（download_images=true 时）
+    <文档名>/image_N.png
+  .feishu-cli/
+    wiki-index.json                    # 合并索引（全部任务，一项 = 一个本地 Markdown）
+    manifests/<task_hash>.json         # 单任务文件清单（该任务写过的所有文件）
+    changes/<YYYY-MM-DD>.jsonl         # watch 每次重导/失败/删除的逐行记录
+```
+
+全局（跨任务）状态在 `~/.feishu-cli/state/wiki-sync/<config_hash>/subscriptions.json`，
+其中 `<config_hash> = hex(sha256(wiki-sync.yaml 文件字节))`。
+
+### 4.2 `wiki sync pull` 生成什么
+
+| 产物 | 位置 | 内容 | 被谁消费 |
+|------|------|------|----------|
+| 文档正文 | `<local_dir>/<...>.md` | 云端文档镜像（Markdown） | 人 / RAG / Git |
+| 图片资源 | `<local_dir>/assets/<...>/*.png` | 拉取时下载 | 文档正文引用、Git |
+| 合并索引 | `<local_dir>/.feishu-cli/wiki-index.json` | 一次拉取合并所有任务；一项含 `task_id / space_id / node_token / obj_token / obj_type / title / parent_node_token / has_child / node_type / obj_edit_time / wiki_url / local_path / subscribe_status / last_subscribed_at` | `subscribe`（过滤 docx）、`watch`（按 `obj_token` 反查 `local_path`+`node_token` 重导）、RAG（URL→本地路径） |
+| 任务 manifest | `<local_dir>/.feishu-cli/manifests/<task_hash>.json` | `task_id / wiki_url / local_dir / files`（本任务写过的全部 `.md`+`assets` 相对路径，去重排序） | `clean`（只删本任务文件）、`reconcile`（结构变化检测）、事件调度 |
+
+`pull` 逐任务执行：遍历 → 导出 → 下载图片 → 写 `.md` → `SaveManifest` → `mergeIndexForTask`（并入合并索引）。
+
+### 4.3 `wiki sync subscribe` 生成什么
+
+| 产物 | 位置 | 内容 | 被谁消费 |
+|------|------|------|----------|
+| 回写的索引 | `<local_dir>/.feishu-cli/wiki-index.json` | 把已订阅的 docx 条目 `subscribe_status` 置为 `subscribed`、记 `last_subscribed_at` | `watch`（启动预检对账）、`status`（Phase 4）、人工对账 |
+| 全局汇总 | `~/.feishu-cli/state/wiki-sync/<config_hash>/subscriptions.json` | `{config_hash, last_run, total, subscribed, skipped, failed}` | 人工/脚本核对订阅是否完整 |
+
+调用的是 `POST /open-apis/drive/v1/files/<obj_token>/subscribe?file_type=docx`；只有文档**拥有者**能订阅，
+重复调用幂等。`--verify` 时会先 `GET .../subscribe` 回查服务端 `is_subscribe`，以服务端为真值补订。
+
+### 4.4 `wiki sync watch` 生成什么
+
+| 产物 | 位置 | 内容 | 被谁消费 |
+|------|------|------|----------|
+| 重导后的文档 | `<local_dir>/<...>.md` | 被编辑的那一篇被**定向重导**（只重导命中节点，不重拉整棵） | 人 / RAG / Git |
+| 变更记录 | `<local_dir>/.feishu-cli/changes/<YYYY-MM-DD>.jsonl` | 每条事件一行：`{file_token, obj_token, node_token, local_path, title, event_id, changed_at, status, error}`；`status` ∈ `updated / failed / missing` | 审计、diff、未来 `status` |
+
+处理流程：长连接收 `drive.file.edit_v1`（或 `deleted_v1`）→ 解析 `file_token`（= `obj_token`）→
+在索引反查 `node_token / local_path` → 按 `debounce` 聚合（同一文档窗口内只重导一次）→
+用 `node_token` 走导出管线定向重导 → 写回 `.md` → 追加一条变更记录。`deleted_v1` 则记为 `missing`。
+
+> watch 启动会默认做一次「订阅回查+补订」预检（`ReconcileSubscriptions`，`--no-precheck` 跳过），
+> 确保开始监听前订阅关系是对的。本地 Target 文件不存在时 `.feishu-cli/changes/` 目录在首次重导时才创建。
+
+### 4.5 `wiki sync reconcile` 生成什么
+
+| 产物 | 位置 | 内容 | 被谁消费 |
+|------|------|------|----------|
+| 重导后的文档 | `<local_dir>/<...>.md` | 自基线后改动/新增的那几篇被**定向重导**（未变的跳过） | 人 / RAG / Git |
+| 刷新后的索引 | `<local_dir>/.feishu-cli/wiki-index.json` | 改动/新增条目被重写；**未变条目也刷新元数据**（`obj_edit_time`/`title`/`parent_node_token` 等）；云端已消失的条目在 `clean: false` 时标 `sync_status: "gone"`、若目录改名则校正 `local_path` | RAG、`subscribe`、`watch` |
+| 任务 manifest | `<local_dir>/.feishu-cli/manifests/<task>.json` | **以最终索引 + 磁盘资产为权威重建活集**（每个索引条目的 `.md` + 各 `.md` 的图片资产子目录），与旧清单做差剔除移动/删除后遗留的孤儿；`clean` 时对应旧文件被一并物理删除 | `clean`、结构变化检测 |
+| 对账基线 | `~/.feishu-cli/state/wiki-sync/tasks/<task_hash>/last-reconcile.json` | `{task_id, wiki_url, local_dir, last_run, baseline, changed, gone, reexported, removed, skipped, failed}` | 下次 `reconcile` 读该任务基线做增量；`status` 展示；人工核对 |
+
+对账原理：重新枚举整棵 → 用每个节点的 `obj_edit_time`（秒级 unix，毫秒自动折算）与基线比较 →
+`> 基线` 或 **标题/父节点变化**的节点定向重导；解析失败退化为与索引字符串比对。首次无基线则视为全量（全部重导）。
+`clean: true` 时云端已消失的节点会连带删除本地 `.md`；加上「孤儿清理」，移动/删除/重命名后不再被任何索引条目引用的旧 `.md` 与旧 assets 也会被一并删除（只删清单里记录过的该任务文件，绝不碰用户手工文件）。
+
+### 4.6 `wiki sync status` 输出什么
+
+只读聚合，不调 API、不写文件。顶层字段：`config / config_hash / state_dir / generated_at / subscriptions / queries[] / totals`。
+
+每个 `queries[]` 项给出该任务的明细：
+
+| 字段 | 含义 |
+|------|------|
+| `index.total / docx / subscribed / subscribe_failed / gone` | 索引条目数、docx 数、订阅成功/失败数、云端已消失（`sync_status=gone`）数 |
+| `manifest.total_files / markdown` | 本任务实际写入的文件总数（含 assets）、Markdown 数 |
+| `last_reconcile.ran / last_run / baseline / changed / reexported / removed / failed` | 上次对账是否跑过、时间、基线、该轮变更/重导/移除/失败数 |
+| `events.records / updated / failed / missing / latest` | `.feishu-cli/changes/*.jsonl` 里的事件重导聚合与最近时间 |
+
+顶层 `subscriptions` 来自 `state_dir/subscriptions.json`（上次 `subscribe` 汇总），`totals` 跨所有 query 求和。
+
+```bash
+# 默认 JSON；--jq 过滤、--format table 表格
+feishu-cli wiki sync status --config ~/.feishu-cli/wiki-sync.yaml --jq '.queries[].index'
+feishu-cli wiki sync status --config ~/.feishu-cli/wiki-sync.yaml --format table --jq '.queries[] | {name, subscribed: .index.subscribed}'
+```
+
+---
+
+## 5. 消费关系速查（谁读什么）
+
+| 产物 | 写入命令 | 读取命令 |
+|------|----------|----------|
+| `<local_dir>/.feishu-cli/wiki-index.json` | `pull`、`subscribe`（回写）、`watch`（预检回写）、`reconcile`（刷新） | `subscribe`、`watch`、`reconcile`、`status`、RAG |
+| `<local_dir>/.feishu-cli/manifests/<task>.json` | `pull`、`reconcile`（追加/剔除） | `reconcile`（clean 判定）、`status`（文件数统计） |
+| `~/.feishu-cli/state/wiki-sync/<cfg_hash>/subscriptions.json` | `subscribe` | `status`、人工对账 |
+| `~/.feishu-cli/state/wiki-sync/tasks/<task_hash>/last-reconcile.json` | `reconcile` | 下次 `reconcile`（该任务增量基线）、`status`、人工核对 |
+| `<local_dir>/.feishu-cli/changes/<date>.jsonl` | `watch` | `status`（事件聚合）、审计、Git |
+| `<local_dir>/**/*.md`、`<local_dir>/assets/**` | `pull`、`watch`、`reconcile` | RAG、Git、人 |
+
+---
+
+## 6. 端到端示例（替换占位符后可跑）
 
 ```bash
 # 0) 授权（首次）
@@ -146,9 +251,9 @@ options:
   debounce: 10s
   download_images: true
 queries:
-  - name: "测试文档"
+  - name: "叉车取货文档"
     wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"
-    local_dir: "./docs_test"
+    local_dir: "./doc_sop_test"
 YAML
 
 # 2) 全量拉取
@@ -165,3 +270,27 @@ feishu-cli wiki sync watch --config ~/.feishu-cli/wiki-sync.yaml
 # 或者用 4') 定时对账（替代 watch，无需常驻进程，cron 每日跑一次）
 #    feishu-cli wiki sync reconcile --config ~/.feishu-cli/wiki-sync.yaml
 ```
+
+---
+
+## 7. 已实现 / 尚未实现（Phase 4 范围）
+
+已实现：
+- `wiki sync reconcile`：增量/定时对账（按 `obj_edit_time` 与基线比对）。已覆盖**内容变更**与**结构变化**
+  （改名/移动按 `title`/`parent_node_token` 识别；删除/移出/回收站按节点从枚举中消失识别），
+  并支持 `clean` 严格镜像：`clean: true` 时云端已消失的文件从磁盘 + 清单剔除，`clean: false` 时保留但标 `gone`。
+- `wiki sync status`：只读聚合各任务的索引/订阅/对账基线/事件记录状态（不调 API 不写文件，支持 `--format`/`--jq`）。
+
+尚未实现（勿按此操作）：
+- 全局 `tasks.json`、`event-queue.ndjson`、`events/<date>.ndjson`、日志文件目前**未写入**。
+
+当前 `wiki sync` 有 `pull`、`subscribe`、`watch`、`reconcile`、`status` 五个子命令。
+
+---
+
+## 8. 隐私与占位符要求
+
+- 仓库内**禁止**出现真实企业前缀域名（如 `<企业>.feishu.cn` 这类带租户前缀的域名）、真实 App Secret、
+  真实 User Token、真实个人邮箱；URL 用通用 `feishu.cn`，token 用 `cli_xxx`。
+- 实际测试可用临时配置文件（如 `/tmp/wiki-sync.yaml`），内容含真实域名仅限本地，勿提交。
+- `.env`、`config.yaml`、`token.json`、`wiki-sync.yaml` 含敏感信息，已由 `.gitignore` 排除，禁止提交。
