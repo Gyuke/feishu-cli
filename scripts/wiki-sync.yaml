@@ -1,0 +1,50 @@
+options:
+  debounce: 10s            # 同一文档两次定向重导的最小间隔（watch 用）
+  download_images: true    # 拉取时下载图片到 assets_dir
+  clean: true             # 是否严格镜像：云端删了本地是否也删（reconcile 用；false=保留+索引标 gone）
+  continue_on_error: true  # 单个节点失败是否继续
+  include_types: [docx, sheet]
+
+queries:
+  - name: "sop_test"
+    wiki_url: "https://seer-group.feishu.cn/wiki/JDIrwUiFtiJ1AEkht02cZZtWnN8"   # 根节点 URL（必填）
+    local_dir: "/home/sr/Documents/seer_docs/doc_sop_test"                                  # 保存目录（必填，对应旧 -o <dir>）
+    # assets_dir: "./doc_sop_test/assets"   # 省略则默认 <local_dir>/assets
+    # conflict: "overwrite"                 # overwrite | skip | fail
+    # debounce: "10s"                        # 覆盖 options 层
+  - name: "入门资料"
+    wiki_url: "https://seer-group.feishu.cn/wiki/OmKAw8xR8iwjwqkT5nscLYhWnjd"
+    local_dir: "/home/sr/Documents/seer_docs/docs_faq/入门资料"
+
+  - name: "建图及定位"
+    wiki_url: "https://seer-group.feishu.cn/wiki/OlkBwPTG6iKg8YkU7ptchYfpnUg"
+    local_dir: "/home/sr/Documents/seer_docs/docs_faq/建图及定位"
+
+  - name: "控制器"
+    wiki_url: "https://seer-group.feishu.cn/wiki/UGmBwAaIri2v5Qk1WT8cZ2qRnAW"
+    local_dir: "/home/sr/Documents/seer_docs/docs_faq/控制器"
+  
+  - name: "SRC 控制器造车应用版块"
+    wiki_url: "https://seer-group.feishu.cn/wiki/CQe3wMTmVifRvhkXaXQcIF7cnB4"
+    local_dir: "/home/sr/Documents/seer_docs/docs_build_car/API"
+
+  - name: "Robokit3.4 API 通信协议 最佳实践"
+    wiki_url: "https://seer-group.feishu.cn/wiki/TkiEwondLiEweZkZSi3cTMxon7b"
+    local_dir: "/home/sr/Documents/seer_docs/doc_rbk3.4_api/最佳实践"
+
+  - name: "Robokit3.4 API 通信协议"
+    wiki_url: "https://seer-group.feishu.cn/wiki/YE5Dwl3RviadA8kIOrOcKXkqnVc"
+    local_dir: "/home/sr/Documents/seer_docs/doc_rbk3.4_api/api"
+  
+  - name: "RS3.0 & RBK3.5 对外文档-Robokit_v3.5"
+    wiki_url: "https://seer-group.feishu.cn/wiki/YE5Dwl3RviadA8kIOrOcKXkqnVc"
+    local_dir: "/home/sr/Documents/seer_docs/RS3.0_RBK3.5/Robokit_v3.5"
+  
+  - name: "RS3.0 & RBK3.5 对外文档-标准机器人脚本使用说明"
+    wiki_url: "https://seer-group.feishu.cn/wiki/YE5Dwl3RviadA8kIOrOcKXkqnVc"
+    local_dir: "/home/sr/Documents/seer_docs/RS3.0_RBK3.5/standard_scripts_ins"
+
+  - name: "具身算法一部 Coding 问题汇总"
+    wiki_url: "https://seer-group.feishu.cn/wiki/H7VZwU4VTii49wkscSQcbUA5nhe"
+    local_dir: "/home/sr/Documents/seer_docs/js1/gzdw_faq"
+    

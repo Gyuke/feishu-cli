@@ -125,6 +125,63 @@ feishu-cli doc import large-doc.md --title "大文档" \
   --upload-images --diagram-workers 5 --table-workers 3 --image-workers 2 --verbose
 ```
 
+### 知识库自动化增量同步（`wiki sync`）
+
+把一个知识库按配置**镜像到本地目录**，云端一有改动就能增量刷下来——既适合做 RAG 语料、本地备份，
+也适合对知识库做"常驻同步"。基于 `wiki-sync.yaml`（默认 `~/.feishu-cli/wiki-sync.yaml`，`--config` 覆盖）。
+
+仓库已内置配置好的 `scripts/wiki-sync.yaml`，可直接使用。
+
+一个 `queries` 项 = **一个 `wiki_url` → 一个本地目录**。
+
+```bash
+feishu-cli wiki sync pull      --config ~/.feishu-cli/wiki-sync.yaml   # ① 全量拉取（生成 Markdown + 索引 + manifest）
+feishu-cli wiki sync subscribe --config ~/.feishu-cli/wiki-sync.yaml   # ② 批量订阅云端事件（对索引里的 docx 建 drive 订阅）
+feishu-cli wiki sync watch     --config ~/.feishu-cli/wiki-sync.yaml   # ③a 常驻监听，文档一改就定向重导那一篇（Ctrl-C 退出）
+feishu-cli wiki sync reconcile --config ~/.feishu-cli/wiki-sync.yaml   # ③b 定时对账（cron 每日，无需常驻进程）
+feishu-cli wiki sync status    --config ~/.feishu-cli/wiki-sync.yaml   # ④ 只读巡检（索引/订阅/基线/事件，不调 API 不写文件）
+```
+
+`wiki-sync.yaml` 示例：
+
+```yaml
+options:
+  debounce: 10s            # watch 同一文档两次定向重导的最小间隔
+  download_images: true    # 拉取时下载图片到 assets
+  clean: false             # 是否严格镜像（云端删了，本地是否也删；reconcile 用）
+  include_types: [docx, sheet]
+
+queries:
+  - name: "SOP 文档"
+    wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"   # 根节点 URL（必填）
+    local_dir: "./doc_sop"                                        # 保存目录（必填，对应旧命令 -o <dir>）
+```
+
+**变更→重导的两条路径定位不同**：
+
+- **`watch`（实时 · 内容增量）**：长连接消费 `drive.file.edit_v1` / `deleted_v1`，按索引里
+  `obj_token` 反查本地路径，只定向重导被改的那一篇，并把每次重导逐行追加到
+  `<local_dir>/.feishu-cli/changes/<date>.jsonl`。**只负责"内容改动"**——同一篇改了正文能秒级刷下来；
+  但 **文档改了目录 / 改名（结构变化）时 `watch` 检测不到**：它按索引里记录的旧路径落盘，不重算路径、
+  不校正索引，移动后的新位置要等 `reconcile` 才补上。
+- **`reconcile`（周期 · 结构兜底）**：重新枚举整棵，用每个节点 `obj_edit_time` 与上次基线比对，
+  只重导新增 / 改过的节点；**同时处理结构变化**——`title` / `parent_node_token` 与索引不一致
+  （改名 / 移动）视为变更，重导到新路径并校正索引 `local_path`；节点从树中消失（删除 / 移出）记 `gone`；
+  `clean: true` 时删除已消失的本地文件，并进一步按"最终索引 + 磁盘资产"为权威，剔除移动 / 改名后
+  不再被任何索引条目引用的旧 `.md` 与旧 assets（孤儿清理，绝不碰用户手工文件）。
+
+**任务身份与配置哈希解耦**：对账基线存于
+`~/.feishu-cli/state/wiki-sync/tasks/<task_hash>/last-reconcile.json`，
+`<task_hash> = hex(sha256(local_dir + "\x00" + hex(sha256(wiki_url))))`——只跟 `local_dir + wiki_url`
+绑定，与配置文件哈希**解耦**：改 `clean`、加注释等都不重置基线、不触发全量重建；只有真正换任务
+（`wiki_url` 或 `local_dir` 变）才需要重新全量。`local_dir` / `assets_dir` 支持 `~/`，会展开为用户主目录，
+所以 `~/Documents/...` 与 `/home/<user>/Documents/...` 指向同一任务、不触发重建。
+
+> `watch` 需要文档**拥有者**的 User Token（订阅与读取文档都需要）；`subscribe --verify` 会先回查
+> 服务端订阅真值再补订；`reconcile --since today|now|<unix秒>|<RFC3339>` 可显式指定基线。
+> 完整配置字段、产物布局（`wiki-index.json` / `manifests` / `changes`）、消费关系与
+> 端到端示例，见 [docs/wiki-sync-usage.md](docs/wiki-sync-usage.md)。
+
 ### 全功能 API 覆盖
 
 <details>
@@ -133,7 +190,7 @@ feishu-cli doc import large-doc.md --title "大文档" \
 | 模块 | 能力 |
 |------|------|
 | **文档** | 创建、导入、导出、**大文档选择性读取（doc read：大纲/按标题取节/关键词定位）**、编辑、批量更新、Callout、画板、异步导出/导入文件 |
-| **知识库** | 空间列表、节点增删改查、导出（含整树递归镜像）、**移出知识库到云盘（move-to-drive）**、空间详情、成员管理 |
+| **知识库** | 空间列表、节点增删改查、导出（含整树递归镜像）、**移出知识库到云盘（move-to-drive）**、空间详情、成员管理、**自动化增量同步（wiki sync pull/subscribe/watch/reconcile/status：批量拉取→订阅→实时/周期重导→对账）** |
 | **电子表格** | V2 基础读写 + V3 富文本 API，行列操作、样式、批量样式、合并、查找替换、导出 XLSX/CSV、浮动图片读写、素材上传、单元格写图、筛选视图与筛选条件 CRUD、下拉菜单数据验证、**类型保真整表读写 table-get/table-put（数字/日期/布尔 dtype 保真，支持 get→改→put round-trip）** |
 | **多维表格** | base/v3 + bitable/v1 全覆盖：数据表/字段/记录 CRUD（含批量获取）、记录附件上传/下载/移除、视图配置（filter/sort/group/visible-fields/timebar/card）、仪表盘 CRUD 与智能排版、仪表盘块 CRUD、表单 CRUD 与分享详情/提交、表单问题 CRUD、角色 CRUD 与协作者管理、高级权限、数据聚合、工作流 CRUD、多维表格重命名与权限设置 |
 | **消息** | 发送与回复共用 text/Markdown/post/image/file/audio/video/card 内容模型（本地媒体自动上传、幂等键）、转发、合并转发、Pin、表情回复、消息书签（flag create/list/cancel）、搜索群聊（Bot/User 双身份）、历史记录（群聊 / P2P 私聊，支持 `--user-email` / `--user-id` 自动反查 p2p chat_id）、批量获取、资源下载、话题回复、**发送者名字自动解析**（输出顶层 `sender_names` 映射，覆盖退群成员） |
@@ -271,7 +328,7 @@ feishu-cli <command> [subcommand] [flags]
 
 Commands:
   doc       文档操作（创建、导入、导出、编辑、异步导出/导入文件）
-  wiki      知识库操作（节点增删改查、空间详情、成员管理）
+  wiki      知识库操作（节点增删改查、空间详情、成员管理、**增量同步 sync：pull/subscribe/watch/reconcile/status**）
   sheet     电子表格（读写、样式、batch-set-style、V3 富文本 API、导出 XLSX/CSV、image、filter-view + condition、dropdown）
   bitable   多维表格（base/v3 + bitable/v1：数据表/字段/记录/附件/视图/仪表盘/表单/角色/权限/聚合/工作流，88 命令）
   msg       消息操作（发送、转发、合并转发、回复、Pin、表情回复、书签、批量获取、资源下载）
@@ -376,6 +433,14 @@ feishu-cli wiki delete-space <space_id> --yes       # 删除整个知识空间�
 feishu-cli wiki member add <space_id> --member-type userid --member-id USER_ID --role admin
 feishu-cli wiki member list <space_id>
 feishu-cli wiki member remove <space_id> --member-type userid --member-id USER_ID --role admin
+
+# 知识库自动化增量同步（wiki sync）：拉取 → 订阅 → 实时/周期重导 → 对账
+# 基于 wiki-sync.yaml；一个 query = 一个 wiki_url → 一个本地目录
+feishu-cli wiki sync pull      --config ~/.feishu-cli/wiki-sync.yaml   # ① 全量拉取到本地
+feishu-cli wiki sync subscribe --config ~/.feishu-cli/wiki-sync.yaml   # ② 批量订阅云端事件（--verify 回查纠偏）
+feishu-cli wiki sync watch     --config ~/.feishu-cli/wiki-sync.yaml   # ③a 常驻监听，文档一改就定向重导（Ctrl-C 退出）
+feishu-cli wiki sync reconcile --config ~/.feishu-cli/wiki-sync.yaml   # ③b 定时对账（cron 每日，含改名/移动/删除结构变化）
+feishu-cli wiki sync status    --config ~/.feishu-cli/wiki-sync.yaml   # ④ 只读巡检（索引/订阅/基线/事件）
 ```
 
 </details>
