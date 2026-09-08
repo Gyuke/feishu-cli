@@ -36,7 +36,7 @@
 ## 2. 配置 `wiki-sync.yaml`
 
 默认读取 `~/.feishu-cli/wiki-sync.yaml`，可用 `--config` 覆盖。一个任务（`queries` 一项） =
-「一个 wiki_url → 一个本地保存目录」。
+「一个 wiki_url **或** space_id → 一个本地保存目录」。
 
 ```yaml
 options:
@@ -47,23 +47,35 @@ options:
   include_types: [docx, sheet]
 
 queries:
+  # ① 单节点任务：拉取某节点子树（根节点 URL）
   - name: "叉车取货文档"
-    wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"   # 根节点 URL（必填）
+    wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"   # 根节点 URL（二选一，见下）
     local_dir: "./doc_sop_test"                                  # 保存目录（必填，对应旧 -o <dir>）
     # assets_dir: "./doc_sop_test/assets"   # 省略则默认 <local_dir>/assets
     # conflict: "overwrite"                 # overwrite | skip | fail
     # debounce: "10s"                        # 覆盖 options 层
+
+  # ② space 任务：拉取整个知识库（枚举 space 全部顶层节点并镜像整库）
+  - name: "FAQ 帮助中心"
+    space_id: "7349730005238317084"                              # 知识库 space_id（二选一，见下）
+    local_dir: "./docs/faq"
+    # wiki_url: "https://seer-group.feishu.cn/wiki/<任一篇>"     # 可选：用于生成节点 URL 的 host 与标识；省略回退 feishu.cn
 ```
 
 关键字段：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `wiki_url` | 是 | 知识库节点 URL。`task_hash = hex(sha256(wiki_url))` 由此派生（任务身份，不随目录移动变） |
+| `wiki_url` | 二选一 | 单节点任务的根节点 URL。`task_hash = hex(sha256(wiki_url))` 由此派生（任务身份，不随目录移动变） |
+| `space_id` | 二选一 | space 任务：整个知识库的 space_id。`task_hash = hex(sha256("space:"+space_id))`；`wiki_url` 此时可选（仅用于节点 URL 的 host 与标识） |
 | `local_dir` | 是 | 本地保存目录（对应旧命令的 `-o <dir>`） |
 | `assets_dir` | 否 | 图片资源目录，默认 `<local_dir>/assets` |
 | `include_types` | 否 | 导出类型，默认 `docx, sheet`（watch 只对 `docx` 订阅/重导） |
 | `debounce` | 否 | 事件聚合窗口，默认 `10s` |
+
+> `wiki_url` 与 `space_id` 二选一：填 `wiki_url` = 单节点任务；填 `space_id` = 整库任务。
+> space 任务的目录布局为**按结构嵌套**：顶层叶子 → `<local_dir>/<标题>.md`；顶层有子节点的 →
+> `<local_dir>/<标题>/<标题>.md`（其子文档挂在该子目录下）。`reconcile` 对 space 任务同样生效。
 
 > `local_dir` / `assets_dir` 支持 `~/`（如 `~/Documents/seer_docs/...`），会在解析时展开为
 > 用户主目录，避免被当作字面量目录名。也可以直接用绝对路径（`/home/<user>/...`）或相对路径。
@@ -108,7 +120,7 @@ feishu-cli wiki sync reconcile --config scripts/wiki-sync.yaml --since today
 # 显式基线：--since <unix秒> | <RFC3339> | now（全量）
 ```
 每次成功对账后会把**该任务**的下次基线写回（`~/.feishu-cli/state/wiki-sync/tasks/<task_hash>/last-reconcile.json`）。
-基线目录按**任务身份**（`local_dir + wiki_url`）派生，与配置文件哈希**解耦**：改 `clean`、加注释、改其它字段都**不会**重置基线、触发全量；只有真正换任务（`wiki_url` 或 `local_dir` 变）才需要重来。`<task_hash> = hex(sha256(local_dir + "\x00" + hex(sha256(wiki_url))))`。
+基线目录按**任务身份**（`local_dir + task_identity`）派生，与配置文件哈希**解耦**：改 `clean`、加注释、改其它字段都**不会**重置基线、触发全量；只有真正换任务（`wiki_url` / `space_id` 或 `local_dir` 变）才需要重来。`task_identity` = 单节点任务的 `wiki_url`，或 space 任务的 `"space:"+space_id`；`<task_hash> = hex(sha256(local_dir + "\x00" + hex(sha256(task_identity))))`。
 
 > ⚠ **首次运行会全量重导，属正常引导**：没有基线时 `cutoff=0`，所有节点都被视作"变更"全量重导。
 > 这不是异常，也顺便把空 `obj_edit_time` 索引补全。若想跳过首次全量，可先

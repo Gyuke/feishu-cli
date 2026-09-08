@@ -93,6 +93,14 @@ queries:
   - name: b
     wiki_url: "https://e.feishu.cn/wiki/SAME"
     local_dir: "./x"`, "重复"},
+		{"space 任务同目录重复", `
+queries:
+  - name: a
+    space_id: "7349730005238317084"
+    local_dir: "./x"
+  - name: b
+    space_id: "7349730005238317084"
+    local_dir: "./x"`, "重复"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,6 +125,43 @@ func TestQueryIncludesType(t *testing.T) {
 	}
 	if !q.IncludesType("DOCX") {
 		t.Error("大小写不同也应命中")
+	}
+}
+
+func TestParseConfigSpaceTask(t *testing.T) {
+	// space 任务只填 space_id，wiki_url 可省略（生成节点 URL 时回退 feishu.cn）。
+	cfg, err := ParseConfig([]byte(`
+queries:
+  - name: "整库"
+    space_id: "7349730005238317084"
+    local_dir: "./docs/whole"
+`))
+	if err != nil {
+		t.Fatalf("space 任务应能解析: %v", err)
+	}
+	q := cfg.Queries[0]
+	if q.SpaceID != "7349730005238317084" {
+		t.Errorf("SpaceID 应保留，得到 %q", q.SpaceID)
+	}
+	if got := q.TaskIdentity(); got != "space:7349730005238317084" {
+		t.Errorf("TaskIdentity() 期望 space:7349730005238317084，得到 %q", got)
+	}
+	if got := q.TaskID(); got != TaskIDForSpace("7349730005238317084") {
+		t.Errorf("TaskID() 应等于 TaskIDForSpace，得到 %q", got)
+	}
+}
+
+func TestQueryTaskIdentity(t *testing.T) {
+	node := Query{WikiURL: "https://e.feishu.cn/wiki/A"}
+	if node.TaskIdentity() != "https://e.feishu.cn/wiki/A" {
+		t.Errorf("单节点任务 TaskIdentity 应为 wiki_url，得到 %q", node.TaskIdentity())
+	}
+	space := Query{SpaceID: "123"}
+	if space.TaskIdentity() != "space:123" {
+		t.Errorf("space 任务 TaskIdentity 应为 space:123，得到 %q", space.TaskIdentity())
+	}
+	if space.TaskID() != TaskIDForSpace("123") {
+		t.Errorf("space 任务 TaskID 应等于 TaskIDForSpace，得到 %q", space.TaskID())
 	}
 }
 

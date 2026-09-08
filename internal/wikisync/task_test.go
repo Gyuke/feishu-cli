@@ -32,3 +32,19 @@ func TestTaskIDDiffersForDifferentURLs(t *testing.T) {
 		t.Fatal("不同 wiki_url 应产生不同 TaskID")
 	}
 }
+
+func TestTaskIDForSpaceStableAndKnown(t *testing.T) {
+	// 锁定一个已知值，防止 space 身份哈希规则悄悄变化破坏 space 任务 manifest 路径的文件名兼容。
+	const want = "c1aaf1d2735e4e6839bdcc9cdd1c8e7a9f1bdde34d674256ae8aae0407f17bf4"
+	got := TaskIDForSpace("ABC123")
+	if got != want {
+		t.Fatalf("TaskIDForSpace 期望 %s，得到 %s（稳定值变更会破坏 space 任务 manifest 路径）", want, got)
+	}
+}
+
+func TestTaskIDForSpaceIsolatedFromWikiURL(t *testing.T) {
+	// space 身份带 "space:" 前缀，避免与同字符串的 wiki_url 语义撞出相同 ID。
+	if TaskIDForSpace("https://example.feishu.cn/wiki/A") == TaskID("https://example.feishu.cn/wiki/A") {
+		t.Fatal("space 身份与 wiki_url 身份应产生不同 TaskID")
+	}
+}

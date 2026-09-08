@@ -35,7 +35,7 @@ var wikiSyncReconcileCmd = &cobra.Command{
   - --since <unix秒>      ：以上次成功时间戳为界。
   - --since <RFC3339>     ：如 2026-08-25T09:00:00+08:00。
 
-每次成功对账后会把「本次结束时刻」写回基线，下次增量基于它。产物、索引、manifest、legacy map
+每次成功对账后会把「本次结束时刻」写回基线，下次增量基于它。产物、索引、manifest
 的写法与 pull 完全一致，保证目录下各 artifact 保持同步。`,
 	RunE: runWikiSyncReconcile,
 }
@@ -134,20 +134,16 @@ type reconcileQueryResult struct {
 
 // reconcileOneQuery 处理单个 query：枚举 + 与索引基线比对 + 定向重导变更节点 + 写回 artifact。
 func reconcileOneQuery(q *wikisync.Query, userAccessToken string, cutoff int64, dryRun bool) (*reconcileQueryResult, error) {
-	rootToken, err := extractWikiToken(q.WikiURL)
-	if err != nil {
-		return nil, err
-	}
 	if err := validateOutputPath(q.LocalDir, ""); err != nil {
 		return nil, fmt.Errorf("输出目录不安全: %w", err)
 	}
 	exportCmd := exportCmdForQuery(q)
 
-	root, err := client.GetWikiNode(rootToken, userAccessToken)
+	roots, err := resolveQueryRoots(q, userAccessToken)
 	if err != nil {
-		return nil, fmt.Errorf("获取根节点失败: %w", err)
+		return nil, err
 	}
-	jobs, err := collectWikiTree(root, q.LocalDir, 0, userAccessToken)
+	jobs, err := collectWikiForest(roots, q.LocalDir, 0, userAccessToken)
 	if err != nil {
 		return nil, fmt.Errorf("收集子树失败: %w", err)
 	}
@@ -172,7 +168,7 @@ func reconcileOneQuery(q *wikisync.Query, userAccessToken string, cutoff int64, 
 	// 旧 manifest 文件集合（相对 local_dir 的 / 分隔路径）：与后续「权威活集」做差，
 	// 识别移动/重命名/删除后遗留的孤儿文件（旧 .md 或旧 assets）。
 	oldManifestFiles := map[string]bool{}
-	if manifest, merr := wikisync.LoadManifest(q.WikiURL, q.LocalDir); merr == nil && manifest != nil {
+	if manifest, merr := wikisync.LoadManifest(q.TaskIdentity(), q.LocalDir); merr == nil && manifest != nil {
 		for _, f := range manifest.Files {
 			if f != "" {
 				oldManifestFiles[f] = true

@@ -156,7 +156,7 @@ func runWikiSyncStatus(cmd *cobra.Command, _ []string) error {
 func buildQueryStatus(q *wikisync.Query) wikiSyncQueryStatusRow {
 	row := wikiSyncQueryStatusRow{
 		QueryName:    q.Name,
-		WikiURL:      q.WikiURL,
+		WikiURL:      q.DisplayRef(),
 		LocalDir:     q.LocalDir,
 		Clean:        q.Clean,
 		IncludeTypes: q.IncludeTypes,
@@ -185,7 +185,7 @@ func buildQueryStatus(q *wikisync.Query) wikiSyncQueryStatusRow {
 	}
 
 	// manifest
-	if m, merr := wikisync.LoadManifest(q.WikiURL, q.LocalDir); merr == nil && m != nil {
+	if m, merr := wikisync.LoadManifest(q.TaskIdentity(), q.LocalDir); merr == nil && m != nil {
 		row.Manifest.TotalFiles = len(m.Files)
 		for _, f := range m.Files {
 			if strings.HasSuffix(strings.ToLower(f), ".md") {

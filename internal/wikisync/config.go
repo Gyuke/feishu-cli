@@ -21,10 +21,16 @@ type Options struct {
 	Conflict        string   `yaml:"conflict"`
 }
 
-// Query 描述一个知识库同步任务（一个 wiki_url 到 local_dir 的镜像）。
+// Query 描述一个知识库同步任务（一个 wiki_url 或 space_id 到 local_dir 的镜像）。
+//
+// 两种任务形式（二选一）：
+//   - 单节点任务：填 wiki_url（某节点 URL），拉取该节点子树；
+//   - space 任务：填 space_id（整个知识库），枚举 space 全部顶层节点并镜像整库。
+//     space 任务的 wiki_url 可选：提供时用于生成节点 URL 的 host 与人类可读标识。
 type Query struct {
 	Name           string   `yaml:"name"`
 	WikiURL        string   `yaml:"wiki_url"`
+	SpaceID        string   `yaml:"space_id"`
 	LocalDir       string   `yaml:"local_dir"`
 	AssetsDir      string   `yaml:"assets_dir"`
 	IncludeTypes   []string `yaml:"include_types"`
@@ -80,6 +86,7 @@ func (c *Config) normalizeDefaults() {
 			q.Name = fmt.Sprintf("query-%d", i+1)
 		}
 		q.WikiURL = strings.TrimSpace(q.WikiURL)
+		q.SpaceID = strings.TrimSpace(q.SpaceID)
 		q.LocalDir = ExpandTilde(strings.TrimSpace(q.LocalDir))
 
 		// assets_dir 是 query 级别字段，默认 local_dir/assets（options 层不提供）。
@@ -147,8 +154,8 @@ func (c *Config) Validate() error {
 	seen := make(map[string]bool)
 	for i := range c.Queries {
 		q := &c.Queries[i]
-		if q.WikiURL == "" {
-			return fmt.Errorf("queries[%d].wiki_url 必须填写", i)
+		if q.WikiURL == "" && q.SpaceID == "" {
+			return fmt.Errorf("queries[%d].wiki_url 或 space_id 必须填写其一（单节点任务填 wiki_url，整库任务填 space_id）", i)
 		}
 		if q.LocalDir == "" {
 			return fmt.Errorf("queries[%d].local_dir 必须填写", i)
@@ -158,19 +165,39 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("queries[%d].conflict 必须是 fail、skip 或 overwrite（当前：%q）", i, q.Conflict)
 		}
-		// 同 local_dir 下不允许重复的 wiki_url（任务身份唯一）；不同 local_dir 可重复。
-		key := q.LocalDir + "\x00" + TaskID(q.WikiURL)
+		// 同 local_dir 下不允许重复的任务身份（wiki_url/space_id）；不同 local_dir 可重复。
+		key := q.LocalDir + "\x00" + q.TaskID()
 		if seen[key] {
-			return fmt.Errorf("queries[%d] 与其它 query 重复：同一 local_dir 下 wiki_url 重复（%s）", i, q.WikiURL)
+			return fmt.Errorf("queries[%d] 与其它 query 重复：同一 local_dir 下任务身份重复（%s）", i, q.DisplayRef())
 		}
 		seen[key] = true
 	}
 	return nil
 }
 
-// TaskID 计算任务的稳定身份标识（见 task.go）。
+// TaskID 计算任务的稳定身份标识（见 task.go）。space 任务用 space_id，单节点任务用 wiki_url。
 func (q *Query) TaskID() string {
-	return TaskID(q.WikiURL)
+	return TaskID(q.TaskIdentity())
+}
+
+// TaskIdentity 返回任务的稳定身份字符串（TaskID 的哈希输入）：space 任务为 "space:"+SpaceID，
+// 单节点任务为 WikiURL。目录移动、进程重启后身份不变；用于 manifest 文件名、对账基线目录、索引去重。
+func (q *Query) TaskIdentity() string {
+	if q.SpaceID != "" {
+		return "space:" + q.SpaceID
+	}
+	return q.WikiURL
+}
+
+// DisplayRef 返回任务的人类可读标识，用于日志/status 展示（不参与身份哈希）。
+func (q *Query) DisplayRef() string {
+	if q.Name != "" {
+		return q.Name
+	}
+	if q.WikiURL != "" {
+		return q.WikiURL
+	}
+	return "space " + q.SpaceID
 }
 
 // IndexFilePath 返回该 query 的合并索引路径（相对 local_dir）。

@@ -38,8 +38,9 @@ func SaveManifest(m *Manifest) error {
 }
 
 // LoadManifest 读取单任务 manifest。
-func LoadManifest(wikiURL, localDir string) (*Manifest, error) {
-	m := &Manifest{TaskID: TaskID(wikiURL), WikiURL: wikiURL, LocalDir: localDir}
+// identity 是任务的稳定身份字符串（TaskID 的哈希输入）：单节点任务传 wiki_url，space 任务传 "space:"+space_id。
+func LoadManifest(identity, localDir string) (*Manifest, error) {
+	m := &Manifest{TaskID: TaskID(identity), WikiURL: identity, LocalDir: localDir}
 	data, err := os.ReadFile(m.ManifestPath())
 	if err != nil {
 		if os.IsNotExist(err) {

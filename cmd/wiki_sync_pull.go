@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/riba2534/feishu-cli/internal/client"
 	"github.com/riba2534/feishu-cli/internal/wikisync"
 	"github.com/spf13/cobra"
 )
@@ -77,10 +76,6 @@ type pullQueryResult struct {
 // pullOneQuery 处理单个 query：遍历 + 导出 + 写索引/manifest/legacy map。
 // 复用 export_tree.go 同包函数，避免重复实现遍历与转换逻辑。
 func pullOneQuery(q *wikisync.Query, userAccessToken string, dryRun bool) (*pullQueryResult, error) {
-	rootToken, err := extractWikiToken(q.WikiURL)
-	if err != nil {
-		return nil, err
-	}
 	if err := validateOutputPath(q.LocalDir, ""); err != nil {
 		return nil, fmt.Errorf("输出目录不安全: %w", err)
 	}
@@ -89,17 +84,17 @@ func pullOneQuery(q *wikisync.Query, userAccessToken string, dryRun bool) (*pull
 	exportCmd := exportCmdForQuery(q)
 
 	if dryRun {
-		fmt.Printf("[wiki-sync] (dry-run) 将导出 %s → %s（include: %v）\n", q.WikiURL, q.LocalDir, q.IncludeTypes)
+		fmt.Printf("[wiki-sync] (dry-run) 将导出 %s → %s（include: %v）\n", q.DisplayRef(), q.LocalDir, q.IncludeTypes)
 		return &pullQueryResult{QueryName: q.Name}, nil
 	}
 
-	fmt.Printf("[wiki-sync] 解析根节点 %s\n", rootToken)
-	root, err := client.GetWikiNode(rootToken, userAccessToken)
+	roots, err := resolveQueryRoots(q, userAccessToken)
 	if err != nil {
-		return nil, fmt.Errorf("获取根节点失败: %w", err)
+		return nil, err
 	}
+	fmt.Printf("[wiki-sync] 解析入口: %s（%d 个根节点）\n", q.DisplayRef(), len(roots))
 
-	jobs, err := collectWikiTree(root, q.LocalDir, 0, userAccessToken)
+	jobs, err := collectWikiForest(roots, q.LocalDir, 0, userAccessToken)
 	if err != nil {
 		return nil, fmt.Errorf("收集子树失败: %w", err)
 	}

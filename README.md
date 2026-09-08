@@ -132,7 +132,7 @@ feishu-cli doc import large-doc.md --title "大文档" \
 
 仓库已内置配置好的 `scripts/wiki-sync.yaml`，可直接使用。
 
-一个 `queries` 项 = **一个 `wiki_url` → 一个本地目录**。
+一个 `queries` 项 = **一个 `wiki_url`（单节点子树）或 `space_id`（整个知识库）→ 一个本地目录**。
 
 ```bash
 feishu-cli wiki sync pull      --config ~/.feishu-cli/wiki-sync.yaml   # ① 全量拉取（生成 Markdown + 索引 + manifest）
@@ -152,10 +152,20 @@ options:
   include_types: [docx, sheet]
 
 queries:
+  # ① 单节点任务：拉取某节点子树（根节点 URL）
   - name: "SOP 文档"
-    wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"   # 根节点 URL（必填）
+    wiki_url: "https://example.feishu.cn/wiki/WIKI_NODE_TOKEN"   # 根节点 URL（二选一，见下）
     local_dir: "./doc_sop"                                        # 保存目录（必填，对应旧命令 -o <dir>）
+  # ② space 任务：拉取整个知识库（枚举 space 全部顶层节点并镜像整库，目录按结构嵌套）
+  - name: "FAQ 帮助中心"
+    space_id: "7349730005238317084"                              # 知识库 space_id（二选一，见下）
+    local_dir: "./docs/faq"
+    # wiki_url: "https://seer-group.feishu.cn/wiki/<任一篇>"     # 可选：用于节点 URL 的 host 与标识；省略回退 feishu.cn
 ```
+
+`wiki_url` 与 `space_id` **二选一**：单节点任务填 `wiki_url`（拉该节点子树）；整库任务填
+`space_id`（枚举 space 全部顶层节点并镜像整库，目录按结构嵌套，`reconcile` / `watch` / `subscribe` / `status`
+同样生效）。
 
 **变更→重导的两条路径定位不同**：
 
@@ -172,9 +182,10 @@ queries:
 
 **任务身份与配置哈希解耦**：对账基线存于
 `~/.feishu-cli/state/wiki-sync/tasks/<task_hash>/last-reconcile.json`，
-`<task_hash> = hex(sha256(local_dir + "\x00" + hex(sha256(wiki_url))))`——只跟 `local_dir + wiki_url`
-绑定，与配置文件哈希**解耦**：改 `clean`、加注释等都不重置基线、不触发全量重建；只有真正换任务
-（`wiki_url` 或 `local_dir` 变）才需要重新全量。`local_dir` / `assets_dir` 支持 `~/`，会展开为用户主目录，
+`<task_hash> = hex(sha256(local_dir + "\x00" + hex(sha256(task_identity))))`——只跟 `local_dir + task_identity`
+绑定（`task_identity` = 单节点任务的 `wiki_url`，或 space 任务的 `"space:"+space_id`），与配置文件哈希**解耦**：
+改 `clean`、加注释等都不重置基线、不触发全量重建；只有真正换任务
+（`wiki_url` / `space_id` 或 `local_dir` 变）才需要重新全量。`local_dir` / `assets_dir` 支持 `~/`，会展开为用户主目录，
 所以 `~/Documents/...` 与 `/home/<user>/Documents/...` 指向同一任务、不触发重建。
 
 > `watch` 需要文档**拥有者**的 User Token（订阅与读取文档都需要）；`subscribe --verify` 会先回查
